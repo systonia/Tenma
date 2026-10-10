@@ -1,0 +1,4 @@
+php-*/
+php-*.tar.xz
+out/
+build.log

@@ -1,0 +1,801 @@
+//! Starts the binary with a script and sends real HTTP requests.
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
+
+struct Server(Child);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+    }
+}
+
+fn get(port: u16, path: &str) -> String {
+    request(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+}
+
+fn request(port: u16, raw: &str) -> String {
+    let started = Instant::now();
+    let mut stream = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(_) if started.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => panic!("server does not respond: {error}"),
+        }
+    };
+    stream.write_all(raw.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn serves_requests_and_survives_exceptions() {
+    let port = 18_080;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/hello.php").env("PORT", port.to_string()).spawn().unwrap());
+
+    assert!(get(port, "/world").ends_with("Hello GET /world\n"));
+    assert!(get(port, "/boom").starts_with("HTTP/1.1 500"));
+    assert!(get(port, "/").starts_with("HTTP/1.1 200"));
+
+    // A handler without a response only ends its request, the worker keeps running
+    let before = get(port, "/count");
+    assert!(get(port, "/null").starts_with("HTTP/1.1 500"));
+    let after = get(port, "/count");
+    let number = |response: &str| response.trim_end().rsplit(' ').next().unwrap().parse::<u32>().unwrap();
+    assert_eq!(number(&after), number(&before) + 2, "no restart: {before} / {after}");
+}
+
+#[test]
+fn async_calls_outside_a_handler() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/top_level_op.php").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "rejected\n");
+}
+
+#[test]
+fn classic_code_with_superglobals_header_and_echo() {
+    let port = 18_081;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/classic.php").env("PORT", port.to_string()).spawn().unwrap());
+
+    let first = request(port, "GET /?name=world HTTP/1.1\r\nHost: localhost\r\nCookie: session=abc\r\nConnection: close\r\n\r\n");
+    assert!(first.starts_with("HTTP/1.1 200"), "{first}");
+    assert!(first.contains("x-count: 1"));
+    assert!(first.contains("set-cookie: a=1") && first.contains("set-cookie: b=2"));
+    assert!(first.ends_with("GET world abc"));
+
+    // Headers and status of the first request do not stick to the second, the state in the process does
+    let second = get(port, "/?name=x&missing=1");
+    assert!(second.starts_with("HTTP/1.1 404"), "{second}");
+    assert!(second.contains("x-count: 2"));
+    assert_eq!(second.matches("set-cookie").count(), 2);
+}
+
+#[test]
+fn fibers_wait_without_blocking_the_server() {
+    let port = 18_082;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/async.php").env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/");
+
+    // Ten requests that each sleep half a second are done together after just over half a second
+    let started = Instant::now();
+    let sleepers: Vec<_> = (0..10).map(|_| std::thread::spawn(move || get(port, "/slow"))).collect();
+    for sleeper in sleepers {
+        assert!(sleeper.join().unwrap().ends_with("slept enough\n"));
+    }
+    assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+
+    assert!(get(port, "/proxy").ends_with("proxy: hello\n"));
+
+    // Tenma::all: three waits run at the same time, not one after another
+    let started = Instant::now();
+    assert!(get(port, "/all").ends_with("{\"a\":\"one\",\"b\":\"two\",\"c\":\"three\"}\n"));
+    assert!(started.elapsed() < Duration::from_millis(600), "{:?}", started.elapsed());
+    assert!(get(port, "/all-error").ends_with("caught: broken\n"));
+    // The interval from the script's startup keeps running next to the requests
+    let ticks = |response: String| response.trim_end().rsplit(' ').next().unwrap().parse::<u32>().unwrap();
+    let before = ticks(get(port, "/ticks"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(ticks(get(port, "/ticks")) >= before + 4);
+    let started = Instant::now();
+    assert!(get(port, "/exit-task").starts_with("HTTP/1.1 500"));
+    assert!(get(port, "/self-await").ends_with("rejected\n"));
+    assert!(get(port, "/all-fast").ends_with("failed fast\n"));
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    assert!(get(port, "/cancel-race").ends_with("b cancelled\n"));
+    assert!(get(port, "/cancel-all").ends_with("children cancelled\n"));
+    assert!(get(port, "/nested").ends_with("[\"hello\\n\",\"inner\"]\n"));
+    assert!(get(port, "/unreachable").starts_with("HTTP/1.1 500"));
+    let started = Instant::now();
+    assert!(get(port, "/fetch-timeout").ends_with("timeout\n"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(get(port, "/").ends_with("hello\n"));
+}
+
+#[test]
+fn several_workers_with_their_own_state() {
+    let port = 18_083;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--workers", "3", "tests/fixtures/classic.php"]).env("PORT", port.to_string()).spawn().unwrap());
+
+    // Round robin: each of the three workers counts for itself, so 1, 2 and 3 twice
+    let mut counts: Vec<String> = (0..6)
+        .map(|_| {
+            let response = get(port, "/?name=x");
+            response.lines().find_map(|line| line.strip_prefix("x-count: ")).unwrap().to_owned()
+        })
+        .collect();
+    counts.sort();
+    assert_eq!(counts, ["1", "1", "1", "2", "2", "2"]);
+}
+
+fn post(port: u16, path: &str, body: &str) -> String {
+    request(port, &format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
+}
+
+#[test]
+fn fatal_error_restarts_only_the_worker() {
+    let port = 18_084;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/fatal.php").env("PORT", port.to_string()).spawn().unwrap());
+
+    assert!(get(port, "/").ends_with("request 1\n"));
+    assert!(get(port, "/oom").starts_with("HTTP/1.1 500"));
+    // New interpreter, script ran again: the counter starts over
+    assert!(get(port, "/").ends_with("request 1\n"));
+}
+
+#[test]
+fn limits_for_body_and_requests_per_worker() {
+    let port = 18_085;
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args(["--max-body", "1k", "--max-requests", "2", "tests/fixtures/fatal.php"])
+            .env("PORT", port.to_string())
+            .spawn()
+            .unwrap(),
+    );
+
+    // Two requests per interpreter, then the worker restarts
+    let counts: Vec<bool> = (0..4).map(|_| get(port, "/").ends_with("request 1\n")).collect();
+    assert_eq!(counts, [true, false, true, false]);
+
+    assert!(post(port, "/upload", &"x".repeat(1024)).ends_with("1024\n"));
+    assert!(post(port, "/upload", &"x".repeat(1025)).starts_with("HTTP/1.1 413"));
+}
+
+#[test]
+fn sigterm_lets_running_requests_finish() {
+    let port = 18_086;
+    let server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/fatal.php").env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/");
+
+    let slow = std::thread::spawn(move || get(port, "/slow"));
+    std::thread::sleep(Duration::from_millis(150));
+    Command::new("kill").args(["-TERM", &server.0.id().to_string()]).status().unwrap();
+    assert!(slow.join().unwrap().ends_with("slept enough\n"));
+}
+
+#[test]
+fn classic_with_input_uploads_and_exit() {
+    let port = 18_087;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/classic_io.php").env("PORT", port.to_string()).spawn().unwrap());
+
+    assert!(post(port, "/input", "raw body").ends_with("input: raw body"));
+
+    let boundary = "tenmaboundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nImage\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nHello Mars\r\n\
+         --{boundary}--\r\n"
+    );
+    let upload = request(
+        port,
+        &format!("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()),
+    );
+    assert!(upload.ends_with("Image hello.txt 10 Hello Mars"), "{upload}");
+
+    let exited = get(port, "/exit");
+    assert!(exited.starts_with("HTTP/1.1 200") && exited.contains("x-before-exit: yes") && exited.ends_with("before exit"), "{exited}");
+    assert!(get(port, "/flush-all").ends_with("\r\n\r\nabc"));
+    assert!(get(port, "/async").ends_with("\r\n\r\nrejected async too"));
+    assert!(get(port, "/locked-buffer").ends_with("\r\n\r\ninside outside"));
+    let warned = get(port, "/warn");
+    assert!(warned.ends_with("\r\n\r\nonly this"), "{warned}");
+    assert!(get(port, "/").ends_with("ok"));
+}
+
+#[test]
+fn sessions_per_visitor_without_leaks() {
+    let port = 18_088;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/session.php").env("PORT", port.to_string()).spawn().unwrap());
+
+    let first = get(port, "/");
+    assert!(first.ends_with("visit 1"), "{first}");
+    let cookie = first.lines().find_map(|line| line.strip_prefix("set-cookie: ")).expect("session cookie missing");
+    let cookie = cookie.split(';').next().unwrap();
+
+    let with_cookie = |path: &str| request(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n"));
+    assert!(with_cookie("/").ends_with("visit 2"));
+    assert!(with_cookie("/").ends_with("visit 3"));
+
+    // A new visitor gets neither the ID nor the data of the previous one
+    assert!(get(port, "/peek").ends_with("empty"));
+    let stranger = get(port, "/");
+    assert!(stranger.ends_with("visit 1"), "{stranger}");
+    assert!(!stranger.contains(cookie));
+}
+
+#[test]
+fn built_in_extensions_work() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/extensions.php").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn streaming_sse_und_websockets() {
+    use tokio_tungstenite::tungstenite::{Message, connect};
+
+    let port = 18_089;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/streams.php").env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/");
+
+    // The first word arrives at once, not only when the handler is done after 0.6 s
+    let started = Instant::now();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(stream, "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    let mut first = [0; 512];
+    let read = stream.read(&mut first).unwrap();
+    assert!(String::from_utf8_lossy(&first[..read]).contains("one"));
+    assert!(started.elapsed() < Duration::from_millis(150), "{:?}", started.elapsed());
+    let mut rest = String::new();
+    stream.read_to_string(&mut rest).unwrap();
+    assert!(rest.contains("two") && rest.contains("three"));
+
+    let events = get(port, "/events");
+    assert!(events.contains("content-type: text/event-stream"));
+    assert!(events.contains("id: 1\nevent: greeting\ndata: hello\n\n"));
+    assert!(events.contains("data: two\ndata: lines\n\n"));
+
+    // If the client leaves, the handler notices on its next write
+    let mut forever = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(forever, "GET /forever HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    forever.read_exact(&mut [0; 4096]).unwrap();
+    drop(forever);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(get(port, "/closed").ends_with("closed"));
+
+    // exit() in the stream: the client gets what was already written, and the connection ends
+    let exited = get(port, "/exit-stream");
+    assert!(exited.contains("before exit"), "{exited}");
+
+    let (mut socket, _) = connect(format!("ws://127.0.0.1:{port}/ws")).unwrap();
+    for word in ["hello", "world"] {
+        socket.send(Message::text(word)).unwrap();
+        assert_eq!(socket.read().unwrap(), Message::text(format!("echo: {word}")));
+    }
+    socket.close(None).unwrap();
+    assert!(get(port, "/").ends_with("ok"));
+
+    // 300 messages to a handler that never reads: tenma disconnects after 256, long before the handler ends
+    let started = Instant::now();
+    let (mut flood, _) = connect(format!("ws://127.0.0.1:{port}/ws-ignore")).unwrap();
+    for _ in 0..300 {
+        if flood.send(Message::text("flood")).is_err() {
+            break;
+        }
+    }
+    loop {
+        match flood.read() {
+            Ok(Message::Close(frame)) => {
+                assert!(frame.is_some_and(|frame| frame.reason.contains("Too many unread messages")));
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+}
+
+#[test]
+fn postgres_and_redis_async() {
+    let port = 18_090;
+    let user = std::env::var("USER").unwrap();
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .arg("tests/fixtures/db.php")
+            .env("PORT", port.to_string())
+            .env("DATABASE_URL", std::env::var("DATABASE_URL").unwrap_or(format!("postgres://{user}@localhost/postgres")))
+            .env("REDIS_URL", std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()))
+            .spawn()
+            .unwrap(),
+    );
+    if !get(port, "/setup").starts_with("HTTP/1.1 200") {
+        eprintln!("no Postgres reachable, test skipped");
+        return;
+    }
+
+    let inserted = get(port, "/insert?name=first");
+    assert!(inserted.contains(r#""name": "first""#) && inserted.contains(r#""amount": 42"#) && inserted.contains(r#""price": 9.99"#), "{inserted}");
+    assert!(inserted.contains(r#""tags": ["#) && inserted.contains(r#""created": ""#), "{inserted}");
+    assert!(get(port, "/list").contains(r#""name": "first""#));
+    assert!(get(port, "/rollback").contains(r#""n": 0"#));
+    assert!(get(port, "/commit").ends_with("1\n"));
+    assert!(get(port, "/error").contains("does_not_exist"));
+    let started = Instant::now();
+    let all_tx = get(port, "/all-tx");
+    assert!(all_tx.contains("caught: on purpose"), "{all_tx}");
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    let ordered = get(port, "/comment");
+    assert!(ordered.contains("[\n    5,\n    4,\n    3,\n    2,\n    1\n]"), "{ordered}");
+
+    // Ten queries with half a second of waiting each run at the same time, the worker does not block
+    let started = Instant::now();
+    let sleepers: Vec<_> = (0..10).map(|_| std::thread::spawn(move || get(port, "/slow"))).collect();
+    for sleeper in sleepers {
+        assert!(sleeper.join().unwrap().contains("slept"));
+    }
+    assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+
+    let redis = get(port, "/redis");
+    assert!(redis.contains(r#""value""#) && redis.contains("1,\n"), "{redis}");
+    assert!(get(port, "/drop").starts_with("HTTP/1.1 200"));
+}
+
+#[test]
+fn standard_streams_like_in_the_cli() {
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/cli.php").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "to stdout\ninput: hello\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "to stderr\n");
+}
+
+#[test]
+fn arguments_like_in_the_cli() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["tests/fixtures/args.php", "import", "--force", "-w"]).output().unwrap();
+    let argv = r#"["tests\/fixtures\/args.php","import","--force","-w"]"#;
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), format!("[{argv},4,{argv},4,\"import\"]"));
+}
+
+#[test]
+fn settings_with_minus_d_and_php_ini() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
+        .args(["-c", "tests/fixtures/php.ini", "-d", "memory_limit=256M", "-ddate.timezone=Europe/Berlin", "tests/fixtures/ini.php"])
+        .output()
+        .unwrap();
+    // -d wins over the php.ini, values only from the php.ini stay, and so do tenma's own defaults
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), r#"["256M","Europe\/Berlin","7","0"]"#);
+}
+
+#[test]
+fn server_variables_and_addresses() {
+    let port = 18_091;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/server_vars.php").env("PORT", port.to_string()).spawn().unwrap());
+
+    let classic = request(port, &format!("GET / HTTP/1.1\r\nHost: example.test:{port}\r\nConnection: close\r\n\r\n"));
+    let root = std::fs::canonicalize("tests/fixtures").unwrap();
+    let expected = format!(
+        r#"{{"REMOTE_ADDR":"127.0.0.1","SERVER_ADDR":"127.0.0.1","SERVER_PORT":"{port}","SERVER_NAME":"localhost","REQUEST_SCHEME":"http","SCRIPT_NAME":"\/server_vars.php","PHP_SELF":"\/server_vars.php","DOCUMENT_ROOT":"{}","remote_port":true}}"#,
+        root.display().to_string().replace('/', "\\/")
+    );
+    assert!(classic.ends_with(&expected), "{classic}");
+    assert!(get(port + 1, "/").ends_with(&format!("127.0.0.1 {} localhost", port + 1)));
+}
+
+#[test]
+fn shutdown_functions_per_request() {
+    use std::process::Stdio;
+
+    let port = 18_093;
+    let server = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/shutdown.php").env("PORT", port.to_string()).stdout(Stdio::piped()).spawn().unwrap();
+    // If a check fails, no server may be left behind on the port
+    struct KillOnDrop(u32);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = Command::new("kill").args(["-KILL", &self.0.to_string()]).status();
+        }
+    }
+    let guard = KillOnDrop(server.id());
+
+    // Exactly once per request, also after exit() in the request and exit() in the shutdown function
+    for path in ["/", "/exit", "/exit-shutdown"] {
+        let response = get(port, path);
+        assert!(response.starts_with("HTTP/1.1 200") && response.ends_with("request after"), "{path}: {response}");
+    }
+    assert!(get(port, "/count").ends_with("\r\n\r\n4"), "no restart up to here");
+
+    // Exception in the shutdown function: fatal error like in PHP, response with 500, session closed, new worker
+    let thrown = get(port, "/throw-shutdown");
+    assert!(thrown.starts_with("HTTP/1.1 500") && thrown.ends_with("request after"), "{thrown}");
+    assert!(get(port, "/peek").ends_with("empty"));
+    assert!(get(port, "/count").ends_with("\r\n\r\n2"), "new interpreter");
+
+    // Fatal error in the request: the shutdown function still delivers the error page
+    let fatal = get(port, "/fatal");
+    // What was already output stays, like under FPM without output_buffering
+    assert!(fatal.starts_with("HTTP/1.1 500") && fatal.ends_with("\r\n\r\nrequest after error page: fatal"), "{fatal}");
+    assert!(get(port, "/count").ends_with("\r\n\r\n1"));
+
+    let big = get(port, "/big-fatal");
+    assert!(big.starts_with("HTTP/1.1 500") && big.ends_with(&"x".repeat(3_000_000)), "{} bytes", big.len());
+    assert!(get(port, "/count").ends_with("\r\n\r\n1"));
+
+    let compile = get(port, "/compile-error");
+    assert!(compile.starts_with("HTTP/1.1 500") && compile.contains(" after trace "), "{compile}");
+    assert!(get(port, "/count").ends_with("\r\n\r\n1"));
+
+    // The function registered at startup never ran in a response, but at the end of every interpreter
+    Command::new("kill").args(["-TERM", &server.id().to_string()]).status().unwrap();
+    let output = server.wait_with_output().unwrap();
+    // Exited and reaped: the PID may now belong to another process
+    std::mem::forget(guard);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).matches("REGISTERED-AT-STARTUP").count(), 5);
+}
+
+#[test]
+fn classic_requests_leave_no_state() {
+    let port = 18_094;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/isolation.php").env("PORT", port.to_string()).spawn().unwrap());
+
+    assert!(post(port, "/set", "secret").ends_with("set"));
+    // ini_set and set_time_limit back to the state after startup, php://input handle closed
+    let after = post(port, "/", "from someone else");
+    assert!(after.ends_with("10 0 closed"), "{after}");
+}
+
+#[test]
+fn postgres_connections_come_back_clean() {
+    let port = 18_095;
+    let user = std::env::var("USER").unwrap();
+    // A pool with exactly one connection: the second request is sure to get the same one
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args(["--db-pool", "1", "tests/fixtures/db.php"])
+            .env("PORT", port.to_string())
+            .env("DATABASE_URL", std::env::var("DATABASE_URL").unwrap_or(format!("postgres://{user}@localhost/postgres")))
+            .env("REDIS_URL", std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()))
+            .spawn()
+            .unwrap(),
+    );
+    if !get(port, "/").starts_with("HTTP/1.1 200") || !get(port, "/whoami").starts_with("HTTP/1.1 200") {
+        eprintln!("no Postgres reachable, test skipped");
+        return;
+    }
+    // Redis connection gone: tenma rebuilds it on the next command instead of failing forever
+    get(port, "/redis-kill");
+    let pings: Vec<bool> = (0..3).map(|_| get(port, "/redis-ping").contains("PONG")).collect();
+    assert!(pings.ends_with(&[true]), "{pings:?}");
+
+    assert!(get(port, "/taint").starts_with("HTTP/1.1 200"));
+    // With only one connection in the pool everything would hang if exit() did not release it
+    assert!(get(port, "/exit-tx").starts_with("HTTP/1.1 500"));
+    assert!(get(port, "/cancel-tx").contains("cancelled"));
+    let whoami = get(port, "/whoami");
+    assert!(whoami.contains("\"name\": \"\""), "{whoami}");
+}
+
+#[test]
+fn classic_without_client_influence() {
+    let port = 18_096;
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--server-name", "app.example", "tests/fixtures/security.php"]).env("PORT", port.to_string()).spawn().unwrap(),
+    );
+    let body = "0=post&only_post=1";
+    let response = request(
+        port,
+        &format!(
+            "POST /?0=get&only_get=1 HTTP/1.1\r\nHost: evil.example\r\nCookie: sid=victim; sid=attacker; a[b]=1; x.y=2\r\n\
+             X-Forwarded-For: 10.0.0.1\r\nx_forwarded_for: 6.6.6.6\r\nContent-Type: application/x-www-form-urlencoded\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    // SERVER_NAME as configured, not from Host; the first cookie wins, names like under FPM;
+    // the header with an underscore is dropped; POST overrides GET without renumbering
+    let expected = r#"{"server_name":"app.example","host":"evil.example","cookies":{"sid":"victim","a":{"b":"1"},"x_y":"2"},"forwarded":"10.0.0.1","request":{"0":"post","only_get":"1","only_post":"1"}}"#;
+    assert!(response.ends_with(expected), "{response}");
+}
+
+#[test]
+fn slow_clients_are_disconnected() {
+    let port = 18_097;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--request-timeout", "0.5", "tests/fixtures/hello.php"]).env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/");
+
+    // Slowloris: the headers never arrive completely, tenma disconnects after the timeout
+    let started = Instant::now();
+    let mut slow = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    slow.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    write!(slow, "GET / HTTP/1.1\r\nHost: localhost\r\n").unwrap();
+    let mut rest = Vec::new();
+    let _ = slow.read_to_end(&mut rest);
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+
+    // The body arrives only halfway: 408
+    let started = Instant::now();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(stream, "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\nonly a part").unwrap();
+    let mut response = String::new();
+    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let _ = stream.read_to_string(&mut response);
+    assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn restarts_without_leaks_or_double_signals() {
+    use std::process::Stdio;
+
+    struct KillOnDrop(u32);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = Command::new("kill").args(["-KILL", &self.0.to_string()]).status();
+        }
+    }
+    let open_files = |pid: u32| String::from_utf8_lossy(&Command::new("lsof").args(["-p", &pid.to_string()]).output().unwrap().stdout).lines().count();
+
+    // One interpreter per request: 30 restarts must not cost file descriptors
+    let port = 18_098;
+    let restarting = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--max-requests", "1", "tests/fixtures/hello.php"]).env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/");
+    let before = open_files(restarting.0.id());
+    for _ in 0..30 {
+        get(port, "/");
+    }
+    let after = open_files(restarting.0.id());
+    assert!(after <= before + 2, "{before} -> {after}");
+
+    // Fatal error exactly on the max-requests request: one restart, not two
+    let port = 18_099;
+    let server = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--max-requests", "2", "tests/fixtures/fatal.php"]).env("PORT", port.to_string()).stdout(Stdio::piped()).spawn().unwrap();
+    let guard = KillOnDrop(server.id());
+    get(port, "/");
+    assert!(get(port, "/oom").starts_with("HTTP/1.1 500"));
+    assert!(get(port, "/").ends_with("request 1\n"));
+    assert!(get(port, "/").ends_with("request 2\n"));
+    Command::new("kill").args(["-TERM", &server.id().to_string()]).status().unwrap();
+    let output = server.wait_with_output().unwrap();
+    std::mem::forget(guard);
+    // Start, restart after the fatal error, restart after two more requests
+    assert_eq!(String::from_utf8_lossy(&output.stdout).matches("start\n").count(), 3);
+}
+
+#[test]
+fn nonsensical_options_are_rejected() {
+    for args in [["--max-body", "99999999999999999999g"], ["--max-body", "17179869184g"], ["--workers", "0"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(args).arg("tests/fixtures/hello.php").output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn timers_and_background_work_like_in_node() {
+    // A script without a server runs until nothing is pending, then tenma exits
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/timers.php").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "script done\nbackground done\nticks 3\nnested\n");
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+}
+
+#[test]
+fn exit_and_errors_outside_requests() {
+    let run = |script: &str| {
+        let started = Instant::now();
+        let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg(format!("tests/fixtures/scripts/{script}")).env("PORT", "18112").output().unwrap();
+        (output.status.code(), String::from_utf8_lossy(&output.stdout).into_owned(), started.elapsed())
+    };
+    let (code, _, took) = run("exit_in_timer.php");
+    assert_eq!(code, Some(3));
+    assert!(took < Duration::from_secs(2));
+    let (code, stdout, took) = run("die_at_start.php");
+    assert_eq!((code, stdout.as_str()), (Some(0), "Usage: die_at_start.php <file>\n"));
+    assert!(took < Duration::from_secs(1));
+    let (code, _, took) = run("fatal_in_background.php");
+    assert_eq!(code, Some(255));
+    assert!(took < Duration::from_secs(2));
+    let (code, _, took) = run("fatal_at_server_start.php");
+    assert_eq!(code, Some(255));
+    assert!(took < Duration::from_secs(2));
+    for _ in 0..8 {
+        assert_eq!(run("exit_async.php").0, Some(3));
+    }
+    let (code, stdout, _) = run("bad_delay.php");
+    assert_eq!((code, stdout.as_str()), (Some(0), "rejected\nrejected\nrejected\n"));
+}
+
+#[test]
+fn file_system_async() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/scripts/fs.php").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "[true,21,[\"a.txt\",\"sub\"],[\"c.txt\",\"dir\"],[21,true,false,true],true,false]\n\
+         2 with path\n17 with path\n22 with path 21\nbytes kept\nchdir applies\ncleaned up\n"
+    );
+    let allowed = format!("open_basedir={}/tests", env!("CARGO_MANIFEST_DIR"));
+    let basedir = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["-d", &allowed, "tests/fixtures/scripts/fs_basedir.php"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&basedir.stdout), "forbidden\n");
+}
+
+#[test]
+fn exit_status_is_not_stale() {
+    let port = 18_113;
+    let mut server = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/scripts/exit_status_stale.php").env("PORT", port.to_string()).spawn().unwrap();
+    assert!(get(port, "/exit5").starts_with("HTTP/1.1 500"));
+    assert!(get(port, "/").ends_with("ok\n"));
+    assert_eq!(server.wait().unwrap().code(), Some(0));
+}
+
+#[test]
+fn request_and_response_in_fiber_mode() {
+    let port = 18_114;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/request_response.php").env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/");
+    let send = |raw: String| request(port, &raw);
+
+    // Cookies like under FPM: the first one wins, names like a[b] and x.y are converted
+    let cookies = send("GET /cookies HTTP/1.1\r\nHost: x\r\nCookie: sid=first; sid=second; a[b]=1; x.y=2\r\nConnection: close\r\n\r\n".into());
+    assert!(cookies.contains("\"sid\": \"first\"") && cookies.contains("\"b\": \"1\"") && cookies.contains("\"x_y\": \"2\""), "{cookies}");
+
+    let urlencoded = "a=1&list[]=x&list[]=y&deep[k]=v";
+    let form = send(format!("POST /form HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{urlencoded}", urlencoded.len()));
+    assert!(form.contains("\"list\": [\n            \"x\",\n            \"y\"\n        ]") && form.contains("\"k\": \"v\""), "{form}");
+
+    // Multipart: fields with PHP's semantics, files with names without directory, several under name[]
+    let boundary = "boundary123";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nImage\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"tags[]\"\r\n\r\none\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"tags[]\"\r\n\r\ntwo\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"../../etc/hello.txt\"\r\nContent-Type: text/plain\r\n\r\nHello\r\nMars\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"many[]\"; filename=\"a.bin\"\r\n\r\nA\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"many[]\"; filename=\"b.bin\"\r\n\r\nB\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"empty\"; filename=\"\"\r\n\r\n\r\n\
+         --{boundary}--\r\n"
+    );
+    let multipart = |path: &str| send(format!("POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()));
+    let parsed = multipart("/form");
+    assert!(parsed.contains("\"title\": \"Image\"") && parsed.contains("\"tags\": [\n            \"one\",\n            \"two\"\n        ]"), "{parsed}");
+    assert!(parsed.contains("\"hello.txt\",\n            \"text\\/plain\",\n            11,\n            \"Hello\\r\\nMars\""), "{parsed}");
+    assert!(parsed.contains("\"a.bin\"") && parsed.contains("\"b.bin\"") && !parsed.contains("\"empty\""), "{parsed}");
+    assert!(multipart("/move").ends_with("\r\n\r\nHello\r\nMars"));
+
+    // Response helpers: redirect, two cookies, one header with two values
+    let set = get(port, "/set-cookie");
+    assert!(set.starts_with("HTTP/1.1 303") && set.contains("location: /target"), "{set}");
+    assert!(set.contains("set-cookie: sid=a%20b%3Bc; Path=/app; HttpOnly; SameSite=Lax"), "{set}");
+    assert!(set.contains("set-cookie: theme=dark; Expires=Wed, 18 May 2033 03:33:20 GMT; Max-Age=") && set.contains("; Path=/; Secure; HttpOnly; SameSite=Strict"), "{set}");
+    assert!(set.contains("x-two: one") && set.contains("x-two: two"));
+    let html = get(port, "/html");
+    assert!(html.starts_with("HTTP/1.1 201") && html.contains("content-type: text/html; charset=utf-8") && html.ends_with("<h1>Hello</h1>"));
+}
+
+#[test]
+fn static_files() {
+    let port = 18_115;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/static.php").env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/start");
+    let send = |raw: &str| request(port, raw);
+
+    let css = get(port, "/style.css");
+    assert!(css.starts_with("HTTP/1.1 200") && css.contains("content-type: text/css; charset=utf-8") && css.ends_with("color: red; }\n"), "{css}");
+    assert!(get(port, "/").ends_with("<h1>Start</h1>\n"));
+    assert!(get(port, "/missing.css").ends_with("php: /missing.css\n"));
+
+    // Never served: hidden files, ways out of the directory, symlinks to the outside
+    for path in ["/.env", "/../secret.txt", "/%2e%2e/secret.txt", "/sub/..%2f..%2fsecret.txt", "/link.txt"] {
+        let response = get(port, path);
+        assert!(response.contains("php: ") && !response.contains("SECRET") && !response.contains("secret\n"), "{path}: {response}");
+    }
+
+    let etag = css.lines().find_map(|line| line.strip_prefix("etag: ")).unwrap();
+    let cached = send(&format!("GET /style.css HTTP/1.1\r\nHost: x\r\nIf-None-Match: {etag}\r\nConnection: close\r\n\r\n"));
+    assert!(cached.starts_with("HTTP/1.1 304"), "{cached}");
+
+    let part = send("GET /sub/digits.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=2-4\r\nConnection: close\r\n\r\n");
+    assert!(part.starts_with("HTTP/1.1 206") && part.contains("content-range: bytes 2-4/10") && part.ends_with("\r\n\r\n234"), "{part}");
+    let suffix = send("GET /sub/digits.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=-3\r\nConnection: close\r\n\r\n");
+    assert!(suffix.ends_with("\r\n\r\n789"), "{suffix}");
+    let outside = send("GET /sub/digits.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=20-\r\nConnection: close\r\n\r\n");
+    assert!(outside.starts_with("HTTP/1.1 416"), "{outside}");
+
+    let head = send("HEAD /style.css HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(head.contains("content-length: 21") && head.ends_with("\r\n\r\n"), "{head}");
+    // A symlink in the directory to a hidden file in it stays hidden
+    assert!(get(port, "/config.txt").contains("php: /config.txt"));
+    // A directory without / is redirected, without index.html it goes to PHP
+    let directory = get(port, "/sub?a=1");
+    assert!(directory.starts_with("HTTP/1.1 301") && directory.contains("location: /sub/?a=1"), "{directory}");
+    assert!(get(port, "/sub/").ends_with("php: /sub/\n"));
+    // If-Range no longer matches: the whole file instead of a piece
+    let stale = send("GET /sub/digits.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=2-4\r\nIf-Range: \"old\"\r\nConnection: close\r\n\r\n");
+    assert!(stale.starts_with("HTTP/1.1 200") && stale.ends_with("0123456789"), "{stale}");
+    // Invalid ranges are ignored, empty files arrive whole
+    for value in ["bytes=5-3", "bytes=abc-", "bytes=+1-+3"] {
+        let response = send(&format!("GET /sub/digits.txt HTTP/1.1\r\nHost: x\r\nRange: {value}\r\nConnection: close\r\n\r\n"));
+        assert!(response.starts_with("HTTP/1.1 200") && response.ends_with("0123456789"), "{value}: {response}");
+    }
+    let empty = send("GET /empty.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=0-\r\nConnection: close\r\n\r\n");
+    assert!(empty.starts_with("HTTP/1.1 200") && empty.contains("content-length: 0"), "{empty}");
+    // POST always goes to PHP
+    assert!(send("POST /style.css HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").ends_with("php: /style.css\n"));
+}
+
+#[test]
+fn multipart_edge_cases() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/scripts/multipart_edge.php").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"f\":\"X\"}\n{\"real\":\"a;name=evil.txt\",\"path\":\"x41.txt\",\"doc\":{\"a\":\"d.txt\"},\"x\":[\"x2\"]}\n\
+         Too many parts in the form frugal\nrejected\nrejected\nrejected\n\"s=v; Path=\\/; HttpOnly; SameSite=Lax\"\n"
+    );
+}
+
+#[test]
+fn static_files_with_open_basedir() {
+    let allowed = format!("open_basedir={}/tests/fixtures/scripts", env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["-d", &allowed, "tests/fixtures/scripts/static_basedir.php"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "forbidden\n");
+}
+
+#[test]
+fn client_gone_cancels_handler() {
+    let port = 18_117;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--workers", "1", "tests/fixtures/gone.php"]).env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/status");
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.write_all(b"GET /long HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    drop(stream);
+    std::thread::sleep(Duration::from_millis(500));
+    let status = get(port, "/status");
+    assert!(status.contains("cancelled after 0.") && status.contains("The client closed the connection | - | detach ran"), "{status}");
+    assert!(get(port, "/cancelled-task").starts_with("HTTP/1.1 500"));
+}
+
+#[test]
+fn static_files_under_prefixes() {
+    let port = 18_118;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/static_prefix.php").env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/start");
+    assert!(get(port, "/assets/style.css").ends_with("color: red; }\n"));
+    // The longest prefix wins
+    assert!(get(port, "/assets/deep/digits.txt").ends_with("\r\n\r\n0123456789"));
+    assert!(get(port, "/robots.txt").ends_with("\r\n\r\n0123456789"));
+    let directory = get(port, "/assets");
+    assert!(directory.starts_with("HTTP/1.1 301") && directory.contains("location: /assets/"), "{directory}");
+    // Outside the prefixes, just next to them or hidden: PHP
+    for path in ["/style.css", "/assetsx/style.css", "/robots.txt/x", "/assets/.env", "/assets/missing.css"] {
+        assert!(get(port, path).ends_with(&format!("php: {path}\n")), "{path}");
+    }
+}
+
+#[test]
+fn async_local_travels_with_tasks() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/scripts/async_local.php").output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("timer a: a\n") && stdout.contains("timer b: b\n"), "{stdout}");
+    assert!(stdout.ends_with("[[\"a\",\"a\",\"a\",null],[\"b\",\"b\",\"b\",null],\"script\"]\n"), "{stdout}");
+}
+
+#[test]
+fn stubs_describe_the_public_api_only() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("--stubs").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stubs = String::from_utf8_lossy(&output.stdout);
+    assert!(stubs.starts_with("<?php\n"), "{stubs}");
+    for expected in ["final class Tenma", "public static function serve(int $port, callable $handler", "public static function async(callable $work): \\Tenma\\Task {}", "namespace Tenma\\Http {", "final class Request", "final class AsyncLocal", "public static function readFile(string $path): string {}"] {
+        assert!(stubs.contains(expected), "missing {expected}");
+    }
+    for hidden in ["Tenma\\Internal", "@internal", "class Multipart", "function call("] {
+        assert!(!stubs.contains(hidden), "leaks {hidden}");
+    }
+}

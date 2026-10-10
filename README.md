@@ -1,1 +1,217 @@
-# Tenma
+# tenma
+
+PHP with Node's execution model: one process runs the script once and then serves requests continuously on a thread with an event loop. In-memory state persists between requests.
+
+```php
+Tenma::serve(8080, fn (Tenma\Http\Request $request) => "Hello World\n");
+```
+
+Asynchronous like Node, just without `await`: every request runs in its own fiber. `Tenma::sleep()` and `Tenma::fetch()` suspend only that fiber; meanwhile the event loop serves other requests.
+
+```php
+
+Tenma::serve(8080, function () {
+    $weather = Tenma::fetch('https://wttr.in/München?format=3');   // does not block the server
+    Tenma::sleep(0.2);                                         // neither does this
+    return $weather->body;
+});
+```
+
+Several things at once, like `Promise.all` in Node: `Tenma::all()` starts each function in its own fiber and returns the results under the same keys. `Tenma::async()` starts one and returns a `Task` whose `await()` later fetches the result or throws the error. If a function in `all()` fails, `all()` cancels the others (`Tenma\Cancelled` is thrown where they are currently waiting, and their `finally` and `catch` blocks run), waits until they have cleaned up, and then throws the first error: nothing is left running in the background. `$task->cancel()` cancels a specific task. Tasks belong to their request; if the request ends with `exit()`, its tasks are cancelled.
+
+```php
+['user' => $user, 'weather' => $weather] = Tenma::all(
+    user: fn () => $db->first('SELECT * FROM users WHERE id = $1', [$id]),
+    weather: fn () => Tenma::fetch('https://wttr.in/?format=3')->body,
+);
+$report = Tenma::async(fn () => Tenma::fetch($url));
+// … do something else …
+$response = $report->await();
+```
+
+Timers and background work as in Node: `Tenma::setTimeout()` and `Tenma::setInterval()` return a `Timer` with `cancel()`; their callback runs in its own fiber. Timers and `Tenma::async()` work scheduled at script startup start as soon as the event loop is running. A script without a server runs, as in Node, until no timers or ops are pending; an interval keeps it alive. `exit()` outside a request (in the script, in timers, in background work) terminates tenma with its status, including a server; a `die()` during startup prevents scheduled work from starting at all. A fatal error in startup work terminates tenma with 255. With several workers, each worker schedules its own timers and background work, including after every restart: shared jobs belong in a separate process or behind a lock in Redis.
+
+```php
+Tenma::setInterval(fn () => $cache->command('INCR', 'heartbeat'), 1.0);
+Tenma::async(fn () => warmUpCaches());   // runs in the background as soon as the server starts
+```
+
+Asynchronous files: `Tenma\Fs::readFile()`, `writeFile()`, `appendFile()`, `exists()`, `stat()`, `readDir()`, `mkdir()`, `rename()`, `copy()`, `remove()`, `removeDir()`. The work runs on background threads and only the fiber waits; `file_get_contents` and friends, by contrast, block the worker. Paths behave as with PHP's file functions: relative to `chdir()`, `open_basedir` applies, null bytes are rejected, bytes are passed through unchanged. Errors throw `RuntimeException` with errno as the code. A running file op cannot be cancelled; it runs to completion. As in PHP and Node, `mkdir()` is only recursive with `recursive: true`, `rename()` also works across file system boundaries, and `copy()` onto itself is an error. Results that no longer fit within `memory_limit` become an error in the request instead of a fatal error.
+
+Asynchronous databases in fiber mode: Postgres and Redis. While a query runs, only the fiber of that request waits.
+
+```php
+use Tenma\Db\{Postgres, Redis};
+
+$db = Postgres::connect('postgres://app@localhost/app');
+$cache = Redis::connect('redis://127.0.0.1:6379');
+
+Tenma::serve(8080, function ($request) use ($db, $cache) {
+    $user = $db->first('SELECT * FROM users WHERE id = $1', [$request->query['id']]);
+    $db->transaction(function (Postgres $tx) use ($user) {
+        $tx->execute('UPDATE users SET visits = visits + 1 WHERE id = $1', [$user['id']]);
+    });
+    $cache->command('INCR', 'visits');
+    return Response::json($user);
+});
+```
+
+Postgres behaves like PDO: parameters are sent as text and the server determines the type (`'42'` fits an int column, dates as strings). Postgres itself converts results with `json_agg`, so timestamps, `numeric`, `uuid` and `jsonb` arrive without a type table of our own. At most `--db-pool` connections (default 10) per worker and URL; anyone beyond that waits. After every query, `DISCARD ALL` cleans up the connection before it goes back into the pool: `SET ROLE`, `set_config`, temporary tables or a dangling `BEGIN` are never seen by another request (the connection is discarded in that case). State across several queries therefore only exists inside `transaction()`. This costs about 30 % throughput for very small queries. Classic code (`serveClassic`) stays with PDO, which blocks as it does under FPM.
+
+`Request` and `Response` in fiber mode: `$request->cookies()`, `cookie()`, `form()` (urlencoded and multipart, same semantics as `$_POST`), `files()` with `UploadedFile` (`name`, `type`, `size()`, `contents()`, `moveTo()`), plus `query`, `header()`, `json()`. Responses with `Response::json()`, `html()`, `redirect()`, chainable with `->header()` (multiple values with `append: true`) and `->cookie()` (defaults to `HttpOnly`, `SameSite=Lax`).
+
+```php
+Tenma::serve(8080, function (Request $request) {
+    $avatar = $request->files()['avatar'] ?? null;
+    $avatar?->moveTo('/srv/uploads/' . bin2hex(random_bytes(8)));
+    return Response::redirect('/profile', 303)->cookie('notice', 'saved', expires: time() + 60);
+});
+```
+
+tenma serves static files itself, without PHP:
+
+```php
+Tenma::serve(8080, $handler, static: [
+    '/assets' => __DIR__ . '/public/assets',
+    '/favicon.ico' => __DIR__ . '/public/favicon.ico',
+]);
+```
+
+Under a prefix, tenma looks in the directory; a single file only matches exactly its own path; the longest prefix wins. Paths outside all prefixes go to PHP without touching the file system. A string (`static: __DIR__ . '/public'`) means `['/' => …]`: then every GET is checked, which costs PHP routes about a third of their throughput. If a file exists for the path (or `index.html` in the directory), it is sent with a Content-Type based on its extension, ETag/Last-Modified (304) and Range (206), in chunks; otherwise the request goes to the handler. A directory without a trailing `/` is redirected. GET and HEAD only. Files and directories starting with a dot (`.env`, `.git`) and symlinks pointing outside or to hidden entries are never served. The directory is resolved per request, so a deploy by symlink swap takes effect immediately; `open_basedir` applies here as well.
+
+If the client closes the connection before the response is complete, the handler and its tasks receive `Tenma\Cancelled`: running ops (sleep, `Tenma::fetch()`, database) are cancelled instead of continuing to work for nobody. The `catch` block may still clean up, including waiting. Timers set by the handler end with it. Anything that must never be left half done (payment and order) is started by the handler with `Tenma::detach()`: the task belongs to no request and keeps running. `COMMIT` and `ROLLBACK` always run to completion. Limitation of hyper: after pipelining, tenma does not notice the disconnect, and a client that only closes its sending direction is treated as gone.
+
+Values that travel with asynchronous work, like `AsyncLocalStorage` in Node: `Tenma\AsyncLocal`. Every task (`async()`, `all()`, `detach()`, timers) receives a copy of its creator's values when it starts; `set()` inside the task changes only its copy. A request starts with the values from the script. Typical use is the request ID in log lines:
+
+```php
+$requestId = new Tenma\AsyncLocal();
+Tenma::serve(8080, function (Request $request) use ($requestId) {
+    $requestId->set($request->header('x-request-id') ?? bin2hex(random_bytes(8)));
+    Tenma::async(fn () => error_log("[{$requestId->get()}] running in the background"));
+    return "ok\n";
+});
+```
+
+Streaming, server-sent events and WebSockets in fiber mode: the headers go out immediately, each chunk right after; if a client cannot keep up, only its fiber waits. If the client goes away, the next write throws `ConnectionClosed`.
+
+```php
+use Tenma\Http\{EventStream, Response, Stream, WebSocket};
+
+Tenma::serve(8080, fn ($request) => match ($request->path) {
+    '/download' => Response::stream(function (Stream $out) {
+        foreach (readRows() as $row) {
+            $out->write(json_encode($row) . "\n");
+        }
+    }),
+    '/ticker' => Response::events(function (EventStream $events) {
+        while (true) {
+            $events->send(json_encode(['time' => date('H:i:s')]), event: 'tick');
+            Tenma::sleep(1);
+        }
+    }),
+    '/chat' => Response::websocket(function (WebSocket $socket) {
+        while (($message = $socket->receive()) !== null) {   // waits without blocking
+            $socket->send("echo: $message");
+        }
+    }),
+});
+```
+
+Existing frameworks run unchanged via `serveClassic()`: before every request, `$_SERVER`, `$_GET`, `$_POST`, `$_FILES`, `$_COOKIE`, `$_REQUEST` and `php://input` are set up as under FPM, with uploads handled by PHP's own multipart parser (with `move_uploaded_file()`; temp files disappear with the next request). `header()`, `http_response_code()` and the output become the response; `exit()` and `die()` only end the request. Whatever a request changes with `ini_set()` or `set_time_limit()` is reset afterwards to the state after script startup, and its `php://input` handles are closed. `register_shutdown_function()` runs after every request as under FPM: only once no PHP code is running anymore, with `error_get_last()` available for error pages, and its output is still part of the response. After a fatal error, the request still gets a response (500), then the worker restarts. Functions registered during script startup only run when the worker ends; in fiber mode this applies to all of them, and they accumulate until the worker ends. PHP errors and warnings always go to the log on stderr, never into a response. `$_SERVER` looks as it does under FPM behind nginx: `REMOTE_ADDR` and `SERVER_PORT` from the connection, `SERVER_NAME` from `--server-name` (default `localhost`, never from the client-controlled Host header), `$_COOKIE` via PHP's own parser (the first cookie of the same name wins), headers containing underscores are dropped as with nginx, `$_REQUEST` with POST over GET, `SCRIPT_NAME` and `PHP_SELF` as `/index.php`, `DOCUMENT_ROOT` as the script's directory. In fiber mode, the addresses are in the `Request` (`remoteAddress`, `serverPort`, `host()`). Sessions work as usual with `session_start()` and `$_SESSION`: at the end of every request, tenma writes and closes the session and forgets its ID, and `$_SESSION` only exists after `session_start()`. That way no visitor ever sees the previous visitor's session. With several workers, all of them share the session files; concurrent requests for the same session wait for the file lock as under FPM.
+
+```php
+$app = Waypoint\Waypoint::create();
+$app->attach([...]);
+Tenma::serveClassic(8080, fn () => $app->handleHttp());
+```
+
+Waypoint itself no longer needs classic mode: the app is itself a handler, `Tenma::serve(8080, $app)` runs in fiber mode, with request ID and CSRF token in `Tenma\AsyncLocal`. The demo runs this way too, with the same throughput as via `serveClassic()` (about 43,000 requests per second with one worker, `ab -k`, 50 connections) and byte-for-byte identical responses.
+
+```
+tenma app.php                    # one worker: one thread, one shared state
+tenma --workers 4 app.php        # four workers, each with its own PHP interpreter and its own state
+tenma --workers auto app.php     # one worker per core
+tenma --max-body 50m app.php     # largest request body, default 10m, 413 above that
+tenma --max-requests 10000 app.php  # worker restarts its interpreter after N requests
+tenma --db-pool 20 app.php       # at most 20 Postgres connections per worker and URL
+tenma tasks.php import --force   # everything after the script ends up in $argv, as with php
+tenma -d memory_limit=512M -c prod.ini app.php   # PHP settings as with php -d and php -c
+tenma --server-name shop.example app.php         # $_SERVER['SERVER_NAME'] like server_name in nginx
+tenma --request-timeout 10 app.php               # headers and body must arrive within 10 s (default 30)
+```
+
+Limits: a request's headers and body must arrive within `--request-timeout` (otherwise disconnect or 408, against Slowloris); bodies and WebSocket messages are at most `--max-body` in size. A WebSocket client may send at most 256 messages that PHP has not read yet, then tenma disconnects it. `Tenma::fetch()` has a `timeout` (default 30 s); connections to Postgres, Redis and via `Tenma::fetch()` must be established within 10 s.
+
+Robust: a fatal PHP error (out of memory, stack overflow) restarts only the interpreter of the affected worker and runs the script there again; the request gets a 500. Ctrl+C and SIGTERM stop accepting connections and let running requests finish for up to 10 seconds. PHP's own signal handlers are disabled; signals belong to Rust.
+
+With several workers, the script runs once per worker, and each has its own memory: an in-memory counter or cache exists per worker, as with Node `cluster` or FrankenPHP. Shared state then belongs in a database or Redis.
+
+## IDEs and PHPStan
+
+The PHP API lives inside the binary, so IDEs and PHPStan don't know `Tenma` on their own. Install the stubs as a dev dependency ([systonia/Tenma-Stubs](https://github.com/systonia/Tenma-Stubs)):
+
+```bash
+composer require --dev systonia/tenma-stubs
+```
+
+PhpStorm and Intelephense pick them up from `vendor/`; for PHPStan the package brings an `extension.neon` (automatic with `phpstan/extension-installer`). The stubs are never autoloaded, so nothing changes at runtime. `tenma --stubs` prints them for the binary at hand.
+
+## Architecture
+
+| Path | Contents |
+| --- | --- |
+| `src/main.rs` | CLI, worker threads each with their own event loop (tokio, current_thread), accepting connections in the main thread, HTTP server (hyper) |
+| `src/php.rs` | Safe Rust wrappers around the C layer. Rust never sees a zval. Pending requests and resuming fibers. |
+| `src/ops.rs` | Asynchronous ops for PHP: `sleep` (tokio timer), `fetch` (reqwest) |
+| `src/db.rs` | Postgres (tokio-postgres, pool per worker) and Redis (one shared connection per URL) as ops |
+| `src/fs.rs` | File system ops for `Tenma\Fs`, on tokio's blocking threads |
+| `src/files.rs` | Static files for `Tenma::serve(..., static:)`: prefixes, ETag/304, ranges, checks on the opened file |
+| `src/streams.rs` | Streaming responses (body from a channel with backpressure) and WebSockets (tokio-tungstenite after the HTTP upgrade) |
+| `shim/tenma.c` | C layer: embed PHP, `tenma_listen()` for PHP, call handlers, convert PHP values to C values, catch fatal errors with `zend_try` |
+| `stdlib/tenma.php` | Standard library in PHP, embedded in the binary: `Tenma::serve()`, `Tenma::serveClassic()`, `Request`, `Response` |
+| `stdlib/stubs.php` | `tenma --stubs`: prints the public API as stubs by reflection, for IDEs and PHPStan |
+| `php-build/build.sh` | Builds PHP 8.5 from source as `libphp.a` (embed SAPI, ZTS), linked statically. Extensions: PDO with MySQL, Postgres and SQLite, mysqli, pgsql, sqlite3, openssl, curl, sodium, intl, bcmath, gmp, gd, zip, mbstring, session, sockets, exif, XML, fileinfo, filter. The libraries for these come from the macOS SDK and Homebrew (list in the script) and are linked dynamically. |
+| `demo/waypoint/` | Waypoint app (framework [Waypoint](https://github.com/systonia/Waypoint)) with a waypoint API; runs under tenma in fiber mode and unchanged under `php -S` |
+| `tests/http.rs` | Starts the binary and sends real requests |
+
+Flow: the main thread starts PHP (modules); each worker thread gets its own interpreter (ZTS, `tenma_thread_start`) and loads the standard library, then the script. The first worker starts alone; if the script registers no server, it was an ordinary script and tenma exits. Otherwise the remaining workers start, and the main thread opens the ports, accepts connections and distributes them round-robin across the workers. A connection stays with its worker. As with the CLI, `$_SERVER['SCRIPT_FILENAME']` points to the script. `Tenma::serve()` only registers a handler via `tenma_listen()`. Once the script has finished, Rust opens the ports. Each request calls the PHP handler synchronously on the loop thread. Asynchronously: the handler runs in a fiber. When it calls an op (`\tenma_op_sleep`, `\tenma_op_fetch`), Rust starts a task and returns an op ID, and the fiber suspends with `Fiber::suspend()`. When the task is done, Rust calls `Tenma\Internal\complete()`, which resumes the fiber with the result. Finished handlers respond via `\tenma_respond($rid, …)`, and Rust passes the response to the waiting HTTP request. Classic mode has no fibers, because superglobals, headers and output buffers exist only once; there, requests run one after another and asynchronous functions throw.
+
+`exit()` and `die()` end in PHP with a `zend_bailout` as soon as the handler was called from outside, exactly like a fatal error. The C layer tells the two apart by the last PHP error: without a fatal error, PHP unwound cleanly, the request is answered and the worker keeps running.
+
+tenma collects the output of classic requests where PHP writes it (the SAPI's `ub_write`), not in an `ob_start()` buffer: frameworks that flush all output buffers when sending (Symfony, Laravel, WordPress) thus still write into the response. At the end, all buffers still open are flushed, including those that cannot be removed.
+
+Before every request, the C layer resets headers, status and the "headers already sent" state. An exception in the handler yields a 500 and the server keeps running. A fatal PHP error restarts only the worker's interpreter (see above). Errors and warnings go to stderr, never into a response.
+
+## Commands
+
+```
+brew install pkgconf openssl@3 libpq icu4c libsodium libzip gmp oniguruma libpng jpeg-turbo webp freetype
+php-build/build.sh                     # once, about 5 minutes
+cargo build --release                  # binary: target/release/tenma
+cargo test --release
+(cd demo/waypoint && composer install)
+./target/release/tenma demo/waypoint/index.php
+```
+
+Databases on one worker: one Postgres query per request about 25,000 requests per second (35,000 without the `DISCARD ALL` cleanup), at 200 concurrent requests with 10 connections; four Redis commands per request about 42,000.
+
+Streaming: 500 concurrent streams of 0.6 s each on one worker, about 780 per second, 58 MB. WebSocket echo: 46,000 round trips per second over one connection, about 118,000 over four.
+
+Workers, Waypoint demo, `GET /waypoints/1`, `ab -k` with 50 connections: 1 worker 55,000, 4 workers 165,000, 10 workers 192,000 requests per second (4 × `ab` in parallel: 207,000, at about 570 % CPU). FrankenPHP in worker mode reached 52,000 to 61,000 with the same app. Without keep-alive it stays at about 45,000 regardless of the number of workers: connection setup and the single accepting thread are the limit then.
+
+Opcache is enabled (tenma does not count as CLI for opcache). It brings little for tenma, about 6 % throughput and some memory, because each worker compiles the code only once at startup anyway. PHP does not build the JIT with ZTS on Apple Silicon; on Linux it is built in and can be enabled with `-d opcache.jit=tracing`.
+
+Memory under sustained load: 5 million requests against the Waypoint demo, the process stays at 22.8 MB; 2.1 million `/proxy` requests with fibers and `fetch` at 26.8 MB.
+
+Fibers, measured with `ab -k`: a simple handler about 100,000 requests per second; `/slow` with `Tenma::sleep(0.5)` at 500 connections about 900 per second, i.e. all 500 awake at the same time; `/proxy`, which queries the same server via `fetch`, about 37,000.
+
+Measured with `ab` on an M-series Mac, Waypoint demo, `GET /waypoints/1`: tenma about 42,000 requests per second, `php -S` about 17. The comparison is unfair in tenma's favor: `php -S` has no opcache, and Waypoint without a route cache re-reads all attributes on every request. Under FPM with opcache and trust mode the gap would be smaller, but the core point stands: tenma boots the app once.
+
+## Not yet
+
+- Asynchronous MySQL (`mysql_async`), TLS for Postgres connections.
+- More ops: sockets, DNS. Blocking PHP functions such as PDO or `file_get_contents` still hold up their worker.
+- Waiting at the top level of a script, outside `Tenma::async()` (`Tenma::sleep()` during startup throws; wrap it in `Tenma::async()`).
+- Streaming for large request bodies (up to the limit they are buffered completely in memory).
+- A timeout for handlers that compute instead of waiting: an infinite loop holds up its worker.
+- Multiple accepting threads (`SO_REUSEPORT`) for many short connections without keep-alive.
