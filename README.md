@@ -1,5 +1,7 @@
 # tenma
 
+[tenma.dev](https://tenma.dev) · [GitHub](https://github.com/systonia/Tenma)
+
 PHP with Node's execution model: one process runs the script once and then serves requests continuously on a thread with an event loop. In-memory state persists between requests.
 
 ```php
@@ -215,3 +217,9 @@ Measured with `ab` on an M-series Mac, Waypoint demo, `GET /waypoints/1`: tenma 
 - Streaming for large request bodies (up to the limit they are buffered completely in memory).
 - A timeout for handlers that compute instead of waiting: an infinite loop holds up its worker.
 - Multiple accepting threads (`SO_REUSEPORT`) for many short connections without keep-alive.
+
+## License
+
+Tenma is licensed under either of [MIT](LICENSE-MIT) or
+[Apache-2.0](LICENSE-APACHE), at your option.
+Binaries embed PHP (PHP License 3.01), see [NOTICE](NOTICE).

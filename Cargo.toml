@@ -3,6 +3,9 @@ name = "tenma"
 version = "0.1.0"
 edition = "2024"
 description = "PHP with Node's execution model: one process, one event loop"
+license = "MIT OR Apache-2.0"
+homepage = "https://tenma.dev"
+repository = "https://github.com/systonia/Tenma"
 
 [dependencies]
 bytes = "1"
