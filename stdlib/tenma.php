@@ -1563,7 +1563,7 @@ final class Response
      * after it. The Fiber waits when the client cannot keep up.
      *
      * @param callable(Stream): void $writer
-     * @param array<string, string> $headers
+     * @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie
      */
     public static function stream(callable $writer, int $status = 200, array $headers = ['content-type' => 'application/octet-stream']): StreamedResponse
     {
@@ -1597,7 +1597,7 @@ final class Response
 
 final class StreamedResponse
 {
-    /** @param array<string, string> $headers */
+    /** @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie */
     public function __construct(
         public readonly \Closure $writer,
         public readonly int $status,
