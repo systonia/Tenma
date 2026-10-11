@@ -112,12 +112,28 @@ static _Thread_local smart_str classic_output = {0};
 /** Where the embed SAPI writes when no classic request is running: stdout. */
 static size_t (*embed_ub_write)(const char *str, size_t length) = NULL;
 
+/** tenma --inspect, set before tenma_start. */
+static int inspect_mode = 0;
+
+/** tenma --inspect: output also goes to the editor's debug console; 1 for the error log. */
+extern void tenma_rs_output(const char *text, size_t len, int log);
+
 static size_t tenma_ub_write(const char *str, size_t length) {
     if (classic_open) {
         smart_str_appendl(&classic_output, str, length);
         return length;
     }
+    if (inspect_mode) {
+        tenma_rs_output(str, length, 0);
+    }
     return embed_ub_write(str, length);
+}
+
+static void (*embed_log_message)(const char *message, int syslog_type) = NULL;
+
+static void tenma_log_message(const char *message, int syslog_type) {
+    tenma_rs_output(message, strlen(message), 1);
+    embed_log_message(message, syslog_type);
 }
 
 /** ini values changed before the classic request: name → value. What the request changes is restored afterwards. */
@@ -403,9 +419,6 @@ int tenma_script_exited(void) {
     return script_exited;
 }
 
-/** tenma --inspect, set before tenma_start. */
-static int inspect_mode = 0;
-
 void tenma_set_inspect(void) {
     inspect_mode = 1;
 }
@@ -414,6 +427,20 @@ void tenma_set_inspect(void) {
 static _Thread_local zend_execute_data *paused = NULL;
 
 static void inspect_throw(zend_object *exception);
+/** The debugger evaluates code: what it calls must not stop the debugger again. */
+static _Thread_local int evaluating = 0;
+/**
+ * Evaluated code failed fatally while stopped: PHP is unusable. Once the editor lets the code run on,
+ * the bailout continues from where it stopped, into the zend_try around the call into PHP.
+ */
+static _Thread_local int evaluation_fatal = 0;
+
+static void bail_after_fatal_evaluation(void) {
+    if (evaluation_fatal) {
+        evaluation_fatal = 0;
+        zend_bailout();
+    }
+}
 static void (*previous_throw_hook)(zend_object *exception) = NULL;
 
 /**
@@ -421,13 +448,14 @@ static void (*previous_throw_hook)(zend_object *exception) = NULL;
  * tenma_inspect_thread): Rust decides whether to stop there and blocks the thread while stopped.
  */
 static void inspect_statement(zend_execute_data *frame) {
-    if (!frame->func || !ZEND_USER_CODE(frame->func->type)) {
+    if (evaluating || !frame->func || !ZEND_USER_CODE(frame->func->type)) {
         return;
     }
     zend_string *file = frame->func->op_array.filename;
     paused = frame;
     tenma_rs_statement(ZSTR_VAL(file), ZSTR_LEN(file), frame->opline->lineno, (uintptr_t) frame, (uintptr_t) EG(active_fiber));
     paused = NULL;
+    bail_after_fatal_evaluation();
 }
 
 static zend_extension inspector = {
@@ -520,6 +548,10 @@ int tenma_start(void) {
     embed_ub_write = php_embed_module.ub_write;
     php_embed_module.ub_write = tenma_ub_write;
     php_embed_module.ini_defaults = tenma_ini_defaults;
+    if (inspect_mode) {
+        embed_log_message = php_embed_module.log_message;
+        php_embed_module.log_message = tenma_log_message;
+    }
     php_embed_module.name = "tenma";
     php_embed_module.pretty_name = "tenma";
     if (php_embed_init(0, NULL) != SUCCESS) {
@@ -771,6 +803,9 @@ char *tenma_inspect_frames(uint32_t thread, size_t *len) {
  */
 static _Thread_local zval **expandable = NULL;
 static _Thread_local uint32_t expandable_count = 0, expandable_size = 0;
+/** Results of evaluated code, kept until the worker runs on: the editor may expand them. */
+static _Thread_local zval **evaluated = NULL;
+static _Thread_local uint32_t evaluated_count = 0;
 
 static uint32_t expandable_reference(zval *value) {
     if (expandable_count == expandable_size) {
@@ -786,6 +821,13 @@ void tenma_inspect_resume(void) {
     free(expandable);
     expandable = NULL;
     expandable_count = expandable_size = 0;
+    for (uint32_t i = 0; i < evaluated_count; i++) {
+        zval_ptr_dtor(evaluated[i]);
+        free(evaluated[i]);
+    }
+    free(evaluated);
+    evaluated = NULL;
+    evaluated_count = 0;
 }
 
 /** An object's properties without running PHP code (no __debugInfo, no lazy initializer); NULL if not. */
@@ -900,6 +942,110 @@ char *tenma_inspect_children(uint32_t reference, size_t *len) {
     return malloc_copy(&out, len);
 }
 
+/** The message of an exception, NULL if it has none. */
+static zend_string *exception_message(zend_object *exception) {
+    zval value;
+    zval *message = zend_read_property(zend_get_exception_base(exception), exception, ZEND_STRL("message"), 1, &value);
+    return Z_TYPE_P(message) == IS_STRING ? Z_STR_P(message) : NULL;
+}
+
+/**
+ * Evaluates `code` in shown frame `index` of the stopped thread, with its variables and $this, like
+ * eval() there: an expression, or with `statements` code without a result. Packs
+ * "status\0value\0type\0reference\0truthy\0text\0": status "ok", "error" (value is the message) or
+ * "fatal"; text is a string's content unquoted, otherwise the value. Rust frees it with free().
+ */
+char *tenma_inspect_evaluate(uint32_t index, const char *code, size_t code_len, bool statements, size_t *len) {
+    smart_str out = {0};
+    zend_execute_data *target = NULL;
+    FOREACH_FRAME(paused, EG(active_fiber) ? EG(active_fiber)->stack_bottom : NULL, frame) {
+        if (shown_frame(frame) && index-- == 0) {
+            target = frame;
+            break;
+        }
+    }
+    if (!target) {
+        smart_str_appends(&out, "error");
+        smart_str_appendc(&out, 0);
+        smart_str_appends(&out, "no such frame in the stopped request");
+        smart_str_appendc(&out, 0);
+        return malloc_copy(&out, len);
+    }
+    // eval() runs with the variables of EG(current_execute_data); stopped at a throw, the exception
+    // is pending and waits until the code ran
+    zend_execute_data *current = EG(current_execute_data);
+    // A throw and zend_clear_exception() move the frames' opline; the VM reads it on after the stop
+    const zend_op *current_opline = current->opline, *target_opline = target->opline;
+    const zend_op *before_exception = EG(opline_before_exception);
+    zend_object *pending = EG(exception);
+    EG(exception) = NULL;
+    EG(current_execute_data) = target;
+    evaluating = 1;
+    // A fiber switch (Tenma::sleep() in the code) would leave the stopped statement mid-way
+    zend_fiber_switch_block();
+    zval result;
+    ZVAL_UNDEF(&result);
+    zend_result compiled = FAILURE;
+    bool fatal = false;
+    zend_try {
+        compiled = zend_eval_stringl(code, code_len, statements ? NULL : &result, "debugger");
+    } zend_catch {
+        fatal = true;
+    } zend_end_try();
+    zend_fiber_switch_unblock();
+    evaluating = 0;
+    EG(current_execute_data) = current;
+    if (fatal) {
+        evaluation_fatal = 1;
+        smart_str_appends(&out, "fatal");
+        smart_str_appendc(&out, 0);
+        if (PG(last_error_message)) {
+            smart_str_append(&out, PG(last_error_message));
+        }
+        smart_str_appendc(&out, 0);
+    } else if (EG(exception) || compiled == FAILURE) {
+        smart_str_appends(&out, "error");
+        smart_str_appendc(&out, 0);
+        zend_string *message = EG(exception) ? exception_message(EG(exception)) : NULL;
+        if (EG(exception)) {
+            smart_str_append(&out, EG(exception)->ce->name);
+            if (message && ZSTR_LEN(message)) {
+                smart_str_appends(&out, ": ");
+                smart_str_append(&out, message);
+            }
+            zend_clear_exception();
+        } else {
+            smart_str_appends(&out, "could not evaluate");
+        }
+        smart_str_appendc(&out, 0);
+    } else {
+        smart_str_appends(&out, "ok");
+        smart_str_appendc(&out, 0);
+        if (Z_TYPE(result) == IS_UNDEF) {
+            ZVAL_NULL(&result);
+        }
+        // Kept where it does not move: expandable[] may point at it
+        zval *kept = malloc(sizeof(zval));
+        ZVAL_COPY_VALUE(kept, &result);
+        evaluated = realloc(evaluated, ++evaluated_count * sizeof(*evaluated));
+        evaluated[evaluated_count - 1] = kept;
+        add_variable(&out, "", "", 0, kept);
+        smart_str_appendc(&out, zend_is_true(kept) ? '1' : '0');
+        smart_str_appendc(&out, 0);
+        if (Z_TYPE_P(kept) == IS_STRING) {
+            smart_str_append(&out, Z_STR_P(kept));
+        } else {
+            describe(&out, kept);
+        }
+        smart_str_appendc(&out, 0);
+    }
+    current->opline = current_opline;
+    target->opline = target_opline;
+    EG(opline_before_exception) = before_exception;
+    EG(exception) = pending;
+    return malloc_copy(&out, len);
+}
+
 /** Where a thrown exception ends up, see exception_fate. */
 enum fate { CAUGHT_INSIDE, CAUGHT, UNCAUGHT };
 
@@ -950,26 +1096,26 @@ static void inspect_throw(zend_object *exception) {
         previous_throw_hook(exception);
     }
     // Tenma\Cancelled ends a task, as Tenma intends
-    if (!inspecting || zend_string_equals_literal_ci(exception->ce->name, "Tenma\\Cancelled")) {
+    if (!inspecting || evaluating || zend_string_equals_literal_ci(exception->ce->name, "Tenma\\Cancelled")) {
         return;
     }
     zend_execute_data *outer = paused;
     paused = EG(current_execute_data);
     enum fate fate = exception_fate(exception);
     if (fate != CAUGHT_INSIDE) {
-        zval message_value;
-        zval *message = zend_read_property(zend_get_exception_base(exception), exception, ZEND_STRL("message"), 1, &message_value);
+        zend_string *message = exception_message(exception);
         smart_str description = {0};
         smart_str_append(&description, exception->ce->name);
-        if (Z_TYPE_P(message) == IS_STRING && Z_STRLEN_P(message) > 0) {
+        if (message && ZSTR_LEN(message) > 0) {
             smart_str_appends(&description, ": ");
-            smart_str_append(&description, Z_STR_P(message));
+            smart_str_append(&description, message);
         }
         smart_str_0(&description);
         tenma_rs_exception(ZSTR_VAL(description.s), ZSTR_LEN(description.s), fate == UNCAUGHT);
         smart_str_free(&description);
     }
     paused = outer;
+    bail_after_fatal_evaluation();
 }
 
 /** Prints an uncaught exception and clears it. */

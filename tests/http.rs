@@ -284,9 +284,11 @@ fn streaming_sse_und_websockets() {
     assert_eq!(ticker.read().unwrap(), Message::text("tick"));
     ticker.close(None).unwrap();
     std::thread::sleep(Duration::from_millis(100));
-    let after_close = get(port, "/ticks");
+    // The bodies only: the Date header may change in between
+    let ticks = || get(port, "/ticks").rsplit("\r\n\r\n").next().unwrap().to_owned();
+    let after_close = ticks();
     std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(get(port, "/ticks"), after_close);
+    assert_eq!(ticks(), after_close);
 
     // 300 messages to a handler that never reads: tenma disconnects after 256, long before the handler ends
     let started = Instant::now();
@@ -977,6 +979,8 @@ fn watch_stops_hooks_that_trigger_themselves() {
 struct Dap {
     stream: TcpStream,
     seq: u64,
+    /// Output events that came while waiting for something else.
+    output: Vec<serde_json::Value>,
 }
 
 impl Dap {
@@ -986,7 +990,7 @@ impl Dap {
             match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(stream) => {
                     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                    return Dap { stream, seq: 0 };
+                    return Dap { stream, seq: 0, output: Vec::new() };
                 }
                 Err(_) if started.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
                 Err(error) => panic!("debugger does not respond: {error}"),
@@ -1015,11 +1019,17 @@ impl Dap {
 
     /// The next message of this kind ("response" or "event") and name, skipping others.
     fn expect(&mut self, kind: &str, name: &str) -> serde_json::Value {
+        if (kind, name) == ("event", "output") && !self.output.is_empty() {
+            return self.output.remove(0);
+        }
         loop {
             let message = self.read();
             let key = if kind == "event" { &message["event"] } else { &message["command"] };
             if message["type"] == kind && key == name {
                 return message;
+            }
+            if message["event"] == "output" {
+                self.output.push(message);
             }
         }
     }
@@ -1107,6 +1117,9 @@ fn inspect_stops_at_breakpoints_and_steps() {
     let stop = dap.stopped();
     assert_eq!((stop.function.as_str(), stop.line), ("greet", 4));
     assert_eq!(stop.local("$name").unwrap().0, "'world'");
+    // Also in the caller's frame
+    let caller = dap.request("stackTrace", serde_json::json!({"threadId": stop.event["threadId"]}))["stackFrames"][1]["id"].clone();
+    assert_eq!(dap.request("evaluate", serde_json::json!({"expression": "$id * 2", "frameId": caller}))["result"], "84");
     dap.command("stepOut");
     assert_eq!(dap.stopped().line, 30);
     // Over the sleep: the fiber waits meanwhile, the step ends in the same fiber
@@ -1159,6 +1172,9 @@ fn inspect_shows_requests_as_threads_and_stops_at_exceptions() {
     let response = std::thread::spawn(move || get(port, "/throw"));
     let stop = dap.stopped();
     assert_eq!((stop.line, &stop.event["reason"], &stop.event["description"]), (18, &serde_json::json!("exception"), &serde_json::json!("RuntimeException: boom")));
+    // Evaluating while the exception is pending leaves it pending
+    let frame = dap.request("stackTrace", serde_json::json!({"threadId": stop.event["threadId"]}))["stackFrames"][0]["id"].clone();
+    assert_eq!(dap.request("evaluate", serde_json::json!({"expression": "$request->path", "frameId": frame}))["result"], "'/throw'");
     dap.command("continue");
     assert!(response.join().unwrap().starts_with("HTTP/1.1 500"));
     assert!(get(port, "/caught").ends_with("caught"));
@@ -1213,4 +1229,51 @@ fn inspect_keeps_the_session_and_breakpoints_across_watch_reloads() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn inspect_evaluates_logs_and_changes_variables() {
+    let (port, debugger) = (18_126, 19_233);
+    let _server = inspected(port, debugger, "--inspect");
+    let mut dap = Dap::start(debugger);
+    let path = std::fs::canonicalize("tests/fixtures/inspect.php").unwrap();
+    let breakpoints = serde_json::json!([
+        {"line": 28, "condition": "$id === 1"},
+        {"line": 29, "logMessage": "id {$id}, x {$point->x}, {nope(}"},
+        {"line": 31, "condition": "$message === 'Hello world'"},
+    ]);
+    dap.request("setBreakpoints", serde_json::json!({"source": {"path": path}, "breakpoints": breakpoints}));
+    dap.request("configurationDone", serde_json::json!({}));
+
+    let response = std::thread::spawn(move || get(port, "/"));
+    // The false condition does not stop, the logpoint prints instead of stopping
+    let logged = dap.expect("event", "output")["body"].clone();
+    assert_eq!(logged["output"].as_str().unwrap().split(", <").next(), Some("id 42, x 7"));
+    let stop = dap.stopped();
+    assert_eq!(stop.line, 31);
+    let frame = dap.request("stackTrace", serde_json::json!({"threadId": stop.event["threadId"]}))["stackFrames"][0]["id"].clone();
+
+    let evaluate = |dap: &mut Dap, expression: &str, context: &str| {
+        dap.send("evaluate", serde_json::json!({"expression": expression, "frameId": frame, "context": context}));
+        dap.expect("response", "evaluate")
+    };
+    assert_eq!(evaluate(&mut dap, "$id + 1", "watch")["body"]["result"], "43");
+    assert_eq!(evaluate(&mut dap, "strtoupper($message);", "hover")["body"]["result"], "'HELLO WORLD'");
+    let point = evaluate(&mut dap, "$point", "watch")["body"].clone();
+    assert_eq!(dap.variables(point["variablesReference"].as_u64().unwrap())[0], ("x".to_owned(), "7".to_owned(), 0));
+    // Errors come back as failed responses; an exception or a fiber switch does not stop anything
+    assert!(evaluate(&mut dap, "nope(", "watch")["message"].as_str().unwrap().starts_with("ParseError"));
+    assert!(evaluate(&mut dap, "throw new LogicException('no')", "watch")["message"].as_str().unwrap().starts_with("LogicException: no"));
+    assert!(evaluate(&mut dap, "Tenma::sleep(0.01)", "watch")["message"].as_str().unwrap().starts_with("FiberError"));
+    // The debug console runs statements too
+    assert_eq!(evaluate(&mut dap, "echo 'hi'; $id = 5", "repl")["success"], true);
+    assert_eq!(dap.expect("event", "output")["body"]["output"], "hi");
+    assert_eq!(evaluate(&mut dap, "$id", "watch")["body"]["result"], "5");
+
+    let locals = dap.request("scopes", serde_json::json!({"frameId": frame}))["scopes"][0]["variablesReference"].clone();
+    let set = dap.request("setVariable", serde_json::json!({"variablesReference": locals, "name": "$message", "value": "'changed'"}));
+    assert_eq!(set["value"], "'changed'");
+    dap.command("continue");
+    let body = response.join().unwrap();
+    assert!(body.ends_with("changed slept"), "{body}");
 }

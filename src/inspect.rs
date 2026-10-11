@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, LazyLock, Mutex, mpsc};
 
 use serde_json::{Value, json};
@@ -32,6 +32,7 @@ unsafe extern "C" {
     fn tenma_inspect_locals(thread: u32, index: u32, len: *mut usize) -> *mut u8;
     fn tenma_inspect_children(reference: u32, len: *mut usize) -> *mut u8;
     fn tenma_inspect_resume();
+    fn tenma_inspect_evaluate(index: u32, code: *const u8, code_len: usize, statements: bool, len: *mut usize) -> *mut u8;
 }
 
 /// The address without --inspect=…: only this machine, a debugger can run any code.
@@ -43,8 +44,8 @@ const FRAMES_PER_THREAD: u64 = 10_000;
 /// objects to expand.
 const LOCALS: u64 = 1 << 32;
 
-/// Breakpoints by file (canonical path), from setBreakpoints.
-static BREAKPOINTS: LazyLock<Mutex<HashMap<Vec<u8>, BTreeSet<u32>>>> = LazyLock::new(Default::default);
+/// Breakpoints by file (canonical path) and line, from setBreakpoints.
+static BREAKPOINTS: LazyLock<Mutex<HashMap<Vec<u8>, HashMap<u32, Breakpoint>>>> = LazyLock::new(Default::default);
 /// Exceptions to stop at, from setExceptionBreakpoints.
 static EXCEPTIONS: AtomicU8 = AtomicU8::new(UNCAUGHT);
 const UNCAUGHT: u8 = 1;
@@ -53,6 +54,8 @@ const ALL: u8 = 2;
 static PAUSE: AtomicBool = AtomicBool::new(false);
 /// --inspect-brk: stop at the script's first statement.
 static ENTRY: AtomicBool = AtomicBool::new(false);
+/// The thread the worker stopped in: evaluating only works in its frames.
+static STOPPED_THREAD: AtomicU32 = AtomicU32::new(0);
 /// A worker is stopped and waits for commands. Only the server sets it back, when it resumes the
 /// worker: a second continue in quick succession must not resume the next stop.
 static STOPPED: AtomicBool = AtomicBool::new(false);
@@ -68,6 +71,14 @@ static COMMANDS: LazyLock<(Mutex<mpsc::Sender<Command>>, Mutex<mpsc::Receiver<Co
 /// The editor's connection for writing; the worker writes its answers and events there too.
 static CLIENT: Mutex<Option<TcpStream>> = Mutex::new(None);
 static SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone)]
+struct Breakpoint {
+    /// Stops only if this PHP expression is true.
+    condition: Option<String>,
+    /// A logpoint: prints this instead of stopping, `{expression}` replaced by its value.
+    log: Option<String>,
+}
 
 enum Command {
     /// A request only the stopped worker can answer (threads, stacks, variables).
@@ -215,7 +226,17 @@ fn handle(request: &Value) -> bool {
                 {"filter": "uncaught", "label": "Uncaught exceptions", "default": true},
                 {"filter": "all", "label": "All exceptions", "default": false},
             ]);
-            respond(request, json!({"supportsConfigurationDoneRequest": true, "exceptionBreakpointFilters": filters}));
+            respond(
+                request,
+                json!({
+                    "supportsConfigurationDoneRequest": true,
+                    "exceptionBreakpointFilters": filters,
+                    "supportsConditionalBreakpoints": true,
+                    "supportsLogPoints": true,
+                    "supportsEvaluateForHovers": true,
+                    "supportsSetVariable": true,
+                }),
+            );
             event("initialized", json!({}));
         }
         "launch" | "attach" => respond(request, json!({})),
@@ -233,8 +254,14 @@ fn handle(request: &Value) -> bool {
             let path = arguments["source"]["path"].as_str().unwrap_or_default();
             // PHP knows files by their real path (on macOS /tmp is /private/tmp)
             let file = std::fs::canonicalize(path).map_or_else(|_| path.as_bytes().to_vec(), |path| path.as_os_str().as_bytes().to_vec());
-            let lines: BTreeSet<u32> = arguments["breakpoints"].as_array().into_iter().flatten().filter_map(|breakpoint| breakpoint["line"].as_u64()).filter_map(|line| u32::try_from(line).ok()).collect();
-            let verified: Vec<Value> = lines.iter().map(|line| json!({"verified": true, "line": line})).collect();
+            let text = |value: &Value| value.as_str().filter(|text| !text.trim().is_empty()).map(str::to_owned);
+            let lines: HashMap<u32, Breakpoint> = arguments["breakpoints"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|breakpoint| Some((u32::try_from(breakpoint["line"].as_u64()?).ok()?, Breakpoint { condition: text(&breakpoint["condition"]), log: text(&breakpoint["logMessage"]) })))
+                .collect();
+            let verified: Vec<Value> = lines.keys().collect::<BTreeSet<_>>().into_iter().map(|line| json!({"verified": true, "line": line})).collect();
             let mut breakpoints = BREAKPOINTS.lock().unwrap();
             if lines.is_empty() {
                 breakpoints.remove(&file);
@@ -248,7 +275,7 @@ fn handle(request: &Value) -> bool {
             let frame = arguments["frameId"].as_u64().unwrap_or_default();
             respond(request, json!({"scopes": [{"name": "Locals", "presentationHint": "locals", "variablesReference": LOCALS + frame, "expensive": false}]}));
         }
-        "threads" | "stackTrace" | "variables" => {
+        "threads" | "stackTrace" | "variables" | "evaluate" | "setVariable" => {
             if STOPPED.load(Ordering::Relaxed) {
                 let _ = COMMANDS.0.lock().unwrap().send(Command::Answer(request.clone()));
             } else if request["command"] == "threads" {
@@ -300,7 +327,9 @@ extern "C" fn tenma_rs_statement(file: *const u8, file_len: usize, line: u32, fr
         "pause"
     } else if STEPPING.get().is_some_and(|(step, since, depth)| since == fiber && arrived(step, depth)) {
         "step"
-    } else if BREAKPOINTS.lock().unwrap().get(bytes(file, file_len)).is_some_and(|lines| lines.contains(&line)) {
+    } else if let Some(breakpoint) = breakpoint_at(bytes(file, file_len), line)
+        && hits(&breakpoint)
+    {
         "breakpoint"
     } else {
         return;
@@ -324,6 +353,101 @@ extern "C" fn tenma_rs_exception(description: *const u8, description_len: usize,
     let _ = stop(json!({"reason": "exception", "description": description, "text": text}));
 }
 
+/// A copy: evaluating its condition must not hold the lock.
+fn breakpoint_at(file: &[u8], line: u32) -> Option<Breakpoint> {
+    BREAKPOINTS.lock().unwrap().get(file)?.get(&line).cloned()
+}
+
+/// Does a breakpoint stop? Not if its condition is false; a logpoint prints instead. A condition
+/// that fails stops, with the error in the debug console.
+fn hits(breakpoint: &Breakpoint) -> bool {
+    let stops = match &breakpoint.condition {
+        Some(condition) => match evaluate(0, condition, false) {
+            Ok(result) => result.truthy,
+            Err(error) => {
+                output(&format!("tenma: breakpoint condition {condition}: {error}\n"), "stderr");
+                true
+            }
+        },
+        None => true,
+    };
+    let stops = match &breakpoint.log {
+        Some(message) if stops => {
+            output(&format!("{}\n", interpolate(message)), "console");
+            false
+        }
+        _ => stops,
+    };
+    // The values are not needed any more
+    unsafe { tenma_inspect_resume() };
+    stops
+}
+
+/// A logpoint's message with each `{expression}` replaced by its value.
+fn interpolate(message: &str) -> String {
+    let mut text = String::new();
+    let mut rest = message;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        text.push_str(&rest[..open]);
+        match evaluate(0, &rest[open + 1..open + close], false) {
+            Ok(result) => text.push_str(&result.text),
+            Err(error) => text.push_str(&format!("<{error}>")),
+        }
+        rest = &rest[open + close + 1..];
+    }
+    text + rest
+}
+
+struct Evaluated {
+    value: String,
+    kind: String,
+    reference: u64,
+    truthy: bool,
+    /// A string's content unquoted, otherwise the value.
+    text: String,
+}
+
+/// Evaluates PHP code in shown frame `index` of the stopped thread; `statements`: code without a
+/// result, such as `$a = 1; $b = 2` in the debug console.
+fn evaluate(index: u32, code: &str, statements: bool) -> Result<Evaluated, String> {
+    // As an expression PHP adds `return …;` itself; statements need their last semicolon
+    let code = code.trim().trim_end_matches(';');
+    let code = if statements { format!("{code};") } else { code.to_owned() };
+    let fields = fields(|len| unsafe { tenma_inspect_evaluate(index, code.as_ptr(), code.len(), statements, len) });
+    match fields.first().map(String::as_str) {
+        Some("ok") if fields.len() >= 7 => Ok(Evaluated {
+            value: fields[2].clone(),
+            kind: fields[3].clone(),
+            reference: fields[4].parse().unwrap_or_default(),
+            truthy: fields[5] == "1",
+            text: fields[6].clone(),
+        }),
+        Some("fatal") => Err(format!("fatal error: {}; the worker restarts once it runs on", fields[1])),
+        _ => Err(fields.get(1).cloned().unwrap_or_default()),
+    }
+}
+
+/// echo and the error log of the app, also in the editor's debug console.
+#[unsafe(no_mangle)]
+extern "C" fn tenma_rs_output(text: *const u8, len: usize, log: i32) {
+    if CLIENT.lock().unwrap().is_none() {
+        return;
+    }
+    let text = String::from_utf8_lossy(bytes(text, len));
+    if log != 0 {
+        output(&format!("{text}\n"), "stderr");
+    } else {
+        output(&text, "stdout");
+    }
+}
+
+fn output(text: &str, category: &str) {
+    event("output", json!({"category": category, "output": text}));
+}
+
 /// Has a step that began at `depth` arrived at the current statement?
 fn arrived(step: Step, depth: u32) -> bool {
     let now = unsafe { tenma_inspect_depth() };
@@ -337,7 +461,9 @@ fn arrived(step: Step, depth: u32) -> bool {
 /// Blocks the worker until the editor resumes it; returns the step it asked for.
 fn stop(mut body: Value) -> Option<Step> {
     STOPPED.store(true, Ordering::Relaxed);
-    body["threadId"] = json!(unsafe { tenma_inspect_thread_id() });
+    let thread = unsafe { tenma_inspect_thread_id() };
+    STOPPED_THREAD.store(thread, Ordering::Relaxed);
+    body["threadId"] = json!(thread);
     body["allThreadsStopped"] = json!(true);
     event("stopped", body);
     let commands = COMMANDS.1.lock().unwrap();
@@ -394,8 +520,46 @@ fn answer(request: &Value) {
                 .collect();
             respond(request, json!({"variables": variables}));
         }
+        Some("evaluate") => {
+            let Some(index) = frame_index(arguments["frameId"].as_u64()) else {
+                return fail(request, "only in the stopped request's frames");
+            };
+            let expression = arguments["expression"].as_str().unwrap_or_default();
+            let mut result = evaluate(index, expression, false);
+            // The debug console also runs statements: echo, assignments, loops
+            if arguments["context"] == "repl" && result.as_ref().is_err_and(|error| error.starts_with("ParseError")) {
+                result = evaluate(index, expression, true);
+            }
+            match result {
+                Ok(result) => respond(request, json!({"result": result.value, "type": result.kind, "variablesReference": result.reference})),
+                Err(error) => fail(request, &error),
+            }
+        }
+        Some("setVariable") => {
+            let reference = arguments["variablesReference"].as_u64().unwrap_or_default();
+            let name = arguments["name"].as_str().unwrap_or_default();
+            let frame = reference.checked_sub(LOCALS);
+            let Some(index) = frame.and_then(|frame| frame_index(Some(frame))).filter(|_| name.starts_with('$') && name != "$this") else {
+                return fail(request, "only local variables of the stopped request can be changed");
+            };
+            let value = arguments["value"].as_str().unwrap_or_default();
+            match evaluate(index, &format!("{name} = ({value})"), false) {
+                Ok(result) => respond(request, json!({"value": result.value, "type": result.kind, "variablesReference": result.reference})),
+                Err(error) => fail(request, &error),
+            }
+        }
         _ => {}
     }
+}
+
+/// A frame's position in the stopped thread's stack; the innermost without a frame ID. None for
+/// frames of other threads.
+fn frame_index(frame: Option<u64>) -> Option<u32> {
+    let Some(frame) = frame else {
+        return Some(0);
+    };
+    let thread = u64::from(STOPPED_THREAD.load(Ordering::Relaxed));
+    (frame / FRAMES_PER_THREAD == thread).then_some((frame % FRAMES_PER_THREAD) as u32)
 }
 
 /// The null-terminated fields C packed into malloc() memory; freed here.
