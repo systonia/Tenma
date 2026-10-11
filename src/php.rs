@@ -277,6 +277,12 @@ pub fn request_exit(status: u8) {
     EXIT.notify_one();
 }
 
+/// --watch: the script runs again, its last exit() is forgotten.
+pub fn forget_exit() {
+    EXIT_STATUS.store(-1, std::sync::atomic::Ordering::Relaxed);
+    let _ = futures_util::FutureExt::now_or_never(EXIT.notified());
+}
+
 /// The status of exit() outside a request, if it ran.
 pub fn exit_status() -> Option<u8> {
     u8::try_from(EXIT_STATUS.load(std::sync::atomic::Ordering::Relaxed)).ok()

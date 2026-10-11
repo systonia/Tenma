@@ -799,3 +799,75 @@ fn stubs_describe_the_public_api_only() {
         assert!(!stubs.contains(hidden), "leaks {hidden}");
     }
 }
+
+/// A fresh directory for scripts a test changes.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let directory = std::env::temp_dir().join(format!("tenma-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    directory
+}
+
+/// Asks until the response satisfies `expected`; a reload takes a moment.
+fn eventually(port: u16, path: &str, expected: impl Fn(&str) -> bool) -> String {
+    let started = Instant::now();
+    loop {
+        let response = get(port, path);
+        if expected(&response) || started.elapsed() > Duration::from_secs(5) {
+            return response;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn watch_reloads_on_changes() {
+    let port = 18_119;
+    let directory = scratch("watch");
+    let app = directory.join("app.php");
+    let lazy = directory.join("lazy.php");
+    let script = |version: &str| format!("<?php\nTenma::serve({port}, function ($request) {{\n    if ($request->path === '/lazy') {{ require_once __DIR__ . '/lazy.php'; return lazy(); }}\n    return \"{version}\\n\";\n}});\n");
+    std::fs::write(&app, script("one")).unwrap();
+    std::fs::write(&lazy, "<?php function lazy() { return \"lazy one\\n\"; }").unwrap();
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--watch", "--workers", "2"]).arg(&app).spawn().unwrap());
+    assert!(get(port, "/").ends_with("\r\n\r\none\n"));
+    assert!(get(port, "/lazy").ends_with("lazy one\n"));
+
+    std::fs::write(&app, script("two")).unwrap();
+    let response = eventually(port, "/", |response| response.ends_with("two\n"));
+    assert!(response.ends_with("\r\n\r\ntwo\n"), "{response}");
+    // Loaded only by a request, after the start: watched as well
+    std::fs::write(&lazy, "<?php function lazy() { return \"lazy two\\n\"; }").unwrap();
+    let response = eventually(port, "/lazy", |response| response.ends_with("lazy two\n"));
+    assert!(response.ends_with("lazy two\n"), "{response}");
+
+    // A syntax error does not end tenma: 503 until the next change
+    std::fs::write(&app, "<?php syntax error").unwrap();
+    let response = eventually(port, "/", |response| response.starts_with("HTTP/1.1 503"));
+    assert!(response.starts_with("HTTP/1.1 503") && response.contains("Waiting for changes"), "{response}");
+    std::fs::write(&app, script("three")).unwrap();
+    let response = eventually(port, "/", |response| response.ends_with("three\n"));
+    assert!(response.ends_with("\r\n\r\nthree\n"), "{response}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn watch_reruns_scripts_without_servers() {
+    use std::io::BufRead;
+    let directory = scratch("watch-script");
+    let script = directory.join("script.php");
+    std::fs::write(&script, "<?php echo \"run one\\n\";").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("--watch").arg(&script).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+    let _child = Server(child);
+    assert_eq!(lines.next().unwrap().unwrap(), "run one");
+    // The script has ended; tenma waits for a change and runs it again
+    std::thread::sleep(Duration::from_millis(200));
+    // Still running with a pending timer: a change stops it and runs the script again
+    std::fs::write(&script, "<?php echo \"run two\\n\"; Tenma::setTimeout(fn() => null, 60_000);").unwrap();
+    assert_eq!(lines.next().unwrap().unwrap(), "run two");
+    std::thread::sleep(Duration::from_millis(200));
+    std::fs::write(&script, "<?php echo \"run three\\n\";").unwrap();
+    assert_eq!(lines.next().unwrap().unwrap(), "run three");
+    let _ = std::fs::remove_dir_all(directory);
+}

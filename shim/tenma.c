@@ -76,6 +76,8 @@ extern uint64_t tenma_rs_fs(const char *op, size_t op_len, const char *path, siz
     const char *second, size_t second_len, bool flag, const char *data, size_t data_len);
 /** exit() outside a request: tenma exits with this status. */
 extern void tenma_rs_exit(int status);
+/** tenma --watch: a file PHP loaded, see tenma_report_included. */
+extern void tenma_rs_included(const char *path, size_t len);
 extern uint64_t tenma_rs_db(const char *op, size_t op_len, const char *target, size_t target_len,
     const char *sql, size_t sql_len, const char *params, size_t params_len);
 extern uint64_t tenma_rs_fetch(const char *method, size_t method_len, const char *url, size_t url_len,
@@ -421,6 +423,13 @@ static size_t tenma_read_post(char *buffer, size_t count) {
     return n;
 }
 
+/** tenma --watch, set before tenma_start. */
+static int watch_mode = 0;
+
+void tenma_set_watch(void) {
+    watch_mode = 1;
+}
+
 #define INI_DEFAULT(name, value) \
     ZVAL_NEW_STR(&tmp, zend_string_init(value, sizeof(value) - 1, 1)); \
     zend_hash_str_update(configuration_hash, name, sizeof(name) - 1, &tmp);
@@ -436,6 +445,10 @@ static void tenma_ini_defaults(HashTable *configuration_hash) {
     INI_DEFAULT("upload_max_filesize", "0");
     INI_DEFAULT("display_errors", "0");
     INI_DEFAULT("log_errors", "1");
+    if (watch_mode) {
+        // Opcache checks timestamps only every 2 s by default and would load the old code right after saving
+        INI_DEFAULT("opcache.revalidate_freq", "0");
+    }
 }
 
 int tenma_start(void) {
@@ -512,6 +525,26 @@ void tenma_thread_stop(void) {
     handler_count = 0;
     php_request_shutdown(NULL);
     ts_free_thread();
+}
+
+/**
+ * tenma --watch: reports every file PHP loaded from position `from` on to Rust and returns the
+ * new count. EG(included_files) only grows, and PHP adds a file before compiling it, so a file
+ * with a syntax error is watched too.
+ */
+size_t tenma_report_included(size_t from) {
+    size_t count = zend_hash_num_elements(&EG(included_files));
+    if (count <= from) {
+        return count;
+    }
+    size_t index = 0;
+    zend_string *path;
+    ZEND_HASH_FOREACH_STR_KEY(&EG(included_files), path) {
+        if (index++ >= from && path) {
+            tenma_rs_included(ZSTR_VAL(path), ZSTR_LEN(path));
+        }
+    } ZEND_HASH_FOREACH_END();
+    return count;
 }
 
 /** Prints an uncaught exception and clears it. */

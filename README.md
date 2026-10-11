@@ -131,6 +131,7 @@ Waypoint itself no longer needs classic mode: the app is itself a handler, `Tenm
 
 ```
 tenma app.php                    # one worker: one thread, one shared state
+tenma --watch app.php            # reload when a file the script loaded changes, like node --watch
 tenma --workers 4 app.php        # four workers, each with its own PHP interpreter and its own state
 tenma --workers auto app.php     # one worker per core
 tenma --max-body 50m app.php     # largest request body, default 10m, 413 above that
@@ -145,6 +146,8 @@ tenma --request-timeout 10 app.php               # headers and body must arrive 
 Limits: a request's headers and body must arrive within `--request-timeout` (otherwise disconnect or 408, against Slowloris); bodies and WebSocket messages are at most `--max-body` in size. A WebSocket client may send at most 256 messages that PHP has not read yet, then tenma disconnects it. `Tenma::fetch()` has a `timeout` (default 30 s); connections to Postgres, Redis and via `Tenma::fetch()` must be established within 10 s.
 
 Robust: a fatal PHP error (out of memory, stack overflow) restarts only the interpreter of the affected worker and runs the script there again; the request gets a 500. Ctrl+C and SIGTERM stop accepting connections and let running requests finish for up to 10 seconds. PHP's own signal handlers are disabled; signals belong to Rust.
+
+`--watch` is for development: tenma watches every file the script loaded, including classes the autoloader loads later, and restarts the workers' interpreters when one of them changes (different content, not just a new timestamp). The port stays open, requests during the reload wait instead of failing; in-memory state starts over, as with `node --watch`. A script that fails to load after a change answers 503 until the next change; changed ports restart tenma as a whole; a script without servers runs again. Running requests get 1 second to finish instead of 10, and `opcache.revalidate_freq` defaults to 0.
 
 With several workers, the script runs once per worker, and each has its own memory: an in-memory counter or cache exists per worker, as with Node `cluster` or FrankenPHP. Shared state then belongs in a database or Redis.
 
@@ -168,6 +171,7 @@ PhpStorm and Intelephense pick them up from `vendor/`; for PHPStan the package b
 | `src/db.rs` | Postgres (tokio-postgres, pool per worker) and Redis (one shared connection per URL) as ops |
 | `src/fs.rs` | File system ops for `Tenma\Fs`, on tokio's blocking threads |
 | `src/files.rs` | Static files for `Tenma::serve(..., static:)`: prefixes, ETag/304, ranges, checks on the opened file |
+| `src/watch.rs` | `--watch`: watches the files PHP loaded, reports real changes (content, not timestamps) for a reload |
 | `src/streams.rs` | Streaming responses (body from a channel with backpressure) and WebSockets (tokio-tungstenite after the HTTP upgrade) |
 | `shim/tenma.c` | C layer: embed PHP, `tenma_listen()` for PHP, call handlers, convert PHP values to C values, catch fatal errors with `zend_try` |
 | `stdlib/tenma.php` | Standard library in PHP, embedded in the binary: `Tenma::serve()`, `Tenma::serveClassic()`, `Request`, `Response` |

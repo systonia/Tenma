@@ -5,7 +5,7 @@
 //!
 //! A fatal PHP error only breaks the interpreter of one worker: the worker restarts it and runs
 //! the script again. Ctrl+C or SIGTERM stop accepting connections and let running requests
-//! finish.
+//! finish. With --watch, all workers restart that way when a file the script loaded changes.
 
 mod db;
 mod files;
@@ -13,13 +13,15 @@ mod fs;
 mod ops;
 mod php;
 mod streams;
+mod watch;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -38,9 +40,11 @@ use tokio::task::LocalSet;
 const STDLIB: &str = include_str!("../stdlib/tenma.php");
 /// Prints the public API as stubs; only evaluated for `tenma --stubs`.
 const STUBS: &str = include_str!("../stdlib/stubs.php");
-const USAGE: &str = "Usage: tenma [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] <script.php> [arguments …]\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)";
+const USAGE: &str = "Usage: tenma [--watch] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] <script.php> [arguments …]\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
+/// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
+const WATCH_DRAIN: Duration = Duration::from_secs(1);
 /// PHP expects the large stack of a main thread, not the 2 MB of a Rust thread.
 const WORKER_STACK: usize = 8 * 1024 * 1024;
 
@@ -52,6 +56,8 @@ type Ready = Result<Vec<php::Listener>, u8>;
 
 struct Worker {
     connections: UnboundedSender<Connection>,
+    /// --watch: a file changed, the worker runs the script again.
+    change: Arc<Notify>,
     /// Returns the exit status when a script without servers has finished.
     thread: JoinHandle<u8>,
 }
@@ -65,6 +71,10 @@ struct Options {
     max_requests: Option<u64>,
     /// How long the headers and body of a request may take to arrive (against Slowloris).
     request_timeout: Duration,
+    /// Reload when a file the script loaded changes.
+    watch: bool,
+    /// How long running requests may take to finish on shutdown or restart.
+    drain: Duration,
 }
 
 /// Why a worker's event loop ends.
@@ -73,11 +83,16 @@ enum Stop {
     Closed,
     /// Restart the interpreter and run the script again.
     Restart,
+    /// --watch: the script failed or ended, run it again after the next change.
+    Wait,
 }
 
 thread_local! {
     /// Wakes the worker's event loop so it restarts its interpreter.
     static RESTART: Rc<Notify> = Rc::new(Notify::new());
+    /// --watch: a file changed. Apart from RESTART, which a fatal error or --max-requests sends
+    /// and which does not outlive the interpreter it was meant for.
+    static CHANGE: RefCell<Arc<Notify>> = RefCell::new(Arc::new(Notify::new()));
     /// After a fatal error: this thread's PHP must not run again until the restart.
     static BROKEN: Cell<bool> = const { Cell::new(false) };
     /// Requests since the interpreter last started.
@@ -107,6 +122,9 @@ fn main() -> ExitCode {
         }
     };
     streams::MAX_MESSAGE.store(options.max_body, std::sync::atomic::Ordering::Relaxed);
+    if options.watch {
+        watch::configure();
+    }
     if let Err(message) = php::start() {
         eprintln!("tenma: {message}");
         return ExitCode::FAILURE;
@@ -138,11 +156,15 @@ fn stubs() -> ExitCode {
 /// Options for tenma, then the script; everything after it belongs to the script ($argv), as with `php script.php …`.
 fn parse_args() -> Result<(Vec<String>, Options), String> {
     let mut args = std::env::args().skip(1);
-    let mut options = Options { workers: 1, max_body: 10 << 20, max_requests: None, request_timeout: Duration::from_secs(30) };
+    let mut options = Options { workers: 1, max_body: 10 << 20, max_requests: None, request_timeout: Duration::from_secs(30), watch: false, drain: DRAIN };
     let mut argv = Vec::new();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
+            "--watch" => {
+                options.watch = true;
+                options.drain = WATCH_DRAIN;
+            }
             "--workers" | "-w" => {
                 options.workers = match value("--workers")?.as_str() {
                     "auto" => std::thread::available_parallelism().map_or(1, usize::from),
@@ -200,21 +222,36 @@ fn parse_size(text: &str) -> Result<usize, String> {
 
 /// `argv[0]` is the script, the rest are its arguments.
 fn run(argv: &[String], options: Options) -> u8 {
+    let mut changes = if options.watch {
+        match watch::start() {
+            Ok(changes) => Some(changes),
+            Err(message) => {
+                eprintln!("tenma: {message}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
     // The first worker runs the script alone. If it registers no server, it was an ordinary
-    // script and runs only once.
-    let (first, ready) = spawn_worker(argv, options);
+    // script and runs only once; with --watch, the worker runs it again after every change.
+    let (first, ready) = spawn_worker(argv, options, None);
     let listeners = match ready {
-        Ok(listeners) if !listeners.is_empty() => listeners,
-        // A script without servers: its status, or that of exit() in timers and background work
-        Ok(_) => return first.thread.join().unwrap_or(1),
+        Ok(listeners) => listeners,
         Err(status) => {
             let _ = first.thread.join();
             return status;
         }
     };
+    // A script without servers: its status, or that of exit() in timers and background work
+    if listeners.is_empty() && !options.watch {
+        return first.thread.join().unwrap_or(1);
+    }
+    let ports: BTreeSet<u16> = listeners.iter().map(|listener| listener.port).collect();
+    let serving = !ports.is_empty();
     let mut workers = vec![first];
-    for _ in 1..options.workers {
-        let (worker, ready) = spawn_worker(argv, options);
+    for _ in 1..if serving { options.workers } else { 1 } {
+        let (worker, ready) = spawn_worker(argv, options, Some(ports.clone()));
         workers.push(worker);
         if let Err(status) = ready {
             // Collect all workers first: shutting PHP down while one is still running would crash
@@ -223,17 +260,30 @@ fn run(argv: &[String], options: Options) -> u8 {
         }
     }
 
-    let ports: BTreeSet<u16> = listeners.iter().map(|listener| listener.port).collect();
     let senders: Vec<_> = workers.iter().map(|worker| worker.connections.clone()).collect();
+    let changed: Vec<_> = workers.iter().map(|worker| worker.change.clone()).collect();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
     runtime.block_on(async move {
         for port in ports {
             tokio::spawn(accept(port, senders.clone()));
         }
-        tokio::select! {
-            () = shutdown_signal() => {}
-            // exit() outside a request also ends a server
-            () = php::EXIT.notified() => eprintln!("tenma: exit() outside a request, shutting down"),
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                () = &mut shutdown => break,
+                // exit() outside a request also ends a server; a script without servers waits for changes
+                () = php::EXIT.notified(), if serving => {
+                    eprintln!("tenma: exit() outside a request, shutting down");
+                    break;
+                }
+                Some(path) = next_change(&mut changes) => {
+                    eprintln!("tenma: {} changed, reloading", shown(&path));
+                    for change in &changed {
+                        change.notify_one();
+                    }
+                }
+            }
         }
     });
     drop(runtime);
@@ -241,8 +291,22 @@ fn run(argv: &[String], options: Options) -> u8 {
     php::exit_status().unwrap_or(0)
 }
 
+/// The next change --watch reports; never without --watch.
+async fn next_change(changes: &mut Option<UnboundedReceiver<PathBuf>>) -> Option<PathBuf> {
+    match changes {
+        Some(changes) => changes.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// A path for messages: relative to the working directory if it lies below it.
+fn shown(path: &std::path::Path) -> String {
+    let relative = std::env::current_dir().ok().and_then(|cwd| path.strip_prefix(cwd.canonicalize().ok()?).ok().map(std::path::Path::to_path_buf));
+    relative.as_deref().unwrap_or(path).display().to_string()
+}
+
 /// Closed channels end the workers. Close all first, then wait: this way they shut down at the
-/// same time, not one after another with up to DRAIN of waiting each.
+/// same time, not one after another with up to the drain time of waiting each.
 fn stop_workers(workers: Vec<Worker>) {
     let threads: Vec<_> = workers.into_iter().map(|worker| worker.thread).collect();
     for thread in threads {
@@ -251,16 +315,19 @@ fn stop_workers(workers: Vec<Worker>) {
 }
 
 /// Starts a worker thread and waits until its script has run.
-fn spawn_worker(argv: &[String], options: Options) -> (Worker, Ready) {
+/// `ports`: those the main thread listens on, None for the first worker, which determines them.
+fn spawn_worker(argv: &[String], options: Options, ports: Option<BTreeSet<u16>>) -> (Worker, Ready) {
     let argv = argv.to_vec();
     let (ready_sender, ready) = mpsc::channel();
     let (connections, receiver) = unbounded_channel();
+    let change = Arc::new(Notify::new());
+    let worker_change = change.clone();
     let thread = std::thread::Builder::new()
         .stack_size(WORKER_STACK)
-        .spawn(move || worker(&argv, &ready_sender, receiver, options))
+        .spawn(move || worker(&argv, &ready_sender, receiver, worker_change, ports, options))
         .expect("worker thread does not start");
     let ready = ready.recv().unwrap_or(Err(1));
-    (Worker { connections, thread }, ready)
+    (Worker { connections, change, thread }, ready)
 }
 
 /// Ctrl+C or SIGTERM, as sent by Docker, systemd and Kubernetes to stop.
@@ -273,7 +340,8 @@ async fn shutdown_signal() {
     eprintln!("tenma: shutting down");
 }
 
-fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: UnboundedReceiver<Connection>, options: Options) -> u8 {
+fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: UnboundedReceiver<Connection>, change: Arc<Notify>, mut ports: Option<BTreeSet<u16>>, options: Options) -> u8 {
+    CHANGE.set(change);
     let mut first = true;
     let mut status = 0;
     loop {
@@ -289,61 +357,142 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
         }
         BROKEN.set(false);
         HANDLED.set(0);
-        let stop = match load(argv) {
+        watch::forget();
+        let loaded = load(argv);
+        // Also after a failure: the file with the syntax error is watched too
+        watch::report();
+        let stop = match loaded {
             Ok(listeners) => {
                 if first {
                     let _ = ready.send(Ok(listeners.clone()));
                 }
+                let now: BTreeSet<u16> = listeners.iter().map(|listener| listener.port).collect();
+                if options.watch && *ports.get_or_insert_with(|| now.clone()) != now {
+                    // ponytail: the whole process restarts; the listeners would have to move to new ports otherwise
+                    eprintln!("tenma: the script's ports changed, restarting tenma");
+                    restart_process();
+                }
                 if listeners.is_empty() {
                     // If the script ended with exit() or die(), tenma starts nothing it had scheduled
-                    if !php::script_exited() {
-                        status = run_until_idle();
+                    let ended = if php::script_exited() { Ok(status) } else { run_until_idle(&mut connections) };
+                    match ended {
+                        Ok(ended) => {
+                            status = ended;
+                            if options.watch {
+                                eprintln!("tenma: script ended with status {status}, waiting for changes");
+                                Stop::Wait
+                            } else {
+                                Stop::Closed
+                            }
+                        }
+                        Err(stop) => stop,
                     }
-                    Stop::Closed
                 } else {
                     serve(&listeners, &mut connections, options)
                 }
             }
-            Err(status) => {
-                if first {
+            Err(failed) => {
+                status = failed;
+                if options.watch {
+                    // Even on the first run: tenma waits for a fix, and restarts if it brings servers
+                    if first {
+                        let _ = ready.send(Ok(Vec::new()));
+                    }
+                    ports.get_or_insert_with(BTreeSet::new);
+                    eprintln!("tenma: script failed, waiting for changes");
+                    Stop::Wait
+                } else if first {
                     let _ = ready.send(Err(status));
+                    Stop::Closed
                 } else {
                     // The script failed on restart: without the worker, carrying on does not help
                     eprintln!("tenma: script fails on worker restart, exiting");
                     std::process::exit(1);
                 }
-                Stop::Closed
             }
         };
         php::thread_stop();
         first = false;
-        if let Stop::Closed = stop {
-            return status;
+        match stop {
+            Stop::Closed => return status,
+            Stop::Restart => {}
+            Stop::Wait => {
+                // exit() of this run must not end the next one
+                php::forget_exit();
+                if let Stop::Closed = unavailable(&mut connections, options) {
+                    return status;
+                }
+            }
         }
     }
 }
 
+/// Replaces the process with a fresh tenma with the same arguments.
+fn restart_process() -> ! {
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "tenma".into())).args(std::env::args_os().skip(1)).exec();
+    eprintln!("tenma: cannot restart: {error}");
+    std::process::exit(1);
+}
+
+/// --watch: the script failed or ended. Requests get 503 until the next change restarts the
+/// worker; the error is on the console.
+fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options) -> Stop {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
+    let change = CHANGE.with_borrow(Arc::clone);
+    runtime.block_on(async {
+        loop {
+            tokio::select! {
+                connection = connections.recv() => {
+                    let Some((_, stream)) = connection else {
+                        break Stop::Closed;
+                    };
+                    let Ok(stream) = TcpStream::from_std(stream) else {
+                        continue;
+                    };
+                    let service = service_fn(|_| async { Ok::<_, Infallible>(plain(StatusCode::SERVICE_UNAVAILABLE, "The script failed to load, see the console. Waiting for changes.\n")) });
+                    // No keep-alive: the connection ends with this runtime at the next change
+                    tokio::spawn(
+                        http1::Builder::new()
+                            .timer(hyper_util::rt::TokioTimer::new())
+                            .header_read_timeout(options.request_timeout)
+                            .keep_alive(false)
+                            .serve_connection(TokioIo::new(stream), service),
+                    );
+                }
+                () = change.notified() => break Stop::Restart,
+            }
+        }
+    })
+}
+
 /// A script without servers: like Node, the event loop runs while timers or other ops are pending.
-/// Ends with the status of exit() in timers or background work, 255 after a fatal error.
-fn run_until_idle() -> u8 {
+/// Ends with the status of exit() in timers or background work, 255 after a fatal error. With
+/// --watch, a change (Restart) or the end of tenma (Closed) stops it early.
+fn run_until_idle(connections: &mut UnboundedReceiver<Connection>) -> Result<u8, Stop> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
     let restart = RESTART.with(Rc::clone);
-    let status = ops::in_loop(|| {
+    let change = CHANGE.with_borrow(Arc::clone);
+    let ended = ops::in_loop(|| {
         LocalSet::new().block_on(&runtime, async {
             if php::started().is_err() {
-                return 255;
+                return Ok(255);
             }
             tokio::select! {
                 // In order: if exit() also ends the last op, the status of exit() counts
                 biased;
-                () = php::EXIT.notified() => php::exit_status().unwrap_or(0),
+                () = php::EXIT.notified() => Ok(php::exit_status().unwrap_or(0)),
                 // A fatal error: without servers there is no restart, the script has failed
-                () = restart.notified() => 255,
-                () = ops::idle() => 0,
+                () = restart.notified() => Ok(255),
+                () = ops::idle() => Ok(0),
+                () = change.notified() => Err(Stop::Restart),
+                // Without servers no connection comes: only the main thread closing the channel
+                _ = connections.recv() => Err(Stop::Closed),
             }
         })
     });
-    if BROKEN.get() { 255 } else { php::exit_status().unwrap_or(status) }
+    let status = ended?;
+    Ok(if BROKEN.get() { 255 } else { php::exit_status().unwrap_or(status) })
 }
 
 /// Loads the standard library and the script into this thread's PHP interpreter.
@@ -373,8 +522,9 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
     let (drain, drained) = tokio::sync::watch::channel(());
     let restart = RESTART.with(Rc::clone);
     // A restart signal from the previous interpreter (e.g. a fatal error and max-requests at once)
-    // does not apply to this one
+    // does not apply to this one; a change does, it may have come while the script was loading
     let _ = futures_util::FutureExt::now_or_never(restart.notified());
+    let change = CHANGE.with_borrow(Arc::clone);
     let stop = ops::in_loop(|| local.block_on(&runtime, async {
         if php::started().is_err() {
             // If the startup work already fails, every restart would fail again: tenma shuts down
@@ -416,6 +566,7 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
                     });
                 }
                 () = restart.notified() => break Stop::Restart,
+                () = change.notified() => break Stop::Restart,
             }
         }
     }));
@@ -425,7 +576,7 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
     ops::in_loop(|| {
         local.block_on(&runtime, async {
             let _ = drain.send(());
-            let _ = tokio::time::timeout(DRAIN, drain.closed()).await;
+            let _ = tokio::time::timeout(options.drain, drain.closed()).await;
         })
     });
     stop
@@ -510,6 +661,8 @@ async fn respond(
     if options.max_requests.is_some_and(|max| HANDLED.get() == max) {
         RESTART.with(|restart| restart.notify_one());
     }
+    // ponytail: checked after requests only; a file only a timer loads is watched from the next request on
+    watch::report();
     let (status, headers, body) = match reply {
         php::Reply::Full(response) => (response.status, response.headers, Either::Left(Full::new(Bytes::from(response.body)))),
         php::Reply::Stream { status, headers, body } => (status, headers, Either::Right(streams::ChannelBody(body))),
