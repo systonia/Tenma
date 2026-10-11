@@ -341,6 +341,8 @@ fn postgres_and_redis_async() {
     assert!(get(port, "/rollback").contains(r#""n": 0"#));
     assert!(get(port, "/commit").ends_with("1\n"));
     assert!(get(port, "/script").contains(r#""n": 3"#));
+    let failed = get(port, "/script-fails");
+    assert!(failed.contains(r#""error": true"#) && failed.contains(r#""n": 0"#), "{failed}");
     assert!(get(port, "/error").contains("does_not_exist"));
     let started = Instant::now();
     let all_tx = get(port, "/all-tx");

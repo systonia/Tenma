@@ -25,6 +25,15 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
             return $db->first("SELECT count(*) AS n FROM $table WHERE name = 'discarded'");
         })(),
         '/commit' => $db->transaction(fn (Postgres $tx) => $tx->execute("UPDATE $table SET amount = amount + 1")),
+        // Several statements in one call run as one: the failing second one takes the first with it
+        '/script-fails' => (function () use ($db, $table) {
+            try {
+                $db->script("INSERT INTO $table (name) VALUES ('from-script'); INSERT INTO does_not_exist VALUES (1);");
+            } catch (RuntimeException $error) {
+                return ['error' => str_contains($error->getMessage(), 'does_not_exist'), 'kept' => $db->first("SELECT count(*)::int AS n FROM $table WHERE name = 'from-script'")];
+            }
+            return ['error' => false];
+        })(),
         // Several statements in one call, in a transaction: a migration file
         '/script' => $db->transaction(function (Postgres $tx) {
             $tx->script("CREATE TEMP TABLE script_test (n int);\nINSERT INTO script_test VALUES (1), (2);\n-- a comment; with a semicolon\nINSERT INTO script_test VALUES (3);");

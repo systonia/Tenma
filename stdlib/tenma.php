@@ -1159,8 +1159,11 @@ namespace Tenma\Db {
         }
 
         /**
-         * Several statements separated by semicolons, without parameters, such as a migration file. Inside
-         * transaction() they run in that transaction; otherwise each statement commits on its own.
+         * Several statements separated by semicolons, without parameters, such as a migration file. They run as
+         * one: a failing statement undoes the ones before it, inside transaction() as part of that transaction.
+         * Therefore no COMMIT or ROLLBACK in it, and nothing that refuses to run in a transaction (CREATE INDEX
+         * CONCURRENTLY, VACUUM, CREATE DATABASE). Never build it from input: without parameters, anything in it
+         * is SQL.
          */
         public function script(string $sql): void
         {
