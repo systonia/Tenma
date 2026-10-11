@@ -675,13 +675,14 @@ fn request_and_response_in_fiber_mode() {
          --{boundary}\r\nContent-Disposition: form-data; name=\"many[]\"; filename=\"a.bin\"\r\n\r\nA\r\n\
          --{boundary}\r\nContent-Disposition: form-data; name=\"many[]\"; filename=\"b.bin\"\r\n\r\nB\r\n\
          --{boundary}\r\nContent-Disposition: form-data; name=\"empty\"; filename=\"\"\r\n\r\n\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"nameless\"; filename=\"\"\r\n\r\ndata\r\n\
          --{boundary}--\r\n"
     );
     let multipart = |path: &str| send(format!("POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()));
     let parsed = multipart("/form");
     assert!(parsed.contains("\"title\": \"Image\"") && parsed.contains("\"tags\": [\n            \"one\",\n            \"two\"\n        ]"), "{parsed}");
     assert!(parsed.contains("\"hello.txt\",\n            \"text\\/plain\",\n            11,\n            \"Hello\\r\\nMars\""), "{parsed}");
-    assert!(parsed.contains("\"a.bin\"") && parsed.contains("\"b.bin\"") && !parsed.contains("\"empty\""), "{parsed}");
+    assert!(parsed.contains("\"a.bin\"") && parsed.contains("\"b.bin\"") && !parsed.contains("\"empty\"") && !parsed.contains("\"nameless\""), "{parsed}");
     assert!(multipart("/move").ends_with("\r\n\r\nHello\r\nMars"));
 
     // Response helpers: redirect, two cookies, one header with two values

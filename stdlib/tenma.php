@@ -1431,8 +1431,8 @@ final class Multipart
                 $fields[] = self::encodeName($name) . '=' . rawurlencode($content);
                 continue;
             }
-            if ($filename === '' && $content === '') {
-                // A file field with nothing selected, as the browser sends it
+            if ($filename === '') {
+                // A file field with nothing selected, as the browser sends it; PHP drops one with content too
                 continue;
             }
             // Older clients send the full path, even with backslashes: only the name counts
