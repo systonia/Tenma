@@ -8,6 +8,7 @@
 //! finish. With --watch, all workers restart that way when a file the script loaded changes.
 
 mod db;
+mod dev;
 mod files;
 mod fs;
 mod ops;
@@ -18,7 +19,6 @@ mod watch;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
@@ -40,11 +40,14 @@ use tokio::task::LocalSet;
 const STDLIB: &str = include_str!("../stdlib/tenma.php");
 /// Prints the public API as stubs; only evaluated for `tenma --stubs`.
 const STUBS: &str = include_str!("../stdlib/stubs.php");
-const USAGE: &str = "Usage: tenma [--watch] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] <script.php> [arguments …]\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)";
+const USAGE: &str = "Usage: tenma [--watch] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
 const WATCH_DRAIN: Duration = Duration::from_secs(1);
+/// How long the script waits for the first run of the hooks: a hook that never ends (a command
+/// with its own --watch) must not keep the app from starting.
+const HOOKS_FIRST_RUN: Duration = Duration::from_secs(10);
 /// PHP expects the large stack of a main thread, not the 2 MB of a Rust thread.
 const WORKER_STACK: usize = 8 * 1024 * 1024;
 
@@ -222,6 +225,9 @@ fn parse_size(text: &str) -> Result<usize, String> {
 
 /// `argv[0]` is the script, the rest are its arguments.
 fn run(argv: &[String], options: Options) -> u8 {
+    if argv[0] == "build" {
+        return build(argv.get(1).map_or(dev::FILE, String::as_str), options);
+    }
     let mut changes = if options.watch {
         match watch::start() {
             Ok(changes) => Some(changes),
@@ -233,13 +239,22 @@ fn run(argv: &[String], options: Options) -> u8 {
     } else {
         None
     };
+    // tenma.dev.php first: the first request should find what its hooks write
+    let dev_worker = changes.as_ref().and(dev::find(&argv[0])).map(|path| {
+        let settled = dev::settled_receiver();
+        let (worker, ready) = spawn_worker(&[path.to_string_lossy().into_owned()], options, Some(BTreeSet::new()), true);
+        if ready.is_ok() && settled.recv_timeout(HOOKS_FIRST_RUN) == Err(mpsc::RecvTimeoutError::Timeout) {
+            eprintln!("tenma: hooks still running after {} s, starting the script anyway", HOOKS_FIRST_RUN.as_secs());
+        }
+        worker
+    });
     // The first worker runs the script alone. If it registers no server, it was an ordinary
     // script and runs only once; with --watch, the worker runs it again after every change.
-    let (first, ready) = spawn_worker(argv, options, None);
+    let (first, ready) = spawn_worker(argv, options, None, false);
     let listeners = match ready {
         Ok(listeners) => listeners,
         Err(status) => {
-            let _ = first.thread.join();
+            stop_workers([first].into_iter().chain(dev_worker).collect());
             return status;
         }
     };
@@ -251,10 +266,11 @@ fn run(argv: &[String], options: Options) -> u8 {
     let serving = !ports.is_empty();
     let mut workers = vec![first];
     for _ in 1..if serving { options.workers } else { 1 } {
-        let (worker, ready) = spawn_worker(argv, options, Some(ports.clone()));
+        let (worker, ready) = spawn_worker(argv, options, Some(ports.clone()), false);
         workers.push(worker);
         if let Err(status) = ready {
             // Collect all workers first: shutting PHP down while one is still running would crash
+            workers.extend(dev_worker);
             stop_workers(workers);
             return status;
         }
@@ -262,6 +278,7 @@ fn run(argv: &[String], options: Options) -> u8 {
 
     let senders: Vec<_> = workers.iter().map(|worker| worker.connections.clone()).collect();
     let changed: Vec<_> = workers.iter().map(|worker| worker.change.clone()).collect();
+    let dev_changed = dev_worker.as_ref().map(|worker| worker.change.clone());
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
     runtime.block_on(async move {
         for port in ports {
@@ -277,22 +294,44 @@ fn run(argv: &[String], options: Options) -> u8 {
                     eprintln!("tenma: exit() outside a request, shutting down");
                     break;
                 }
-                Some(path) = next_change(&mut changes) => {
-                    eprintln!("tenma: {} changed, reloading", shown(&path));
-                    for change in &changed {
+                () = dev::EXIT.notified(), if dev_changed.is_some() => {
+                    eprintln!("tenma: exit() in a hook, shutting down");
+                    break;
+                }
+                Some(batch) = next_change(&mut changes) => {
+                    if let (Some(path), Some(change)) = (batch.dev, &dev_changed) {
+                        eprintln!("tenma: {} changed, reloading the hooks", shown(&path));
                         change.notify_one();
+                    }
+                    if let Some(path) = batch.app {
+                        eprintln!("tenma: {} changed, reloading", shown(&path));
+                        for change in &changed {
+                            change.notify_one();
+                        }
                     }
                 }
             }
         }
     });
     drop(runtime);
+    workers.extend(dev_worker);
     stop_workers(workers);
-    php::exit_status().unwrap_or(0)
+    dev::exit_status().or(php::exit_status()).unwrap_or(0)
+}
+
+/// `tenma build`: runs the hooks of tenma.dev.php once, in order; 1 if one fails.
+fn build(path: &str, options: Options) -> u8 {
+    let Ok(path) = std::path::Path::new(path).canonicalize() else {
+        eprintln!("tenma: {path} not found");
+        return 1;
+    };
+    let (worker, ready) = spawn_worker(&[path.to_string_lossy().into_owned()], options, None, true);
+    let status = worker.thread.join().unwrap_or(1);
+    ready.err().unwrap_or(status)
 }
 
 /// The next change --watch reports; never without --watch.
-async fn next_change(changes: &mut Option<UnboundedReceiver<PathBuf>>) -> Option<PathBuf> {
+async fn next_change(changes: &mut Option<UnboundedReceiver<watch::Changes>>) -> Option<watch::Changes> {
     match changes {
         Some(changes) => changes.recv().await,
         None => std::future::pending().await,
@@ -316,7 +355,8 @@ fn stop_workers(workers: Vec<Worker>) {
 
 /// Starts a worker thread and waits until its script has run.
 /// `ports`: those the main thread listens on, None for the first worker, which determines them.
-fn spawn_worker(argv: &[String], options: Options, ports: Option<BTreeSet<u16>>) -> (Worker, Ready) {
+/// `dev`: the worker runs tenma.dev.php, `argv[0]`.
+fn spawn_worker(argv: &[String], options: Options, ports: Option<BTreeSet<u16>>, dev: bool) -> (Worker, Ready) {
     let argv = argv.to_vec();
     let (ready_sender, ready) = mpsc::channel();
     let (connections, receiver) = unbounded_channel();
@@ -324,7 +364,7 @@ fn spawn_worker(argv: &[String], options: Options, ports: Option<BTreeSet<u16>>)
     let worker_change = change.clone();
     let thread = std::thread::Builder::new()
         .stack_size(WORKER_STACK)
-        .spawn(move || worker(&argv, &ready_sender, receiver, worker_change, ports, options))
+        .spawn(move || worker(&argv, &ready_sender, receiver, worker_change, ports, dev, options))
         .expect("worker thread does not start");
     let ready = ready.recv().unwrap_or(Err(1));
     (Worker { connections, change, thread }, ready)
@@ -340,8 +380,11 @@ async fn shutdown_signal() {
     eprintln!("tenma: shutting down");
 }
 
-fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: UnboundedReceiver<Connection>, change: Arc<Notify>, mut ports: Option<BTreeSet<u16>>, options: Options) -> u8 {
+fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: UnboundedReceiver<Connection>, change: Arc<Notify>, mut ports: Option<BTreeSet<u16>>, dev: bool, options: Options) -> u8 {
     CHANGE.set(change);
+    if dev {
+        watch::dev_thread();
+    }
     let mut first = true;
     let mut status = 0;
     loop {
@@ -358,7 +401,7 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
         BROKEN.set(false);
         HANDLED.set(0);
         watch::forget();
-        let loaded = load(argv);
+        let loaded = load(argv, dev, options);
         // Also after a failure: the file with the syntax error is watched too
         watch::report();
         let stop = match loaded {
@@ -367,19 +410,26 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
                     let _ = ready.send(Ok(listeners.clone()));
                 }
                 let now: BTreeSet<u16> = listeners.iter().map(|listener| listener.port).collect();
-                if options.watch && *ports.get_or_insert_with(|| now.clone()) != now {
+                if options.watch && !dev && *ports.get_or_insert_with(|| now.clone()) != now {
                     // ponytail: the whole process restarts; the listeners would have to move to new ports otherwise
                     eprintln!("tenma: the script's ports changed, restarting tenma");
                     restart_process();
                 }
                 if listeners.is_empty() {
                     // If the script ended with exit() or die(), tenma starts nothing it had scheduled
-                    let ended = if php::script_exited() { Ok(status) } else { run_until_idle(&mut connections) };
+                    // With --watch, exit() in a hook ends tenma through dev::EXIT
+                    let ended = if php::script_exited() { Ok(status) } else { run_until_idle(&mut connections, !(dev && options.watch)) };
                     match ended {
+                        // exit() in a hook: tenma is ending
+                        Ok(_) if dev && dev::exit_status().is_some() => Stop::Closed,
                         Ok(ended) => {
                             status = ended;
                             if options.watch {
-                                eprintln!("tenma: script ended with status {status}, waiting for changes");
+                                if dev {
+                                    eprintln!("tenma: hooks stopped, waiting for a change to tenma.dev.php");
+                                } else {
+                                    eprintln!("tenma: script ended with status {status}, waiting for changes");
+                                }
                                 Stop::Wait
                             } else {
                                 Stop::Closed
@@ -399,7 +449,7 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
                         let _ = ready.send(Ok(Vec::new()));
                     }
                     ports.get_or_insert_with(BTreeSet::new);
-                    eprintln!("tenma: script failed, waiting for changes");
+                    eprintln!("tenma: {} failed, waiting for changes", if dev { "tenma.dev.php" } else { "script" });
                     Stop::Wait
                 } else if first {
                     let _ = ready.send(Err(status));
@@ -417,6 +467,9 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
             Stop::Closed => return status,
             Stop::Restart => {}
             Stop::Wait => {
+                if dev {
+                    dev::settled();
+                }
                 // exit() of this run must not end the next one
                 php::forget_exit();
                 if let Stop::Closed = unavailable(&mut connections, options) {
@@ -469,7 +522,7 @@ fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options
 /// A script without servers: like Node, the event loop runs while timers or other ops are pending.
 /// Ends with the status of exit() in timers or background work, 255 after a fatal error. With
 /// --watch, a change (Restart) or the end of tenma (Closed) stops it early.
-fn run_until_idle(connections: &mut UnboundedReceiver<Connection>) -> Result<u8, Stop> {
+fn run_until_idle(connections: &mut UnboundedReceiver<Connection>, exits: bool) -> Result<u8, Stop> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
     let restart = RESTART.with(Rc::clone);
     let change = CHANGE.with_borrow(Arc::clone);
@@ -481,7 +534,7 @@ fn run_until_idle(connections: &mut UnboundedReceiver<Connection>) -> Result<u8,
             tokio::select! {
                 // In order: if exit() also ends the last op, the status of exit() counts
                 biased;
-                () = php::EXIT.notified() => Ok(php::exit_status().unwrap_or(0)),
+                () = php::EXIT.notified(), if exits => Ok(php::exit_status().unwrap_or(0)),
                 // A fatal error: without servers there is no restart, the script has failed
                 () = restart.notified() => Ok(255),
                 () = ops::idle() => Ok(0),
@@ -495,11 +548,20 @@ fn run_until_idle(connections: &mut UnboundedReceiver<Connection>) -> Result<u8,
     Ok(if BROKEN.get() { 255 } else { php::exit_status().unwrap_or(status) })
 }
 
-/// Loads the standard library and the script into this thread's PHP interpreter.
-fn load(argv: &[String]) -> Result<Vec<php::Listener>, u8> {
+/// Loads the standard library and the script (or tenma.dev.php) into this thread's PHP interpreter.
+fn load(argv: &[String], dev: bool, options: Options) -> Result<Vec<php::Listener>, u8> {
     if let Err(message) = php::eval(STDLIB.trim_start_matches("<?php"), "tenma:stdlib") {
         eprintln!("tenma: {message}");
         return Err(1);
+    }
+    if dev {
+        return match php::eval(&dev::code(std::path::Path::new(&argv[0]), options.watch), "tenma:dev") {
+            Ok(()) => Ok(Vec::new()),
+            Err(message) => {
+                eprintln!("tenma: {message}");
+                Err(1)
+            }
+        };
     }
     match php::execute(argv) {
         Ok(0) => Ok(php::listeners()),

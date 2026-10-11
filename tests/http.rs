@@ -832,6 +832,8 @@ fn watch_reloads_on_changes() {
     let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--watch", "--workers", "2"]).arg(&app).spawn().unwrap());
     assert!(get(port, "/").ends_with("\r\n\r\none\n"));
     assert!(get(port, "/lazy").ends_with("lazy one\n"));
+    // The watcher gets the loaded files from the workers; FSEvents needs a moment for a new directory
+    std::thread::sleep(Duration::from_millis(200));
 
     std::fs::write(&app, script("two")).unwrap();
     let response = eventually(port, "/", |response| response.ends_with("two\n"));
@@ -869,5 +871,95 @@ fn watch_reruns_scripts_without_servers() {
     std::thread::sleep(Duration::from_millis(200));
     std::fs::write(&script, "<?php echo \"run three\\n\";").unwrap();
     assert_eq!(lines.next().unwrap().unwrap(), "run three");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// A project with two hooks, listed against their order: a command copies the CSS, PHP minifies
+/// the copy and counts its runs.
+fn hook_project(name: &str) -> std::path::PathBuf {
+    let directory = scratch(name);
+    std::fs::create_dir_all(directory.join("assets")).unwrap();
+    std::fs::create_dir_all(directory.join("public")).unwrap();
+    std::fs::write(directory.join("assets/app.css"), "a { }").unwrap();
+    std::fs::write(directory.join("copy.sh"), "#!/bin/sh\necho \"copying $1\"\ncat \"$1\" > \"$2\"\n").unwrap();
+    std::fs::set_permissions(directory.join("copy.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::write(directory.join("tenma.dev.php"), minify_hooks("")).unwrap();
+    // Loaded only when the hook runs
+    std::fs::write(directory.join("transform.php"), "<?php function transform($css) { return $css; }").unwrap();
+    directory
+}
+
+fn minify_hooks(suffix: &str) -> String {
+    format!(
+        "<?php\nreturn [\n    new Tenma\\Hook(inputs: ['public/app.css'], outputs: ['public/app.min.css'], name: 'minify', run: function (array $changed) {{\n        require_once __DIR__ . '/transform.php';\n        file_put_contents(__DIR__ . '/runs.log', 'minify ' . implode(',', array_map('basename', $changed)) . \"\\n\", FILE_APPEND);\n        file_put_contents(__DIR__ . '/public/app.min.css', transform(str_replace(' ', '', file_get_contents(__DIR__ . '/public/app.css'))) . '{suffix}');\n    }}),\n    new Tenma\\Hook(inputs: ['assets/**/*.css'], outputs: ['public/app.css'], run: ['./copy.sh', 'assets/app.css', 'public/app.css'], name: 'css'),\n];\n"
+    )
+}
+
+#[test]
+fn build_runs_hooks_in_order_and_fails_on_cycles() {
+    let directory = hook_project("build");
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("build").current_dir(&directory).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "[css] copying assets/app.css\n");
+    assert_eq!(std::fs::read_to_string(directory.join("public/app.min.css")).unwrap(), "a{}");
+    assert_eq!(std::fs::read_to_string(directory.join("runs.log")).unwrap(), "minify app.css\n");
+
+    std::fs::write(directory.join("cycle.php"), "<?php return [\n    new Tenma\\Hook(inputs: ['b'], outputs: ['a'], run: fn () => null, name: 'a'),\n    new Tenma\\Hook(inputs: ['a'], outputs: ['b'], run: fn () => null, name: 'b'),\n];").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["build", "cycle.php"]).current_dir(&directory).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("form a cycle"), "{output:?}");
+
+    std::fs::write(directory.join("fails.php"), "<?php return [new Tenma\\Hook(inputs: [], run: ['false'])];").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["build", "fails.php"]).current_dir(&directory).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("tenma: hook false failed: exited with status 1"), "{output:?}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn watch_runs_hooks_on_changes() {
+    let port = 18_121;
+    let directory = hook_project("hooks");
+    std::fs::write(directory.join("app.php"), format!("<?php Tenma::serve({port}, fn () => file_get_contents(__DIR__ . '/public/app.min.css'));")).unwrap();
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--watch", "app.php"]).current_dir(&directory).stdout(std::process::Stdio::null()).spawn().unwrap());
+    // The hooks ran before the first request
+    assert!(get(port, "/").ends_with("\r\n\r\na{}"));
+
+    std::fs::write(directory.join("assets/app.css"), "b { }").unwrap();
+    let response = eventually(port, "/", |response| response.ends_with("b{}"));
+    assert!(response.ends_with("\r\n\r\nb{}"), "{response}");
+    // The same content again: the copy does not change, minify does not run
+    std::fs::write(directory.join("assets/app.css"), "b { }").unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(std::fs::read_to_string(directory.join("runs.log")).unwrap(), "minify app.css\nminify app.css\n");
+
+    // A file a hook loaded as it ran reloads the hooks, which run again; so does tenma.dev.php
+    std::fs::write(directory.join("transform.php"), "<?php function transform($css) { return strtoupper($css); }").unwrap();
+    let response = eventually(port, "/", |response| response.ends_with("B{}"));
+    assert!(response.ends_with("\r\n\r\nB{}"), "{response}");
+    std::fs::write(directory.join("tenma.dev.php"), minify_hooks("/* dev */")).unwrap();
+    let response = eventually(port, "/", |response| response.ends_with("B{}/* dev */"));
+    assert!(response.ends_with("\r\n\r\nB{}/* dev */"), "{response}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn watch_stops_hooks_that_trigger_themselves() {
+    use std::io::BufRead;
+    let directory = scratch("brake");
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(directory.join("app.php"), "<?php").unwrap();
+    // Writes into its own inputs without declaring it
+    std::fs::write(directory.join("tenma.dev.php"), "<?php return [new Tenma\\Hook(inputs: ['src/*.txt'], name: 'loop', run: fn () => file_put_contents(__DIR__ . '/src/self.txt', microtime()))];").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--watch", "app.php"]).current_dir(&directory).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let mut lines = std::io::BufReader::new(child.stderr.take().unwrap()).lines().map_while(Result::ok);
+    let _child = Server(child);
+    // The script has run, so the hooks have too and their directories are watched
+    assert!(lines.any(|line| line.contains("waiting for changes")));
+    // FSEvents needs a moment for a new directory
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(directory.join("src/start.txt"), "go").unwrap();
+    let stopped = lines.any(|line| line.contains("hook loop keeps triggering itself, stopped"));
+    assert!(stopped);
     let _ = std::fs::remove_dir_all(directory);
 }

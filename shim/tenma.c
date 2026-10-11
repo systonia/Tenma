@@ -78,6 +78,7 @@ extern uint64_t tenma_rs_fs(const char *op, size_t op_len, const char *path, siz
 extern void tenma_rs_exit(int status);
 /** tenma --watch: a file PHP loaded, see tenma_report_included. */
 extern void tenma_rs_included(const char *path, size_t len);
+extern uint64_t tenma_rs_dev(const char *op, size_t op_len, const char *arg, size_t arg_len);
 extern uint64_t tenma_rs_db(const char *op, size_t op_len, const char *target, size_t target_len,
     const char *sql, size_t sql_len, const char *params, size_t params_len);
 extern uint64_t tenma_rs_fetch(const char *method, size_t method_len, const char *url, size_t url_len,
@@ -291,6 +292,13 @@ ZEND_END_ARG_INFO()
 
 PHP_FUNCTION(tenma_op_fs);
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_op_dev, 0, 2, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, op, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, arg, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(tenma_op_dev);
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_shutdown, 0, 0, IS_VOID, 0)
 ZEND_END_ARG_INFO()
 
@@ -320,6 +328,7 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE(tenma_op_cancel, arginfo_tenma_op_cancel)
     ZEND_FE(tenma_exit_process, arginfo_tenma_shutdown)
     ZEND_FE(tenma_op_fs, arginfo_tenma_op_fs)
+    ZEND_FE(tenma_op_dev, arginfo_tenma_op_dev)
     ZEND_FE(tenma_classic_begin, arginfo_tenma_shutdown)
     ZEND_FE(tenma_take_output, arginfo_tenma_take_output)
     ZEND_FE_END
@@ -1092,6 +1101,16 @@ PHP_FUNCTION(tenma_op_fs) {
         efree(destination);
     }
     RETURN_LONG((zend_long) id);
+}
+
+/** tenma_op_dev(string $op, string $arg): int. Starts an op for the hooks of tenma.dev.php (src/dev.rs). */
+PHP_FUNCTION(tenma_op_dev) {
+    zend_string *op, *arg;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(op)
+        Z_PARAM_STR(arg)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_LONG((zend_long) tenma_rs_dev(ZSTR_VAL(op), ZSTR_LEN(op), ZSTR_VAL(arg), ZSTR_LEN(arg)));
 }
 
 /** Forgets the last PHP error so after_bailout does not attribute it to a later request. */

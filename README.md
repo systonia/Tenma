@@ -132,6 +132,7 @@ Waypoint itself no longer needs classic mode: the app is itself a handler, `Tenm
 ```
 tenma app.php                    # one worker: one thread, one shared state
 tenma --watch app.php            # reload when a file the script loaded changes, like node --watch
+tenma build                      # run the hooks of tenma.dev.php once (CI, Dockerfile)
 tenma --workers 4 app.php        # four workers, each with its own PHP interpreter and its own state
 tenma --workers auto app.php     # one worker per core
 tenma --max-body 50m app.php     # largest request body, default 10m, 413 above that
@@ -148,6 +149,27 @@ Limits: a request's headers and body must arrive within `--request-timeout` (oth
 Robust: a fatal PHP error (out of memory, stack overflow) restarts only the interpreter of the affected worker and runs the script there again; the request gets a 500. Ctrl+C and SIGTERM stop accepting connections and let running requests finish for up to 10 seconds. PHP's own signal handlers are disabled; signals belong to Rust.
 
 `--watch` is for development: tenma watches every file the script loaded, including classes the autoloader loads later, and restarts the workers' interpreters when one of them changes (different content, not just a new timestamp). The port stays open, requests during the reload wait instead of failing; in-memory state starts over, as with `node --watch`. A script that fails to load after a change answers 503 until the next change; changed ports restart tenma as a whole; a script without servers runs again. Running requests get 1 second to finish instead of 10, and `opcache.revalidate_freq` defaults to 0.
+
+Build steps for `--watch` (CSS, bundles, caches) come from a `tenma.dev.php` next to the script. It returns a list of hooks, like the plugins of a Vite config; production code never loads it:
+
+```php
+<?php
+return [
+    // A command: its own process, no shell, in this directory; output prefixed with [css]
+    new Tenma\Hook(
+        inputs: ['templates/**/*.php', 'assets/app.css'],
+        outputs: ['public/app.css'],
+        run: ['vendor/bin/tailwindcss', '-i', 'assets/app.css', '-o', 'public/app.css'],
+        name: 'css',
+    ),
+    // PHP: gets the changed paths (empty on the first run), may await Tenma's async functions
+    new Tenma\Hook(inputs: ['src/Routes/**/*.php'], outputs: ['var/routes.php'], run: fn (array $changed) => RouteCache::write()),
+];
+```
+
+A hook runs once at startup, before the first request, and again when a file matching its `inputs` changes. Globs are relative to `tenma.dev.php`: `*` and `?` within a name, `**` across directories. Tenma orders the hooks by their files: one reading another's `outputs` runs after it, and only if that output really changed. A cycle is rejected at startup. A hook's own outputs never trigger it again; one that writes undeclared files into its own inputs is stopped after five runs in a row. A failing hook (exception, exit status ≠ 0) skips the hooks after it, the server keeps running. A changed `tenma.dev.php`, or a file it or a hook loaded, reloads the hooks. The script starts once the first run is over, at the latest after 10 seconds (a command with its own `--watch` never ends). A command's processes, including those it started itself, get SIGTERM when the hook ends or is reloaded and SIGKILL 2 seconds later. `exit()` in a hook ends tenma. `tenma build` runs the hooks once in order and exits with 1 if one fails or they form a cycle.
+
+`.tenma-ignore` next to `tenma.dev.php` lists what below the hooks' directories is no input, so a glob like `**/*.php` neither triggers on nor reads every file in `vendor/`. One entry per line, `#` for comments: with a slash a path in the project (`storage/cache`), without one any file or directory name (`node_modules`, `*.log`). Without the file, `.git`, `node_modules` and `vendor` are left out. A changed `.tenma-ignore` reloads the hooks.
 
 With several workers, the script runs once per worker, and each has its own memory: an in-memory counter or cache exists per worker, as with Node `cluster` or FrankenPHP. Shared state then belongs in a database or Redis.
 
@@ -171,7 +193,8 @@ PhpStorm and Intelephense pick them up from `vendor/`; for PHPStan the package b
 | `src/db.rs` | Postgres (tokio-postgres, pool per worker) and Redis (one shared connection per URL) as ops |
 | `src/fs.rs` | File system ops for `Tenma\Fs`, on tokio's blocking threads |
 | `src/files.rs` | Static files for `Tenma::serve(..., static:)`: prefixes, ETag/304, ranges, checks on the opened file |
-| `src/watch.rs` | `--watch`: watches the files PHP loaded, reports real changes (content, not timestamps) for a reload |
+| `src/watch.rs` | `--watch`: watches the files PHP loaded and the hooks' directories, reports real changes (content, not timestamps) |
+| `src/dev.rs` | Hooks of `tenma.dev.php`: the dev thread's ops, command hooks as processes (`tokio::process`) |
 | `src/streams.rs` | Streaming responses (body from a channel with backpressure) and WebSockets (tokio-tungstenite after the HTTP upgrade) |
 | `shim/tenma.c` | C layer: embed PHP, `tenma_listen()` for PHP, call handlers, convert PHP values to C values, catch fatal errors with `zend_try` |
 | `stdlib/tenma.php` | Standard library in PHP, embedded in the binary: `Tenma::serve()`, `Tenma::serveClassic()`, `Request`, `Response` |

@@ -273,6 +273,9 @@ extern "C" fn tenma_rs_exit(status: c_int) {
 
 /// tenma should end with this status: the server shuts down cleanly, a script ends.
 pub fn request_exit(status: u8) {
+    if crate::watch::is_dev_thread() {
+        return crate::dev::request_exit(status);
+    }
     EXIT_STATUS.store(i32::from(status), std::sync::atomic::Ordering::Relaxed);
     EXIT.notify_one();
 }
