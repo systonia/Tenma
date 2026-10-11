@@ -1,0 +1,61 @@
+# Tenma
+
+> Tenma runs PHP 8.5 with Node's execution model: one process runs the script once, then serves HTTP requests continuously from an event loop. In-memory state persists between requests. Every request runs in its own Fiber, and waiting (sleep, HTTP, Postgres, Redis, files) suspends only that fiber. It is async like Node, but without `await`. Tenma is a single binary with PHP embedded. Its PHP API (`Tenma`, `Tenma\Http`, `Tenma\Db`, `Tenma\Fs`) is built in, not a Composer package.
+
+Run a script with `tenma app.php`. A script that calls `Tenma::serve()` becomes a server; a script without one runs until no timers or ops are pending, like Node.
+
+```php
+use Tenma\Http\{Request, Response};
+
+Tenma::serve(8080, function (Request $request) {
+    $weather = Tenma::fetch('https://wttr.in/?format=3');   // suspends this request only
+    return Response::json(['path' => $request->path, 'weather' => $weather->body]);
+});
+```
+
+Rules for writing code that runs under Tenma (fiber mode, `Tenma::serve()`):
+
+- A handler gets a `Tenma\Http\Request` and returns a `Response`, `StreamedResponse`, `WebSocketResponse` or a string. Never use `$_GET`, `$_POST`, `$_COOKIE`, `$_SERVER`, `$_SESSION`, `header()` or `echo` for the response. Use `$request->query`, `form()`, `files()`, `cookies()`, `header()`, `json()`, `body`, `path`, `method`, `remoteAddress`, `host()`.
+- Many requests run at the same time in one process. Statics, globals and singletons are shared by all of them, so never keep per-request state there. Use `Tenma\AsyncLocal` for values that follow a request into its tasks, like the request ID.
+- Blocking functions hold up every request of the worker while they wait. This covers PDO, mysqli, curl, `file_get_contents`, `sleep()` and `fopen` on files. Use `Tenma::fetch()`, `Tenma\Db\Postgres`, `Tenma\Db\Redis`, `Tenma\Fs` and `Tenma::sleep()` instead.
+- There is no `await` keyword. A call to an async function simply returns its result. Start work in parallel with `Tenma::all(a: fn () => ..., b: fn () => ...)`, which works like `Promise.all` and returns the results under the same keys, or with `Tenma::async(fn () => ...)`, which returns a `Task` with `await()` and `cancel()`.
+- Waiting is only possible inside a request, a task or a timer. At the top level of the script, wrap it in `Tenma::async()`.
+- A request's tasks and timers end with the request. If the client disconnects, the handler gets `Tenma\Cancelled` where it waits, and its `finally` blocks run. Work that must finish regardless, like a payment, goes in `Tenma::detach()`.
+- `exit()` inside a request ends only that request. `exit()` in the script, a timer or background work ends Tenma with that status.
+- With `--workers N`, each worker has its own interpreter and memory. Shared state belongs in Postgres or Redis.
+- Existing frameworks that rely on superglobals run unchanged with `Tenma::serveClassic(8080, fn () => $app->handleHttp())`. There requests run one after another, with superglobals, `header()`, output and sessions as under FPM, and the async functions throw.
+
+API at a glance:
+
+- `Tenma`:
+  - Serving: `serve(port, handler, static: [...])`, `serveClassic(port, app)`.
+  - Tasks: `async(fn)`, `all(...fns)`, `detach(fn)`.
+  - Waiting and timers: `sleep(seconds)`, `setTimeout(fn, seconds)`, `setInterval(fn, seconds)`. Both timer functions return a `Timer` with `cancel()`.
+  - HTTP and debugging: `fetch(url, method, headers, body, timeout)` returns a `FetchResponse` with `status`, `body`, `header()` and `json()`. `debugger()` works like `debugger;` in JavaScript.
+- `Tenma\Db\Postgres`: `connect(url)`, `query()`, `first()`, `execute()`, `transaction(fn)`, with `$1`-style parameters. Connections are pooled per worker.
+- `Tenma\Db\Redis`: `connect(url)`, `command(name, ...args)`, `get()`, `set(key, value, seconds)`.
+- `Tenma\Fs`: `readFile`, `writeFile`, `appendFile`, `exists`, `stat`, `readDir`, `mkdir`, `rename`, `copy`, `remove`, `removeDir`.
+- `Tenma\Http\Response`:
+  - `json()`, `html()`, `redirect()`, then chain `->header(name, value, append:)` and `->cookie(...)`.
+  - `stream(fn (Stream $out))` and `events(fn (EventStream $events))` for streaming and server-sent events.
+  - `websocket(fn (WebSocket $socket))` for WebSockets: `receive()` returns null once the client is gone, `send()` writes. A write to a closed connection throws `ConnectionClosed`.
+- `Tenma\Hook` in `tenma.dev.php`: build steps for `tenma --watch`, such as Tailwind or caches.
+
+CLI: `tenma app.php`, `--watch`, `--inspect` (a DAP debugger on 127.0.0.1:9229), `--workers N|auto`, `--max-body 10m`, `--max-requests N`, `--db-pool N`, `--request-timeout 30`, `-d name=value`, `-c php.ini`, `--stubs`, and `tenma build`.
+
+## Docs
+
+- [README](https://github.com/systonia/Tenma/blob/main/README.md): the complete guide to fiber mode, tasks, timers, files, databases, Request and Response, static files, cancellation, `AsyncLocal`, streams and WebSockets, classic mode, the CLI, `--watch` with hooks, the debugger, limits and benchmarks
+- [PHP API stubs](https://raw.githubusercontent.com/systonia/Tenma-Stubs/main/tenma.php): every class, method and parameter with its docblock. This is the exact API; `tenma --stubs` prints it for the installed binary
+
+## Packages
+
+- [tenma/stubs](https://github.com/systonia/Tenma-Stubs): the stubs for IDEs and PHPStan, installed with `composer require --dev tenma/stubs`. They are never autoloaded
+- [tenma/psr](https://github.com/systonia/Tenma-PSR): runs any PSR-15 app (Slim, Mezzio, ...) under Tenma with `Tenma::serve(3000, Tenma\Psr\Psr::handler($app, new Psr17Factory()))`. WebSockets and streams go out through `Tenma\Psr\Upgrade`
+- [Waypoint](https://github.com/systonia/Waypoint): a PHP framework that is itself a Tenma handler, with `Tenma::serve(8080, $app)`, and that hands requests over to WebSockets and streams with `Response::upgrade()`
+- [Waypoint Live](https://github.com/systonia/Waypoint-Live): Blazor-Server-style live components for Waypoint over one WebSocket, running under Tenma
+
+## Optional
+
+- [Architecture](https://github.com/systonia/Tenma/blob/main/README.md#architecture): Rust (tokio, hyper), the C shim that embeds PHP, the PHP standard library, and how fibers and ops resume
+- [Not yet](https://github.com/systonia/Tenma/blob/main/README.md#not-yet): no async MySQL, no TLS for Postgres, no handler timeout, and request bodies are fully buffered
