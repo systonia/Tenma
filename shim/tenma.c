@@ -466,9 +466,10 @@ static void inspect_statement(zend_execute_data *frame) {
         return;
     }
     zend_string *file = frame->func->op_array.filename;
+    zend_execute_data *outer = paused;
     paused = frame;
     tenma_rs_statement(ZSTR_VAL(file), ZSTR_LEN(file), frame->opline->lineno, (uintptr_t) frame, (uintptr_t) EG(active_fiber));
-    paused = NULL;
+    paused = outer;
     bail_after_fatal_evaluation();
 }
 
@@ -720,6 +721,8 @@ size_t tenma_report_included(size_t from) {
 void tenma_inspect_thread(void) {
     CG(compiler_options) |= ZEND_COMPILE_EXTENDED_STMT;
     inspecting = 1;
+    // A fatal error in a destructor during tenma_inspect_resume left it set
+    evaluating = 0;
 }
 
 /**
@@ -947,10 +950,15 @@ void tenma_inspect_resume(void) {
     free(expandable);
     expandable = NULL;
     expandable_count = expandable_size = 0;
+    // Releasing them may run destructors: those must not stop the debugger while it resumes
+    evaluating = 1;
+    zend_fiber_switch_block();
     for (uint32_t i = 0; i < evaluated_count; i++) {
         zval_ptr_dtor(evaluated[i]);
         free(evaluated[i]);
     }
+    zend_fiber_switch_unblock();
+    evaluating = 0;
     free(evaluated);
     evaluated = NULL;
     evaluated_count = 0;
@@ -1554,6 +1562,22 @@ PHP_FUNCTION(tenma_op_fetch) {
 }
 
 /**
+ * Fields end up in PHP's internal $_POST via the filter extension (plus raw in its own array),
+ * files in PHP's internal $_FILES: clears everything from the previous request, which
+ * filter_input(INPUT_POST) would show otherwise.
+ */
+static void forget_post(void) {
+    zval *post = &PG(http_globals)[TRACK_VARS_POST];
+    zval *files = &PG(http_globals)[TRACK_VARS_FILES];
+    zval_ptr_dtor(post);
+    array_init(post);
+    zval_ptr_dtor(files);
+    array_init(files);
+    zval_ptr_dtor(&IF_G(post_array));
+    ZVAL_UNDEF(&IF_G(post_array));
+}
+
+/**
  * tenma_set_input(string $body): void. Begins a classic request: php://input yields $body,
  * uploads and temp files of the previous request go away.
  */
@@ -1566,6 +1590,7 @@ PHP_FUNCTION(tenma_set_input) {
     if (SG(rfc1867_uploaded_files)) {
         destroy_uploaded_files_hash();
     }
+    forget_post();
     if (SG(request_info).request_body) {
         php_stream_close(SG(request_info).request_body);
     }
@@ -1588,16 +1613,9 @@ PHP_FUNCTION(tenma_parse_multipart) {
         Z_PARAM_STR(body)
     ZEND_PARSE_PARAMETERS_END();
 
-    // Fields end up in PHP's internal $_POST via the filter extension (plus raw in its own
-    // array), files in PHP's internal $_FILES: clear everything from the previous request
+    forget_post();
     zval *post = &PG(http_globals)[TRACK_VARS_POST];
     zval *files = &PG(http_globals)[TRACK_VARS_FILES];
-    zval_ptr_dtor(post);
-    array_init(post);
-    zval_ptr_dtor(files);
-    array_init(files);
-    zval_ptr_dtor(&IF_G(post_array));
-    ZVAL_UNDEF(&IF_G(post_array));
     post_data = ZSTR_VAL(body);
     post_len = ZSTR_LEN(body);
     post_pos = 0;
@@ -1957,6 +1975,8 @@ static enum outcome after_bailout(void) {
         return CALL_FATAL;
     }
     CG(unclean_shutdown) = 0;
+    // zend_bailout switched the cycle collector off; PHP only switches it on at the next request startup
+    gc_protect(0);
     return CALL_EXIT;
 }
 
@@ -2043,9 +2063,18 @@ static int finish_classic(uint64_t rid, enum outcome handled) {
     outer_shutdown_functions = NULL;
     if (!fatal) {
         CG(unclean_shutdown) = 0;
+        // exit() in a shutdown function bailed out, which switched the cycle collector off
+        gc_protect(0);
     }
-    // Whatever is still in output buffers belongs to the response, including buffers that cannot be removed
-    php_output_end_all();
+    // Whatever is still in output buffers belongs to the response, including buffers that cannot be removed.
+    // Their handlers are user code: a fatal error in there must not bail out without an address
+    zend_try {
+        php_output_end_all();
+    } zend_catch {
+        if (after_bailout() == CALL_FATAL) {
+            fatal = 1;
+        }
+    } zend_end_try();
 
     zval argument;
     ZVAL_BOOL(&argument, fatal);
@@ -2098,7 +2127,7 @@ int tenma_complete_null(uint64_t op) {
  * instead of a fatal error when creating the string, which would restart the whole worker.
  */
 static int too_big(size_t len) {
-    return PG(memory_limit) > 0 && zend_memory_usage(0) + len + (1 << 20) > (size_t) PG(memory_limit);
+    return PG(memory_limit) > 0 && zend_memory_usage(1) + len + (1 << 20) > (size_t) PG(memory_limit);
 }
 
 int tenma_complete_error(uint64_t op, const char *message, size_t len, int code) {
@@ -2155,6 +2184,10 @@ int tenma_handle(uint32_t handler, uint64_t rid, const tenma_request *request) {
     if (handler >= handler_count) {
         return 0;
     }
+    // Allocating beyond memory_limit outside zend_try would end the whole process
+    if (too_big(request->body.len + request->uri.len)) {
+        return 0;
+    }
     volatile enum outcome result = CALL_FATAL;
     zval arguments[2], headers, retval;
     zval *argument = &arguments[0];
@@ -2170,7 +2203,16 @@ int tenma_handle(uint32_t handler, uint64_t rid, const tenma_request *request) {
     array_init(&headers);
     for (size_t i = 0; i < request->header_count; i++) {
         const tenma_header *header = &request->headers[i];
-        add_assoc_stringl_ex(&headers, header->name.ptr, header->name.len, header->value.ptr, header->value.len);
+        // A repeated header joins its values (names come lowercase), as proxies and PHP-FPM do
+        zval *existing = zend_hash_str_find(Z_ARRVAL(headers), header->name.ptr, header->name.len);
+        if (existing) {
+            int cookie = header->name.len == 6 && memcmp(header->name.ptr, "cookie", 6) == 0;
+            zend_string *joined = zend_string_concat3(Z_STRVAL_P(existing), Z_STRLEN_P(existing), cookie ? "; " : ", ", 2, header->value.ptr, header->value.len);
+            zval_ptr_dtor(existing);
+            ZVAL_STR(existing, joined);
+        } else {
+            add_assoc_stringl_ex(&headers, header->name.ptr, header->name.len, header->value.ptr, header->value.len);
+        }
     }
     add_assoc_zval(argument, "headers", &headers);
     ZVAL_UNDEF(&retval);

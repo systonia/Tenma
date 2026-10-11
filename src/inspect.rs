@@ -476,6 +476,7 @@ extern "C" fn tenma_rs_exception(description: *const u8, description_len: usize,
     let description = String::from_utf8_lossy(bytes(description, description_len)).into_owned();
     let text = if uncaught { "Uncaught exception" } else { "Exception" };
     // ponytail: a step from here acts as continue; stepping into the catch block needs the fiber and depth
+    STEPPING.set(None);
     let _ = stop(json!({"reason": "exception", "description": description, "text": text}));
 }
 
@@ -642,18 +643,28 @@ fn arrived(step: Step, depth: u32) -> bool {
 
 /// Blocks the worker until the editor resumes it; returns the step it asked for.
 fn stop(mut body: Value) -> Option<Step> {
-    STOPPED.store(true, Ordering::Relaxed);
+    {
+        // Without an editor nobody could resume the worker. Under the lock: an editor that
+        // disconnects later sees STOPPED in detach and resumes it.
+        let client = CLIENT.lock().unwrap();
+        if client.is_none() {
+            return None;
+        }
+        STOPPED.store(true, Ordering::Relaxed);
+    }
     let thread = unsafe { tenma_inspect_thread_id() };
     STOPPED_THREAD.store(thread, Ordering::Relaxed);
     body["threadId"] = json!(thread);
     body["allThreadsStopped"] = json!(true);
     event("stopped", body);
-    let commands = COMMANDS.1.lock().unwrap();
-    let step = loop {
-        match commands.recv() {
-            Ok(Command::Answer(request)) => answer(&request),
-            Ok(Command::Resume(step)) => break step,
-            Err(_) => break None,
+    let step = {
+        let commands = COMMANDS.1.lock().unwrap();
+        loop {
+            match commands.recv() {
+                Ok(Command::Answer(request)) => answer(&request),
+                Ok(Command::Resume(step)) => break step,
+                Err(_) => break None,
+            }
         }
     };
     unsafe { tenma_inspect_resume() };

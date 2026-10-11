@@ -360,8 +360,10 @@ namespace Tenma {
                 Internal\Scheduler::$ofRequest[$request][spl_object_id($this)] = $this;
             }
             Internal\Scheduler::$taskOfFiber[spl_object_id($this->fiber)] = $this;
+            // The caller's request, not the task's: after Tenma::detach() that would be null
+            $caller = Internal\Current::$request;
             $this->fiber->start();
-            Internal\Current::$request = $request;
+            Internal\Current::$request = $caller;
         }
 
         /** @internal */
@@ -1234,8 +1236,12 @@ final class Request
     {
         $this->method = $raw['method'];
         $this->uri = $raw['uri'];
-        $this->path = parse_url($raw['uri'], PHP_URL_PATH) ?: '/';
-        parse_str(parse_url($raw['uri'], PHP_URL_QUERY) ?? '', $query);
+        // parse_url() would take "//host/admin" for a host and the path /admin
+        [$path, $queryString] = str_starts_with($raw['uri'], '/')
+            ? explode('?', $raw['uri'], 2) + [1 => '']
+            : [parse_url($raw['uri'], PHP_URL_PATH) ?: '/', parse_url($raw['uri'], PHP_URL_QUERY) ?? ''];
+        $this->path = $path;
+        parse_str($queryString, $query);
         $this->query = $query;
         $this->headers = $raw['headers'];
         $this->body = $raw['body'];
@@ -1608,8 +1614,12 @@ final class EventStream
 
     public function send(string $data, ?string $event = null, ?string $id = null): void
     {
+        // EventSource breaks lines at \r too: a line break in id or event would forge fields
+        if (strpbrk(($id ?? '') . ($event ?? ''), "\r\n") !== false) {
+            throw new \InvalidArgumentException('id and event must not contain line breaks');
+        }
         $message = ($id !== null ? "id: $id\n" : '') . ($event !== null ? "event: $event\n" : '');
-        foreach (explode("\n", $data) as $line) {
+        foreach (preg_split('/\r\n|\r|\n/', $data) as $line) {
             $message .= "data: $line\n";
         }
         $this->stream->write("$message\n");
@@ -1618,7 +1628,7 @@ final class EventStream
     /** A comment keeps the connection alive through proxies; the browser ignores it. */
     public function comment(string $text = ''): void
     {
-        $this->stream->write(": $text\n\n");
+        $this->stream->write(': ' . implode("\n: ", preg_split('/\r\n|\r|\n/', $text)) . "\n\n");
     }
 }
 
@@ -1813,9 +1823,10 @@ function startClassic(array $server, Request $request, int $rid): void
     $_GET = $request->query;
     $_POST = [];
     $_FILES = [];
-    if (str_starts_with($contentType, 'application/x-www-form-urlencoded')) {
+    // Media types ignore case, as in PHP's SAPI
+    if (stripos($contentType, 'application/x-www-form-urlencoded') === 0) {
         parse_str($request->body, $_POST);
-    } elseif (str_starts_with($contentType, 'multipart/form-data')) {
+    } elseif (stripos($contentType, 'multipart/form-data') === 0) {
         [$_POST, $_FILES] = \tenma_parse_multipart($contentType, $request->body);
     }
     // As under FPM, $_SESSION exists only after session_start(), never from the previous request
@@ -1827,7 +1838,7 @@ function startClassic(array $server, Request $request, int $rid): void
         ...$server,
         'REQUEST_METHOD' => $request->method,
         'REQUEST_URI' => $request->uri,
-        'QUERY_STRING' => (string) parse_url($request->uri, PHP_URL_QUERY),
+        'QUERY_STRING' => explode('?', $request->uri, 2)[1] ?? '',
         'SERVER_PROTOCOL' => 'HTTP/1.1',
         'SERVER_SOFTWARE' => 'tenma',
         'REQUEST_SCHEME' => 'http',

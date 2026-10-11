@@ -1100,6 +1100,16 @@ fn inspected(port: u16, debugger: u16, option: &str) -> Server {
 }
 
 #[test]
+fn inspect_without_an_editor_never_stops() {
+    let (port, debugger) = (18_130, 19_236);
+    let _server = inspected(port, debugger, "--inspect");
+    // An uncaught exception would stop by default: without an editor nobody could resume it
+    let started = Instant::now();
+    assert!(get(port, "/throw").starts_with("HTTP/1.1 500"));
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+}
+
+#[test]
 fn inspect_stops_at_breakpoints_and_steps() {
     let (port, debugger) = (18_122, 19_229);
     let _server = inspected(port, debugger, "--inspect");
@@ -1365,4 +1375,41 @@ fn inspect_hit_counts_exception_classes_debugger_and_setting_children() {
     // Without an editor Tenma::debugger() does nothing
     dap.request("disconnect", serde_json::json!({}));
     assert!(get(port, "/").ends_with(r#"[{"x":{"y":1}},{"x":{"y":1}},1,{"a":1}]"#));
+}
+
+#[test]
+fn review_fixes() {
+    use tokio_tungstenite::tungstenite::{Message, connect};
+
+    let port = 18_129;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/review.php").env("PORT", port.to_string()).spawn().unwrap());
+    let body = |response: String| response.rsplit("\r\n\r\n").next().unwrap().to_owned();
+
+    // "//host/admin" stays the path it is; repeated headers join
+    let raw = "GET //x/admin?a=1 HTTP/1.1\r\nHost: localhost\r\nCookie: a=1\r\nCookie: b=2\r\nConnection: close\r\n\r\n";
+    assert_eq!(body(request(port, raw)), r#"{"path":"\/\/x\/admin","query":{"a":"1"},"cookie":"a=1; b=2"}"#);
+
+    assert!(get(port, "/detach-exit").starts_with("HTTP/1.1 "));
+    assert!(get(port, "/").starts_with("HTTP/1.1 200"), "the server lives on");
+
+    // A lone \r breaks lines in EventSource: no forged fields
+    let events = get(port, "/events");
+    for part in ["data: a\ndata: b\ndata: c\n\n", ": x\n: y\n\n", "data: rejected\n\n"] {
+        assert!(events.contains(part), "{events:?}");
+    }
+
+    let (mut socket, _) = connect(format!("ws://127.0.0.1:{port}/ws")).unwrap();
+    assert_eq!(socket.read().unwrap(), Message::text("ready"));
+    socket.send(Message::text("hi")).unwrap();
+    assert_eq!(socket.read().unwrap(), Message::text("got hi"));
+
+    // Classic: the media type ignores case; filter_input() never sees the previous request's fields
+    let classic = port + 1;
+    let form = "--b\r\nContent-Disposition: form-data; name=\"secret\"\r\n\r\nhunter2\r\n--b--\r\n";
+    let raw = format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: Multipart/Form-Data; boundary=b\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{form}", form.len());
+    assert!(body(request(classic, &raw)).starts_with(r#"{"post":{"secret":"hunter2"},"filter":"hunter2""#));
+    assert_eq!(body(get(classic, "/")), r#"{"post":[],"filter":null,"gc":false}"#);
+    // exit() does not leave the cycle collector switched off
+    get(classic, "/?exit=1");
+    assert_eq!(body(get(classic, "/")), r#"{"post":[],"filter":null,"gc":false}"#);
 }

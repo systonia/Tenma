@@ -135,13 +135,25 @@ extern "C" fn tenma_rs_ws_receive(rid: u64) -> u64 {
         return 0;
     };
     ops::spawn(async move {
-        let Some(mut receiver) = incoming.borrow_mut().take() else {
+        let Some(receiver) = incoming.borrow_mut().take() else {
             return OpResult::Error("receive() is already running on this WebSocket".into());
         };
-        let message = receiver.recv().await;
-        *incoming.borrow_mut() = Some(receiver);
+        let mut lent = Lent { slot: incoming, receiver: Some(receiver) };
+        let message = lent.receiver.as_mut().unwrap().recv().await;
         message.map_or(OpResult::Null, OpResult::Text)
     })
+}
+
+/// A receiver taken out for one receive(): goes back when the op ends, also when it is cancelled.
+struct Lent {
+    slot: Rc<RefCell<Option<mpsc::Receiver<Vec<u8>>>>>,
+    receiver: Option<mpsc::Receiver<Vec<u8>>>,
+}
+
+impl Drop for Lent {
+    fn drop(&mut self) {
+        *self.slot.borrow_mut() = self.receiver.take();
+    }
 }
 
 #[unsafe(no_mangle)]
