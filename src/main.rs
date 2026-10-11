@@ -111,6 +111,10 @@ thread_local! {
 pub fn interpreter_broken() {
     eprintln!("tenma: fatal PHP error, restarting worker");
     BROKEN.set(true);
+    // Their fibers are gone with the interpreter: pending requests get their 500 and streams end
+    // now, not after the drain
+    php::forget_waiting();
+    streams::clear();
     RESTART.with(|restart| restart.notify_one());
 }
 

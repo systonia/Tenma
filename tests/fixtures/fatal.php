@@ -13,6 +13,10 @@ Tenma::serve((int) getenv('PORT'), function (Request $request): string {
         case '/oom':
             // More than memory_limit: "Allowed memory size exhausted", a fatal error
             return str_repeat('x', 512 * 1024 * 1024);
+        case '/slow-oom':
+            // The fatal error after an op: the fiber dies while Rust is waiting for its response
+            Tenma::sleep(0.01);
+            return str_repeat('x', 512 * 1024 * 1024);
         case '/slow':
             Tenma::sleep(0.5);
             return "slept enough\n";

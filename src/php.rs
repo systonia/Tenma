@@ -297,10 +297,15 @@ pub fn started() -> Result<(), ()> {
     if unsafe { tenma_started() } < 0 { Err(()) } else { Ok(()) }
 }
 
+/// Drops the pending requests: they end with 500.
+pub fn forget_waiting() {
+    WAITING.with_borrow_mut(HashMap::clear);
+}
+
 /// Shuts down this thread's interpreter. Registered servers and waiting requests belong to it and are dropped.
 pub fn thread_stop() {
     LISTENERS.with_borrow_mut(Vec::clear);
-    WAITING.with_borrow_mut(HashMap::clear);
+    forget_waiting();
     crate::streams::clear();
     crate::db::clear();
     crate::ops::clear();
