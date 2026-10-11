@@ -168,6 +168,21 @@ namespace Tenma\Internal {
     }
 
     /**
+     * A stream or WebSocket is over (the client left or the handler returned): the request's timers and
+     * other tasks end with the connection, as they do when a client leaves before a normal response.
+     */
+    function connectionEnded(int $request): void
+    {
+        $current = currentTask();
+        $error = new \Tenma\Cancelled('The connection ended');
+        foreach (Scheduler::$ofRequest[$request] ?? [] as $entry) {
+            if ($entry !== $current) {
+                $entry instanceof \Tenma\Timer ? $entry->cancel() : $entry->cancel($error);
+            }
+        }
+    }
+
+    /**
      * Called by Tenma when the client left before the response. Unlike after exit(), catch and
      * finally still run and may wait: transactions roll themselves back there. Work that has to keep
      * running is started by the handler with Tenma::detach().
@@ -1702,6 +1717,7 @@ function runStream(int $rid, StreamedResponse $response): void
         error_log('Uncaught ' . $error);
     } finally {
         \tenma_stream_end($rid);
+        \Tenma\Internal\connectionEnded($rid);
     }
 }
 
@@ -1723,6 +1739,7 @@ function runWebSocket(int $rid, Request $request, WebSocketResponse $response): 
         error_log('Uncaught ' . $error);
     } finally {
         $socket->close();
+        \Tenma\Internal\connectionEnded($rid);
     }
 }
 

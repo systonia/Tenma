@@ -4,7 +4,8 @@ use Tenma\Http\{EventStream, Request, Response, Stream, WebSocket};
 
 
 $closed = false;
-Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed) {
+$ticks = 0;
+Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$ticks) {
     switch ($request->path) {
         case '/stream':
             return Response::stream(function (Stream $out) {
@@ -39,6 +40,18 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed) {
         case '/ws-ignore':
             // Never reads: a client that floods anyway is disconnected instead of filling memory
             return Response::websocket(fn (WebSocket $socket) => Tenma::sleep(3));
+        case '/ws-ticker':
+            // The interval belongs to the connection: it stops when the client leaves
+            return Response::websocket(function (WebSocket $socket) use (&$ticks) {
+                Tenma::setInterval(function () use ($socket, &$ticks) {
+                    $ticks++;
+                    $socket->send('tick');
+                }, 0.02);
+                while ($socket->receive() !== null) {
+                }
+            });
+        case '/ticks':
+            return "ticks $ticks";
         case '/ws':
             return Response::websocket(function (WebSocket $socket) {
                 while (($message = $socket->receive()) !== null) {

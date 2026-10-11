@@ -279,6 +279,15 @@ fn streaming_sse_und_websockets() {
     socket.close(None).unwrap();
     assert!(get(port, "/").ends_with("ok"));
 
+    // An interval set in the handler ends with the connection instead of sending into a closed socket
+    let (mut ticker, _) = connect(format!("ws://127.0.0.1:{port}/ws-ticker")).unwrap();
+    assert_eq!(ticker.read().unwrap(), Message::text("tick"));
+    ticker.close(None).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let after_close = get(port, "/ticks");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(get(port, "/ticks"), after_close);
+
     // 300 messages to a handler that never reads: tenma disconnects after 256, long before the handler ends
     let started = Instant::now();
     let (mut flood, _) = connect(format!("ws://127.0.0.1:{port}/ws-ignore")).unwrap();
