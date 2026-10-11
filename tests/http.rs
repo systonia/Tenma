@@ -1310,3 +1310,54 @@ fn inspect_moves_breakpoints_to_the_next_statement() {
     dap.command("continue");
     assert!(response.join().unwrap().ends_with("Hello world slept"));
 }
+
+#[test]
+fn inspect_hit_counts_exception_classes_debugger_and_setting_children() {
+    let (port, debugger) = (18_128, 19_235);
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args([&format!("--inspect={debugger}"), "tests/fixtures/inspect_more.php"]).env("PORT", port.to_string()).spawn().unwrap());
+    let mut dap = Dap::start(debugger);
+    let path = std::fs::canonicalize("tests/fixtures/inspect_more.php").unwrap();
+    // Every third pass, from the third on: $i is 3, 6, 9
+    let breakpoints = serde_json::json!([{"line": 13, "hitCondition": "% 3"}]);
+    dap.request("setBreakpoints", serde_json::json!({"source": {"path": path}, "breakpoints": breakpoints}));
+    // Only NotFound and its subclasses, though all exceptions are on
+    dap.request("setExceptionBreakpoints", serde_json::json!({"filters": [], "filterOptions": [{"filterId": "all", "condition": "\\NotFound"}]}));
+    dap.request("configurationDone", serde_json::json!({}));
+
+    let response = std::thread::spawn(move || get(port, "/loop"));
+    for expected in ["3", "6", "9"] {
+        assert_eq!(dap.stopped().local("$i").unwrap().0, expected);
+        dap.command("continue");
+    }
+    assert!(response.join().unwrap().ends_with("55"));
+
+    let response = std::thread::spawn(move || get(port, "/throw"));
+    let stop = dap.stopped();
+    assert_eq!((stop.line, &stop.event["description"]), (22, &serde_json::json!("NotFound: missing")));
+    dap.command("continue");
+    assert!(response.join().unwrap().starts_with("HTTP/1.1 500"));
+
+    // Tenma::debugger() stops in the caller's line; elements and properties can be changed
+    let response = std::thread::spawn(move || get(port, "/"));
+    let stop = dap.stopped();
+    assert_eq!((stop.line, &stop.event["description"]), (27, &serde_json::json!("Tenma::debugger()")));
+    let list = dap.variables(stop.local("$list").unwrap().1);
+    let set = |dap: &mut Dap, reference: u64, name: &str, value: &str| {
+        dap.send("setVariable", serde_json::json!({"variablesReference": reference, "name": name, "value": value}));
+        dap.expect("response", "setVariable")
+    };
+    // $shared shares the array: it keeps its value
+    assert_eq!(set(&mut dap, list[0].2, "y", "2")["body"]["value"], "2");
+    let item = stop.local("$item").unwrap().1;
+    assert_eq!(set(&mut dap, item, "count", "5")["body"]["value"], "5");
+    assert_eq!(set(&mut dap, item, "tags", "['b' => 2]")["body"]["value"], "array(1)");
+    assert!(set(&mut dap, item, "count", "'many'")["message"].as_str().unwrap().starts_with("TypeError"));
+    assert!(set(&mut dap, item, "id", "'y'")["message"].as_str().unwrap().starts_with("Error: Cannot modify readonly property"));
+    dap.command("continue");
+    let body = response.join().unwrap();
+    assert!(body.ends_with(r#"[{"x":{"y":2}},{"x":{"y":1}},5,{"b":2}]"#), "{body}");
+
+    // Without an editor Tenma::debugger() does nothing
+    dap.request("disconnect", serde_json::json!({}));
+    assert!(get(port, "/").ends_with(r#"[{"x":{"y":1}},{"x":{"y":1}},1,{"a":1}]"#));
+}

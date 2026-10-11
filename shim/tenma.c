@@ -325,6 +325,7 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_op_dev, 0, 2, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
 PHP_FUNCTION(tenma_op_dev);
+PHP_FUNCTION(tenma_debugger);
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_shutdown, 0, 0, IS_VOID, 0)
 ZEND_END_ARG_INFO()
@@ -356,6 +357,7 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE(tenma_exit_process, arginfo_tenma_shutdown)
     ZEND_FE(tenma_op_fs, arginfo_tenma_op_fs)
     ZEND_FE(tenma_op_dev, arginfo_tenma_op_dev)
+    ZEND_FE(tenma_debugger, arginfo_tenma_shutdown)
     ZEND_FE(tenma_classic_begin, arginfo_tenma_shutdown)
     ZEND_FE(tenma_take_output, arginfo_tenma_take_output)
     ZEND_FE_END
@@ -865,27 +867,83 @@ char *tenma_inspect_frames(uint32_t thread, size_t *len) {
     return malloc_copy(&out, len);
 }
 
+/** An object's properties without running PHP code (no __debugInfo, no lazy initializer); NULL if not. */
+static HashTable *properties_of(zend_object *object) {
+    return zend_object_is_lazy(object) ? NULL : object->handlers->get_properties(object);
+}
+
 /**
- * Arrays and objects the editor may expand while stopped; its reference to one is the position
- * here plus 1. PHP does not run while stopped, so the pointers stay valid until tenma_inspect_resume.
+ * An array or object the editor may expand while stopped; its reference to one is the position in
+ * expandable[] plus 1. PHP does not run while stopped, so the pointers stay valid until
+ * tenma_inspect_resume. Where it lies (`parent` and `key` or `index`, or `value` for a variable)
+ * lets the debugger change elements: a shared array on the way must be copied first, as PHP would.
  */
-static _Thread_local zval **expandable = NULL;
+struct expandable {
+    zval *value;
+    uint32_t parent;
+    zend_string *key;
+    zend_ulong index;
+};
+
+/** Where a variable lies: in the array or object `parent` refers to, under `key` or `index`; NULL for a local. */
+struct place {
+    uint32_t parent;
+    zend_string *key;
+    zend_ulong index;
+};
+
+static _Thread_local struct expandable *expandable = NULL;
 static _Thread_local uint32_t expandable_count = 0, expandable_size = 0;
 /** Results of evaluated code, kept until the worker runs on: the editor may expand them. */
 static _Thread_local zval **evaluated = NULL;
 static _Thread_local uint32_t evaluated_count = 0;
 
-static uint32_t expandable_reference(zval *value) {
+static uint32_t expandable_reference(zval *value, const struct place *place) {
     if (expandable_count == expandable_size) {
         expandable_size = expandable_size ? expandable_size * 2 : 64;
         expandable = realloc(expandable, expandable_size * sizeof(*expandable));
     }
-    expandable[expandable_count++] = value;
+    struct expandable *entry = &expandable[expandable_count++];
+    *entry = (struct expandable) {value, place ? place->parent : 0, place && place->key ? zend_string_copy(place->key) : NULL, place ? place->index : 0};
     return expandable_count;
+}
+
+/**
+ * The storage of an expandable value, ready to be changed: every shared array on its way from the
+ * variable is copied first (copy on write), so other copies keep their value. NULL if it is gone.
+ */
+static zval *writable(uint32_t reference) {
+    struct expandable *entry = &expandable[reference - 1];
+    if (!entry->parent) {
+        return entry->value;
+    }
+    zval *container = writable(entry->parent);
+    if (!container) {
+        return NULL;
+    }
+    ZVAL_DEREF(container);
+    zval *slot = NULL;
+    if (Z_TYPE_P(container) == IS_ARRAY) {
+        SEPARATE_ARRAY(container);
+        slot = entry->key ? zend_hash_find(Z_ARRVAL_P(container), entry->key) : zend_hash_index_find(Z_ARRVAL_P(container), entry->index);
+    } else if (Z_TYPE_P(container) == IS_OBJECT) {
+        HashTable *properties = properties_of(Z_OBJ_P(container));
+        slot = !properties ? NULL : entry->key ? zend_hash_find(properties, entry->key) : zend_hash_index_find(properties, entry->index);
+    }
+    if (slot) {
+        ZVAL_DEINDIRECT(slot);
+        ZVAL_DEREF(slot);
+    }
+    return slot;
 }
 
 /** The worker runs on: the references to arrays and objects lose their meaning. */
 void tenma_inspect_resume(void) {
+    for (uint32_t i = 0; i < expandable_count; i++) {
+        if (expandable[i].key) {
+            zend_string_release(expandable[i].key);
+        }
+    }
     free(expandable);
     expandable = NULL;
     expandable_count = expandable_size = 0;
@@ -898,10 +956,6 @@ void tenma_inspect_resume(void) {
     evaluated_count = 0;
 }
 
-/** An object's properties without running PHP code (no __debugInfo, no lazy initializer); NULL if not. */
-static HashTable *properties_of(zend_object *object) {
-    return zend_object_is_lazy(object) ? NULL : object->handlers->get_properties(object);
-}
 
 /** A value as the editor shows it: scalars in full (long strings cut), arrays and objects briefly. */
 static void describe(smart_str *out, zval *value) {
@@ -925,7 +979,7 @@ static void describe(smart_str *out, zval *value) {
 }
 
 /** A variable as "name\0value\0type\0reference\0"; the reference is 0 for values without children. */
-static void add_variable(smart_str *out, const char *prefix, const char *name, size_t name_len, zval *value) {
+static void add_variable(smart_str *out, const char *prefix, const char *name, size_t name_len, zval *value, const struct place *place) {
     ZVAL_DEINDIRECT(value);
     ZVAL_DEREF(value);
     if (Z_TYPE_P(value) == IS_UNDEF) {
@@ -939,7 +993,7 @@ static void add_variable(smart_str *out, const char *prefix, const char *name, s
     smart_str_appendc(out, 0);
     int children = Z_TYPE_P(value) == IS_ARRAY ? zend_hash_num_elements(Z_ARRVAL_P(value)) > 0
         : Z_TYPE_P(value) == IS_OBJECT && !(Z_OBJCE_P(value)->ce_flags & ZEND_ACC_ENUM);
-    smart_str_append_unsigned(out, children ? expandable_reference(value) : 0);
+    smart_str_append_unsigned(out, children ? expandable_reference(value, place) : 0);
     smart_str_appendc(out, 0);
 }
 
@@ -955,10 +1009,10 @@ char *tenma_inspect_locals(uint32_t thread, uint32_t index, size_t *len) {
             continue;
         }
         if (frame == paused && paused_return) {
-            add_variable(&out, "", ZEND_STRL("return value"), paused_return);
+            add_variable(&out, "", ZEND_STRL("return value"), paused_return, NULL);
         }
         if (Z_TYPE(frame->This) == IS_OBJECT) {
-            add_variable(&out, "$", ZEND_STRL("this"), &frame->This);
+            add_variable(&out, "$", ZEND_STRL("this"), &frame->This, NULL);
         }
         if (ZEND_CALL_INFO(frame) & ZEND_CALL_HAS_SYMBOL_TABLE) {
             // The script's top level: also variables created at runtime ($$name, extract()), without superglobals
@@ -966,13 +1020,13 @@ char *tenma_inspect_locals(uint32_t thread, uint32_t index, size_t *len) {
             zval *value;
             ZEND_HASH_FOREACH_STR_KEY_VAL(frame->symbol_table, name, value) {
                 if (name && !zend_is_auto_global(name)) {
-                    add_variable(&out, "$", ZSTR_VAL(name), ZSTR_LEN(name), value);
+                    add_variable(&out, "$", ZSTR_VAL(name), ZSTR_LEN(name), value, NULL);
                 }
             } ZEND_HASH_FOREACH_END();
         } else {
             zend_op_array *op_array = &frame->func->op_array;
             for (int i = 0; i < op_array->last_var; i++) {
-                add_variable(&out, "$", ZSTR_VAL(op_array->vars[i]), ZSTR_LEN(op_array->vars[i]), ZEND_CALL_VAR_NUM(frame, i));
+                add_variable(&out, "$", ZSTR_VAL(op_array->vars[i]), ZSTR_LEN(op_array->vars[i]), ZEND_CALL_VAR_NUM(frame, i), NULL);
             }
         }
         break;
@@ -983,7 +1037,7 @@ char *tenma_inspect_locals(uint32_t thread, uint32_t index, size_t *len) {
 /** The elements of an array or the properties of an object the editor expands, as add_variable packs them. */
 char *tenma_inspect_children(uint32_t reference, size_t *len) {
     smart_str out = {0};
-    zval *value = reference > 0 && reference <= expandable_count ? expandable[reference - 1] : NULL;
+    zval *value = reference > 0 && reference <= expandable_count ? expandable[reference - 1].value : NULL;
     HashTable *children = !value ? NULL : Z_TYPE_P(value) == IS_ARRAY ? Z_ARRVAL_P(value) : properties_of(Z_OBJ_P(value));
     if (!children) {
         return malloc_copy(&out, len);
@@ -997,17 +1051,18 @@ char *tenma_inspect_children(uint32_t reference, size_t *len) {
         if (shown++ == 1000) {
             break;
         }
+        struct place place = {reference, key, index};
         if (!key) {
             char number[24];
-            add_variable(&out, "", number, snprintf(number, sizeof(number), ZEND_ULONG_FMT, index), child);
+            add_variable(&out, "", number, snprintf(number, sizeof(number), ZEND_ULONG_FMT, index), child, &place);
         } else if (Z_TYPE_P(value) == IS_OBJECT) {
             // Private and protected properties are stored as "\0Class\0name" and "\0*\0name"
             const char *class_name, *property;
             size_t property_len;
             zend_unmangle_property_name_ex(key, &class_name, &property, &property_len);
-            add_variable(&out, "", property, property_len, child);
+            add_variable(&out, "", property, property_len, child, &place);
         } else {
-            add_variable(&out, "", ZSTR_VAL(key), ZSTR_LEN(key), child);
+            add_variable(&out, "", ZSTR_VAL(key), ZSTR_LEN(key), child, &place);
         }
     } ZEND_HASH_FOREACH_END();
     return malloc_copy(&out, len);
@@ -1021,100 +1076,221 @@ static zend_string *exception_message(zend_object *exception) {
 }
 
 /**
- * Evaluates `code` in shown frame `index` of the stopped thread, with its variables and $this, like
- * eval() there: an expression, or with `statements` code without a result. Packs
- * "status\0value\0type\0reference\0truthy\0text\0": status "ok", "error" (value is the message) or
- * "fatal"; text is a string's content unquoted, otherwise the value. Rust frees it with free().
+ * Running code while stopped, in a frame: eval() uses the variables of EG(current_execute_data).
+ * Stopped at a throw, the exception is pending and waits until the code ran; a throw and
+ * zend_clear_exception() move the frames' opline, which the VM reads on after the stop.
  */
-char *tenma_inspect_evaluate(uint32_t index, const char *code, size_t code_len, bool statements, size_t *len) {
-    smart_str out = {0};
-    zend_execute_data *target = NULL;
-    FOREACH_FRAME(paused, EG(active_fiber) ? EG(active_fiber)->stack_bottom : NULL, frame) {
-        if (shown_frame(frame) && index-- == 0) {
-            target = frame;
-            break;
-        }
-    }
-    if (!target) {
-        smart_str_appends(&out, "error");
-        smart_str_appendc(&out, 0);
-        smart_str_appends(&out, "no such frame in the stopped request");
-        smart_str_appendc(&out, 0);
-        return malloc_copy(&out, len);
-    }
-    // eval() runs with the variables of EG(current_execute_data); stopped at a throw, the exception
-    // is pending and waits until the code ran
-    zend_execute_data *current = EG(current_execute_data);
-    // A throw and zend_clear_exception() move the frames' opline; the VM reads it on after the stop
-    const zend_op *current_opline = current->opline, *target_opline = target->opline;
-    const zend_op *before_exception = EG(opline_before_exception);
-    zend_object *pending = EG(exception);
+struct in_frame {
+    zend_execute_data *current, *target;
+    const zend_op *current_opline, *target_opline, *before_exception;
+    zend_object *pending;
+};
+
+static void enter_frame(struct in_frame *run, zend_execute_data *target) {
+    *run = (struct in_frame) {EG(current_execute_data), target, EG(current_execute_data)->opline, target->opline, EG(opline_before_exception), EG(exception)};
     EG(exception) = NULL;
     EG(current_execute_data) = target;
     evaluating = 1;
     // A fiber switch (Tenma::sleep() in the code) would leave the stopped statement mid-way
     zend_fiber_switch_block();
-    zval result;
-    ZVAL_UNDEF(&result);
+}
+
+static void leave_frame(struct in_frame *run) {
+    zend_fiber_switch_unblock();
+    evaluating = 0;
+    EG(current_execute_data) = run->current;
+    run->current->opline = run->current_opline;
+    run->target->opline = run->target_opline;
+    EG(opline_before_exception) = run->before_exception;
+    EG(exception) = run->pending;
+}
+
+/** Packs "error\0message\0" if the code threw (or `failure`), and clears the exception. */
+static int failed(smart_str *out, bool failure) {
+    if (!EG(exception) && !failure) {
+        return 0;
+    }
+    smart_str_appends(out, "error");
+    smart_str_appendc(out, 0);
+    if (EG(exception)) {
+        zend_string *message = exception_message(EG(exception));
+        smart_str_append(out, EG(exception)->ce->name);
+        if (message && ZSTR_LEN(message)) {
+            smart_str_appends(out, ": ");
+            smart_str_append(out, message);
+        }
+        zend_clear_exception();
+    } else {
+        smart_str_appends(out, "could not evaluate");
+    }
+    smart_str_appendc(out, 0);
+    return 1;
+}
+
+/** Evaluates code in the entered frame into `result` (NULL without a result); otherwise packs the error. */
+static int evaluate_code(smart_str *out, const char *code, size_t code_len, bool statements, zval *result) {
+    ZVAL_NULL(result);
     zend_result compiled = FAILURE;
     bool fatal = false;
     zend_try {
-        compiled = zend_eval_stringl(code, code_len, statements ? NULL : &result, "debugger");
+        compiled = zend_eval_stringl(code, code_len, statements ? NULL : result, "debugger");
     } zend_catch {
         fatal = true;
     } zend_end_try();
-    zend_fiber_switch_unblock();
-    evaluating = 0;
-    EG(current_execute_data) = current;
     if (fatal) {
         evaluation_fatal = 1;
-        smart_str_appends(&out, "fatal");
-        smart_str_appendc(&out, 0);
+        smart_str_appends(out, "fatal");
+        smart_str_appendc(out, 0);
         if (PG(last_error_message)) {
-            smart_str_append(&out, PG(last_error_message));
+            smart_str_append(out, PG(last_error_message));
         }
-        smart_str_appendc(&out, 0);
-    } else if (EG(exception) || compiled == FAILURE) {
-        smart_str_appends(&out, "error");
-        smart_str_appendc(&out, 0);
-        zend_string *message = EG(exception) ? exception_message(EG(exception)) : NULL;
-        if (EG(exception)) {
-            smart_str_append(&out, EG(exception)->ce->name);
-            if (message && ZSTR_LEN(message)) {
-                smart_str_appends(&out, ": ");
-                smart_str_append(&out, message);
-            }
-            zend_clear_exception();
-        } else {
-            smart_str_appends(&out, "could not evaluate");
-        }
-        smart_str_appendc(&out, 0);
-    } else {
-        smart_str_appends(&out, "ok");
-        smart_str_appendc(&out, 0);
-        if (Z_TYPE(result) == IS_UNDEF) {
-            ZVAL_NULL(&result);
-        }
-        // Kept where it does not move: expandable[] may point at it
-        zval *kept = malloc(sizeof(zval));
-        ZVAL_COPY_VALUE(kept, &result);
-        evaluated = realloc(evaluated, ++evaluated_count * sizeof(*evaluated));
-        evaluated[evaluated_count - 1] = kept;
-        add_variable(&out, "", "", 0, kept);
-        smart_str_appendc(&out, zend_is_true(kept) ? '1' : '0');
-        smart_str_appendc(&out, 0);
-        if (Z_TYPE_P(kept) == IS_STRING) {
-            smart_str_append(&out, Z_STR_P(kept));
-        } else {
-            describe(&out, kept);
-        }
-        smart_str_appendc(&out, 0);
+        smart_str_appendc(out, 0);
+        return -1;
     }
-    current->opline = current_opline;
-    target->opline = target_opline;
-    EG(opline_before_exception) = before_exception;
-    EG(exception) = pending;
+    if (failed(out, compiled == FAILURE)) {
+        zval_ptr_dtor(result);
+        return -1;
+    }
+    if (Z_TYPE_P(result) == IS_UNDEF) {
+        ZVAL_NULL(result);
+    }
+    return 0;
+}
+
+/** Packs "ok\0" and a value as add_variable does, then "truthy\0text\0"; keeps a copy to expand. */
+static void pack_result(smart_str *out, zval *value) {
+    smart_str_appends(out, "ok");
+    smart_str_appendc(out, 0);
+    // Kept where it does not move: expandable[] may point at it
+    zval *kept = malloc(sizeof(zval));
+    ZVAL_COPY_DEREF(kept, value);
+    evaluated = realloc(evaluated, ++evaluated_count * sizeof(*evaluated));
+    evaluated[evaluated_count - 1] = kept;
+    add_variable(out, "", "", 0, kept, NULL);
+    smart_str_appendc(out, zend_is_true(kept) ? '1' : '0');
+    smart_str_appendc(out, 0);
+    if (Z_TYPE_P(kept) == IS_STRING) {
+        smart_str_append(out, Z_STR_P(kept));
+    } else {
+        describe(out, kept);
+    }
+    smart_str_appendc(out, 0);
+}
+
+static zend_execute_data *shown_frame_at(uint32_t index) {
+    FOREACH_FRAME(paused, EG(active_fiber) ? EG(active_fiber)->stack_bottom : NULL, frame) {
+        if (shown_frame(frame) && index-- == 0) {
+            return frame;
+        }
+    }
+    return NULL;
+}
+
+static char *no_frame(smart_str *out, size_t *len) {
+    smart_str_appends(out, "error");
+    smart_str_appendc(out, 0);
+    smart_str_appends(out, "not available in the stopped request");
+    smart_str_appendc(out, 0);
+    return malloc_copy(out, len);
+}
+
+/**
+ * Evaluates `code` in shown frame `index` of the stopped thread, with its variables and $this, like
+ * eval() there: an expression, or with `statements` code without a result. Packs
+ * "status\0name\0value\0type\0reference\0truthy\0text\0" (see pack_result), or "error\0message\0"
+ * or "fatal\0message\0". Rust frees it with free().
+ */
+char *tenma_inspect_evaluate(uint32_t index, const char *code, size_t code_len, bool statements, size_t *len) {
+    smart_str out = {0};
+    zend_execute_data *target = shown_frame_at(index);
+    if (!target) {
+        return no_frame(&out, len);
+    }
+    struct in_frame run;
+    enter_frame(&run, target);
+    zval result;
+    if (evaluate_code(&out, code, code_len, statements, &result) == 0) {
+        pack_result(&out, &result);
+        zval_ptr_dtor(&result);
+    }
+    leave_frame(&run);
     return malloc_copy(&out, len);
+}
+
+/** The class whose scope may write property `name` of `object`, which may be private to a parent. */
+static zend_class_entry *property_scope(zend_object *object, const char *name, size_t name_len) {
+    HashTable *properties = properties_of(object);
+    zend_string *key;
+    if (properties) {
+        ZEND_HASH_FOREACH_STR_KEY(properties, key) {
+            const char *class_name, *property;
+            size_t property_len;
+            if (!key || zend_unmangle_property_name_ex(key, &class_name, &property, &property_len) != SUCCESS
+                || property_len != name_len || memcmp(property, name, name_len) != 0) {
+                continue;
+            }
+            if (class_name && class_name[0] != '*') {
+                zend_class_entry *declaring = zend_hash_str_find_ptr_lc(EG(class_table), class_name, strlen(class_name));
+                return declaring ? declaring : object->ce;
+            }
+            break;
+        } ZEND_HASH_FOREACH_END();
+    }
+    return object->ce;
+}
+
+/**
+ * Sets element or property `name` of the array or object `reference` refers to, to the value of
+ * `code` (evaluated in the stopped frame). Typed and readonly properties check as in PHP. Packs the
+ * new value as tenma_inspect_evaluate does.
+ */
+char *tenma_inspect_set_child(uint32_t reference, const char *name, size_t name_len, const char *code, size_t code_len, size_t *len) {
+    smart_str out = {0};
+    zend_execute_data *target = shown_frame_at(0);
+    if (!target || reference == 0 || reference > expandable_count) {
+        return no_frame(&out, len);
+    }
+    struct in_frame run;
+    enter_frame(&run, target);
+    zval value;
+    if (evaluate_code(&out, code, code_len, false, &value) == 0) {
+        zval *container = writable(reference);
+        if (container && Z_TYPE_P(container) == IS_ARRAY) {
+            SEPARATE_ARRAY(container);
+            pack_result(&out, zend_symtable_str_update(Z_ARRVAL_P(container), name, name_len, &value));
+        } else if (container && Z_TYPE_P(container) == IS_OBJECT) {
+            zend_object *object = Z_OBJ_P(container);
+            zend_string *property = zend_string_init(name, name_len, 0);
+            zend_class_entry *scope = property_scope(object, name, name_len);
+            zend_update_property_ex(scope, object, property, &value);
+            zval_ptr_dtor(&value);
+            if (!failed(&out, false)) {
+                zval read;
+                pack_result(&out, zend_read_property_ex(scope, object, property, 1, &read));
+            }
+            zend_string_release(property);
+        } else {
+            zval_ptr_dtor(&value);
+            failed(&out, true);
+        }
+    }
+    leave_frame(&run);
+    return malloc_copy(&out, len);
+}
+
+/** Tenma::debugger(): stops here if a debugger is connected, like `debugger;` in JavaScript. */
+extern void tenma_rs_debugger(uintptr_t fiber);
+
+PHP_FUNCTION(tenma_debugger) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    if (!inspecting || evaluating) {
+        return;
+    }
+    zend_execute_data *outer = paused;
+    paused = EG(current_execute_data);
+    tenma_rs_debugger((uintptr_t) EG(active_fiber));
+    paused = outer;
+    bail_after_fatal_evaluation();
 }
 
 /** Where a thrown exception ends up, see exception_fate. */
@@ -1158,7 +1334,7 @@ static enum fate exception_fate(zend_object *exception) {
     return in_app ? UNCAUGHT : CAUGHT_INSIDE;
 }
 
-extern void tenma_rs_exception(const char *description, size_t description_len, bool uncaught);
+extern void tenma_rs_exception(const char *description, size_t description_len, const char *classes, size_t classes_len, bool uncaught);
 
 
 /** PHP throws: the frames are still alive here, so the debugger may stop with them. */
@@ -1182,7 +1358,17 @@ static void inspect_throw(zend_object *exception) {
             smart_str_append(&description, message);
         }
         smart_str_0(&description);
-        tenma_rs_exception(ZSTR_VAL(description.s), ZSTR_LEN(description.s), fate == UNCAUGHT);
+        // The class, its parents and its interfaces, for exception breakpoints limited to classes
+        smart_str classes = {0};
+        for (zend_class_entry *class = exception->ce; class; class = class->parent) {
+            add_field(&classes, ZSTR_VAL(class->name), ZSTR_LEN(class->name));
+        }
+        for (uint32_t i = 0; i < exception->ce->num_interfaces; i++) {
+            add_field(&classes, ZSTR_VAL(exception->ce->interfaces[i]->name), ZSTR_LEN(exception->ce->interfaces[i]->name));
+        }
+        smart_str_0(&classes);
+        tenma_rs_exception(ZSTR_VAL(description.s), ZSTR_LEN(description.s), ZSTR_VAL(classes.s), ZSTR_LEN(classes.s), fate == UNCAUGHT);
+        smart_str_free(&classes);
         smart_str_free(&description);
     }
     paused = outer;

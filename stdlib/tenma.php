@@ -1973,6 +1973,15 @@ namespace {
         }
 
         /**
+         * Stops here when an editor is connected to tenma --inspect, like `debugger;` in JavaScript
+         * or xdebug_break(). Does nothing otherwise.
+         */
+        public static function debugger(): void
+        {
+            \tenma_debugger();
+        }
+
+        /**
          * Waits without blocking the server. Other requests keep running.
          */
         public static function sleep(float $seconds): void

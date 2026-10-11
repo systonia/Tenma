@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Condvar, LazyLock, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, mpsc};
 
 use serde_json::{Value, json};
 
@@ -33,6 +33,7 @@ unsafe extern "C" {
     fn tenma_inspect_children(reference: u32, len: *mut usize) -> *mut u8;
     fn tenma_inspect_resume();
     fn tenma_inspect_evaluate(index: u32, code: *const u8, code_len: usize, statements: bool, len: *mut usize) -> *mut u8;
+    fn tenma_inspect_set_child(reference: u32, name: *const u8, name_len: usize, code: *const u8, code_len: usize, len: *mut usize) -> *mut u8;
 }
 
 /// The address without --inspect=…: only this machine, a debugger can run any code.
@@ -50,9 +51,30 @@ static NEXT_BREAKPOINT: AtomicU64 = AtomicU64::new(1);
 /// The code PHP compiled, by file: where breakpoints can stop.
 static CODE: LazyLock<Mutex<HashMap<Vec<u8>, Code>>> = LazyLock::new(Default::default);
 /// Exceptions to stop at, from setExceptionBreakpoints.
-static EXCEPTIONS: AtomicU8 = AtomicU8::new(UNCAUGHT);
-const UNCAUGHT: u8 = 1;
-const ALL: u8 = 2;
+static EXCEPTIONS: Mutex<Exceptions> = Mutex::new(Exceptions::DEFAULT);
+
+/// Per filter of the editor: off (None), or on for the classes listed (lowercase, without a
+/// leading backslash), all of them if none are.
+struct Exceptions {
+    uncaught: Option<Vec<String>>,
+    all: Option<Vec<String>>,
+}
+
+impl Exceptions {
+    /// Uncaught exceptions stop, as the filter's default in the editor says.
+    const DEFAULT: Exceptions = Exceptions { uncaught: Some(Vec::new()), all: None };
+
+    /// Does an exception of these classes (its own, its parents', its interfaces') stop?
+    fn stop(&self, classes: &[String], uncaught: bool) -> bool {
+        let matches = |filter: &Option<Vec<String>>| filter.as_ref().is_some_and(|only| only.is_empty() || only.iter().any(|class| classes.contains(class)));
+        matches(&self.all) || uncaught && matches(&self.uncaught)
+    }
+}
+
+/// A class name as the filters compare it.
+fn class_key(name: &str) -> String {
+    name.trim().trim_start_matches('\\').to_lowercase()
+}
 /// The editor pressed pause: stop at the next statement.
 static PAUSE: AtomicBool = AtomicBool::new(false);
 /// --inspect-brk: stop at the script's first statement.
@@ -89,6 +111,10 @@ struct Breakpoint {
     condition: Option<String>,
     /// A logpoint: prints this instead of stopping, `{expression}` replaced by its value.
     log: Option<String>,
+    /// Stops only at certain hits: `5` (the fifth), `>= 5`, `> 5`, `< 5`, `<= 5`, `% 3` (every third).
+    hit: Option<String>,
+    /// How often it was reached with its condition true, shared by its copies.
+    hits: Arc<AtomicU64>,
 }
 
 impl Breakpoint {
@@ -198,7 +224,7 @@ pub fn release() {
 /// The editor is gone: its breakpoints go too, a stopped worker runs on.
 fn detach() {
     BREAKPOINTS.lock().unwrap().clear();
-    EXCEPTIONS.store(UNCAUGHT, Ordering::Relaxed);
+    *EXCEPTIONS.lock().unwrap() = Exceptions::DEFAULT;
     PAUSE.store(false, Ordering::Relaxed);
     resume(None);
 }
@@ -272,9 +298,10 @@ fn handle(request: &Value) -> bool {
     let arguments = &request["arguments"];
     match request["command"].as_str().unwrap_or_default() {
         "initialize" => {
+            let only = "Only these classes and their subclasses, comma-separated, e.g. RuntimeException, App\\NotFound";
             let filters = json!([
-                {"filter": "uncaught", "label": "Uncaught exceptions", "default": true},
-                {"filter": "all", "label": "All exceptions", "default": false},
+                {"filter": "uncaught", "label": "Uncaught exceptions", "default": true, "supportsCondition": true, "conditionDescription": only},
+                {"filter": "all", "label": "All exceptions", "default": false, "supportsCondition": true, "conditionDescription": only},
             ]);
             respond(
                 request,
@@ -285,6 +312,8 @@ fn handle(request: &Value) -> bool {
                     "supportsLogPoints": true,
                     "supportsEvaluateForHovers": true,
                     "supportsSetVariable": true,
+                    "supportsHitConditionalBreakpoints": true,
+                    "supportsExceptionFilterOptions": true,
                 }),
             );
             event("initialized", json!({}));
@@ -296,8 +325,15 @@ fn handle(request: &Value) -> bool {
             CONFIGURED.1.notify_all();
         }
         "setExceptionBreakpoints" => {
-            let filters = arguments["filters"].as_array().into_iter().flatten().filter_map(Value::as_str);
-            EXCEPTIONS.store(filters.fold(0, |bits, filter| bits | if filter == "all" { ALL } else { UNCAUGHT }), Ordering::Relaxed);
+            // Plain filters, or filter options with a condition: the classes to stop at
+            let plain = arguments["filters"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|filter| (filter, ""));
+            let options = arguments["filterOptions"].as_array().into_iter().flatten().filter_map(|option| Some((option["filterId"].as_str()?, option["condition"].as_str().unwrap_or_default())));
+            let mut exceptions = Exceptions { uncaught: None, all: None };
+            for (filter, condition) in plain.chain(options) {
+                let classes = condition.split(',').map(class_key).filter(|class| !class.is_empty()).collect();
+                *if filter == "all" { &mut exceptions.all } else { &mut exceptions.uncaught } = Some(classes);
+            }
+            *EXCEPTIONS.lock().unwrap() = exceptions;
             respond(request, json!({}));
         }
         "setBreakpoints" => {
@@ -313,7 +349,16 @@ fn handle(request: &Value) -> bool {
                 .filter_map(|breakpoint| {
                     let line = u32::try_from(breakpoint["line"].as_u64()?).ok()?;
                     let id = NEXT_BREAKPOINT.fetch_add(1, Ordering::Relaxed);
-                    let mut breakpoint = Breakpoint { id, line, at: None, verified: false, condition: text(&breakpoint["condition"]), log: text(&breakpoint["logMessage"]) };
+                    let mut breakpoint = Breakpoint {
+                        id,
+                        line,
+                        at: None,
+                        verified: false,
+                        condition: text(&breakpoint["condition"]),
+                        log: text(&breakpoint["logMessage"]),
+                        hit: text(&breakpoint["hitCondition"]),
+                        hits: Arc::default(),
+                    };
                     breakpoint.resolve(code.get(&file));
                     Some(breakpoint)
                 })
@@ -401,17 +446,31 @@ fn arrive(file: &[u8], line: u32, fiber: usize, entry: bool) {
     } else {
         return;
     };
+    stop_here(json!({"reason": reason}), fiber);
+}
+
+/// Stops, and after a step stops again where it arrives.
+fn stop_here(body: Value, fiber: usize) {
     STEPPING.set(None);
-    let step = stop(json!({"reason": reason}));
+    let step = stop(body);
     STEPPING.set(step.map(|step| (step, fiber, unsafe { tenma_inspect_depth() })));
+}
+
+/// `Tenma::debugger()`: stops if an editor is connected, like `debugger;` in JavaScript.
+#[unsafe(no_mangle)]
+extern "C" fn tenma_rs_debugger(fiber: usize) {
+    if ENDING.load(Ordering::Relaxed) || CLIENT.lock().unwrap().is_none() {
+        return;
+    }
+    stop_here(json!({"reason": "breakpoint", "description": "Tenma::debugger()"}), fiber);
 }
 
 /// PHP throws an exception that the app's code catches or not (`uncaught`); the C layer leaves out
 /// those the stdlib catches itself.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_exception(description: *const u8, description_len: usize, uncaught: bool) {
-    let filters = EXCEPTIONS.load(Ordering::Relaxed);
-    if ENDING.load(Ordering::Relaxed) || filters & ALL == 0 && !(uncaught && filters & UNCAUGHT != 0) {
+extern "C" fn tenma_rs_exception(description: *const u8, description_len: usize, classes: *const u8, classes_len: usize, uncaught: bool) {
+    let classes: Vec<String> = bytes(classes, classes_len).split(|&byte| byte == 0).filter(|class| !class.is_empty()).map(|class| class_key(&String::from_utf8_lossy(class))).collect();
+    if ENDING.load(Ordering::Relaxed) || !EXCEPTIONS.lock().unwrap().stop(&classes, uncaught) {
         return;
     }
     let description = String::from_utf8_lossy(bytes(description, description_len)).into_owned();
@@ -472,6 +531,7 @@ fn hits(breakpoint: &Breakpoint) -> bool {
         },
         None => true,
     };
+    let stops = stops && breakpoint.hit.as_deref().is_none_or(|hit| hit_matches(hit, breakpoint.hits.fetch_add(1, Ordering::Relaxed) + 1));
     let stops = match &breakpoint.log {
         Some(message) if stops => {
             output(&format!("{}\n", interpolate(message)), "console");
@@ -482,6 +542,23 @@ fn hits(breakpoint: &Breakpoint) -> bool {
     // The values are not needed any more
     unsafe { tenma_inspect_resume() };
     stops
+}
+
+/// Does the `count`th hit match a hit condition? One that is not understood always does.
+fn hit_matches(condition: &str, count: u64) -> bool {
+    let condition = condition.trim();
+    let (operator, number) = [">=", "<=", "==", "%", ">", "<", "="].iter().find_map(|operator| Some((*operator, condition.strip_prefix(operator)?))).unwrap_or(("==", condition));
+    let Ok(number) = number.trim().parse::<u64>() else {
+        return true;
+    };
+    match operator {
+        ">=" => count >= number,
+        "<=" => count <= number,
+        ">" => count > number,
+        "<" => count < number,
+        "%" => number != 0 && count % number == 0,
+        _ => count == number,
+    }
 }
 
 /// A logpoint's message with each `{expression}` replaced by its value.
@@ -517,7 +594,11 @@ fn evaluate(index: u32, code: &str, statements: bool) -> Result<Evaluated, Strin
     // As an expression PHP adds `return …;` itself; statements need their last semicolon
     let code = code.trim().trim_end_matches(';');
     let code = if statements { format!("{code};") } else { code.to_owned() };
-    let fields = fields(|len| unsafe { tenma_inspect_evaluate(index, code.as_ptr(), code.len(), statements, len) });
+    evaluated(fields(|len| unsafe { tenma_inspect_evaluate(index, code.as_ptr(), code.len(), statements, len) }))
+}
+
+/// A result as tenma_inspect_evaluate and tenma_inspect_set_child pack it.
+fn evaluated(fields: Vec<String>) -> Result<Evaluated, String> {
     match fields.first().map(String::as_str) {
         Some("ok") if fields.len() >= 7 => Ok(Evaluated {
             value: fields[2].clone(),
@@ -639,12 +720,18 @@ fn answer(request: &Value) {
         Some("setVariable") => {
             let reference = arguments["variablesReference"].as_u64().unwrap_or_default();
             let name = arguments["name"].as_str().unwrap_or_default();
-            let frame = reference.checked_sub(LOCALS);
-            let Some(index) = frame.and_then(|frame| frame_index(Some(frame))).filter(|_| name.starts_with('$') && name != "$this") else {
-                return fail(request, "only local variables of the stopped request can be changed");
+            let value = arguments["value"].as_str().unwrap_or_default().trim().trim_end_matches(';');
+            let result = match reference.checked_sub(LOCALS) {
+                // An element or property: PHP copies shared arrays on the way, checks property types
+                None => evaluated(fields(|len| unsafe { tenma_inspect_set_child(reference as u32, name.as_ptr(), name.len(), value.as_ptr(), value.len(), len) })),
+                Some(frame) => {
+                    let Some(index) = frame_index(Some(frame)).filter(|_| name.starts_with('$') && name != "$this") else {
+                        return fail(request, "only variables of the stopped request can be changed");
+                    };
+                    evaluate(index, &format!("{name} = ({value})"), false)
+                }
             };
-            let value = arguments["value"].as_str().unwrap_or_default();
-            match evaluate(index, &format!("{name} = ({value})"), false) {
+            match result {
                 Ok(result) => respond(request, json!({"value": result.value, "type": result.kind, "variablesReference": result.reference})),
                 Err(error) => fail(request, &error),
             }
