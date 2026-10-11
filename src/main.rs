@@ -11,6 +11,7 @@ mod db;
 mod dev;
 mod files;
 mod fs;
+mod inspect;
 mod ops;
 mod php;
 mod streams;
@@ -40,7 +41,7 @@ use tokio::task::LocalSet;
 const STDLIB: &str = include_str!("../stdlib/tenma.php");
 /// Prints the public API as stubs; only evaluated for `tenma --stubs`.
 const STUBS: &str = include_str!("../stdlib/stubs.php");
-const USAGE: &str = "Usage: tenma [--watch] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -78,6 +79,8 @@ struct Options {
     watch: bool,
     /// How long running requests may take to finish on shutdown or restart.
     drain: Duration,
+    /// --inspect: the address of the debugger (DAP).
+    inspect: Option<std::net::SocketAddr>,
 }
 
 /// Why a worker's event loop ends.
@@ -128,8 +131,18 @@ fn main() -> ExitCode {
     if options.watch {
         watch::configure();
     }
+    if options.inspect.is_some() {
+        inspect::configure();
+    }
     if let Err(message) = php::start() {
         eprintln!("tenma: {message}");
+        return ExitCode::FAILURE;
+    }
+    if let Some(address) = options.inspect
+        && let Err(message) = inspect::listen(address)
+    {
+        eprintln!("tenma: {message}");
+        php::stop();
         return ExitCode::FAILURE;
     }
     let status = run(&argv, options);
@@ -159,7 +172,7 @@ fn stubs() -> ExitCode {
 /// Options for tenma, then the script; everything after it belongs to the script ($argv), as with `php script.php …`.
 fn parse_args() -> Result<(Vec<String>, Options), String> {
     let mut args = std::env::args().skip(1);
-    let mut options = Options { workers: 1, max_body: 10 << 20, max_requests: None, request_timeout: Duration::from_secs(30), watch: false, drain: DRAIN };
+    let mut options = Options { workers: 1, max_body: 10 << 20, max_requests: None, request_timeout: Duration::from_secs(30), watch: false, drain: DRAIN, inspect: None };
     let mut argv = Vec::new();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
@@ -167,6 +180,16 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
             "--watch" => {
                 options.watch = true;
                 options.drain = WATCH_DRAIN;
+            }
+            "--inspect" => options.inspect = Some(inspect::DEFAULT),
+            // As with node: --inspect=9230 or --inspect=host:port
+            inspect if inspect.starts_with("--inspect=") => {
+                let address = &inspect["--inspect=".len()..];
+                let parsed = match address.parse::<u16>() {
+                    Ok(port) => Some(std::net::SocketAddr::new(inspect::DEFAULT.ip(), port)),
+                    Err(_) => std::net::ToSocketAddrs::to_socket_addrs(address).ok().and_then(|mut addresses| addresses.next()),
+                };
+                options.inspect = Some(parsed.ok_or(format!("--inspect: not an address: {address}"))?);
             }
             "--workers" | "-w" => {
                 options.workers = match value("--workers")?.as_str() {
@@ -203,6 +226,11 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
     }
     if argv.is_empty() {
         return Err("No script given".into());
+    }
+    // Requests would land in different interpreters; while debugging that only confuses
+    if options.inspect.is_some() && options.workers > 1 {
+        eprintln!("tenma: --inspect runs one worker");
+        options.workers = 1;
     }
     Ok((argv, options))
 }
@@ -314,6 +342,7 @@ fn run(argv: &[String], options: Options) -> u8 {
         }
     });
     drop(runtime);
+    inspect::release();
     workers.extend(dev_worker);
     stop_workers(workers);
     dev::exit_status().or(php::exit_status()).unwrap_or(0)
@@ -397,6 +426,9 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
             }
             let _ = ready.send(Err(1));
             return 1;
+        }
+        if options.inspect.is_some() && !dev {
+            inspect::thread();
         }
         BROKEN.set(false);
         HANDLED.set(0);

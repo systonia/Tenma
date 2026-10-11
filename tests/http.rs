@@ -972,3 +972,120 @@ fn watch_stops_hooks_that_trigger_themselves() {
     assert!(stopped);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+/// A minimal DAP client: requests with a Content-Length header, answers in order.
+struct Dap {
+    stream: TcpStream,
+    seq: u64,
+}
+
+impl Dap {
+    fn connect(port: u16) -> Dap {
+        let started = Instant::now();
+        loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    return Dap { stream, seq: 0 };
+                }
+                Err(_) if started.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
+                Err(error) => panic!("debugger does not respond: {error}"),
+            }
+        }
+    }
+
+    fn send(&mut self, command: &str, arguments: serde_json::Value) {
+        self.seq += 1;
+        let body = serde_json::json!({"seq": self.seq, "type": "request", "command": command, "arguments": arguments}).to_string();
+        write!(self.stream, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    }
+
+    fn read(&mut self) -> serde_json::Value {
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            self.stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let length: usize = String::from_utf8_lossy(&header).trim().trim_start_matches("Content-Length:").trim().parse().unwrap();
+        let mut body = vec![0; length];
+        self.stream.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// The next message of this kind ("response" or "event") and name, skipping others.
+    fn expect(&mut self, kind: &str, name: &str) -> serde_json::Value {
+        loop {
+            let message = self.read();
+            let key = if kind == "event" { &message["event"] } else { &message["command"] };
+            if message["type"] == kind && key == name {
+                return message;
+            }
+        }
+    }
+
+    fn request(&mut self, command: &str, arguments: serde_json::Value) -> serde_json::Value {
+        self.send(command, arguments);
+        let response = self.expect("response", command);
+        assert_eq!(response["success"], true, "{response}");
+        response["body"].clone()
+    }
+
+    /// Waits for the stop; the innermost frame's function and line, and its variables.
+    fn stopped(&mut self) -> (String, u64, Vec<(String, String)>) {
+        self.expect("event", "stopped");
+        let frames = self.request("stackTrace", serde_json::json!({"threadId": 1}));
+        let top = &frames["stackFrames"][0];
+        let variables = self.request("variables", serde_json::json!({"variablesReference": 1}));
+        let variables = variables["variables"].as_array().unwrap().iter().map(|variable| (variable["name"].as_str().unwrap().to_owned(), variable["value"].as_str().unwrap().to_owned())).collect();
+        (top["name"].as_str().unwrap().to_owned(), top["line"].as_u64().unwrap(), variables)
+    }
+}
+
+#[test]
+fn inspect_stops_at_breakpoints_and_steps() {
+    let (port, debugger) = (18_122, 19_229);
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma")).args([&format!("--inspect={debugger}"), "tests/fixtures/inspect.php"]).env("PORT", port.to_string()).spawn().unwrap(),
+    );
+    let mut dap = Dap::connect(debugger);
+    dap.request("initialize", serde_json::json!({"adapterID": "tenma"}));
+    dap.expect("event", "initialized");
+    let path = std::fs::canonicalize("tests/fixtures/inspect.php").unwrap();
+    let set = dap.request("setBreakpoints", serde_json::json!({"source": {"path": path}, "breakpoints": [{"line": 10}]}));
+    assert_eq!(set["breakpoints"][0]["verified"], true);
+    dap.request("configurationDone", serde_json::json!({}));
+
+    let response = std::thread::spawn(move || get(port, "/"));
+    let variable = |variables: &[(String, String)], name: &str| variables.iter().find(|(found, _)| found == name).map(|(_, value)| value.clone());
+
+    let (function, line, variables) = dap.stopped();
+    assert_eq!((function.as_str(), line), ("{closure:inspect.php:8}", 10));
+    assert_eq!(variable(&variables, "$id").as_deref(), Some("42"));
+    assert_eq!(variable(&variables, "$message"), None, "not assigned yet");
+
+    dap.request("stepIn", serde_json::json!({"threadId": 1}));
+    let (function, line, variables) = dap.stopped();
+    assert_eq!((function.as_str(), line), ("greet", 4));
+    assert_eq!(variable(&variables, "$name").as_deref(), Some("'world'"));
+
+    dap.request("stepOut", serde_json::json!({"threadId": 1}));
+    assert_eq!(dap.stopped().1, 11);
+    // Over the sleep: the fiber waits meanwhile, the step ends in the same fiber
+    dap.request("next", serde_json::json!({"threadId": 1}));
+    assert_eq!(dap.stopped().1, 12);
+    dap.request("next", serde_json::json!({"threadId": 1}));
+    let (_, line, variables) = dap.stopped();
+    assert_eq!(line, 13);
+    assert_eq!(variable(&variables, "$after").as_deref(), Some("'slept'"));
+
+    dap.request("continue", serde_json::json!({"threadId": 1}));
+    assert!(response.join().unwrap().ends_with("Hello world slept"));
+
+    // Disconnecting while stopped lets the request finish, the breakpoints are gone
+    let response = std::thread::spawn(move || get(port, "/"));
+    dap.stopped();
+    dap.request("disconnect", serde_json::json!({}));
+    assert!(response.join().unwrap().ends_with("Hello world slept"));
+    assert!(get(port, "/").ends_with("Hello world slept"));
+}
