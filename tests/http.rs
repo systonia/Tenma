@@ -980,6 +980,34 @@ fn watch_stops_hooks_that_trigger_themselves() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+#[test]
+fn watch_keeps_hook_roots_recursive_when_the_app_loads_from_them() {
+    use std::io::BufRead;
+    let directory = scratch("recursive");
+    std::fs::create_dir_all(directory.join("src/sub")).unwrap();
+    // The app loads a file from the hook's root: its directory must stay watched recursively
+    std::fs::write(directory.join("src/a.php"), "<?php").unwrap();
+    std::fs::write(directory.join("app.php"), "<?php require __DIR__ . '/src/a.php'; echo \"loaded\\n\";").unwrap();
+    std::fs::write(directory.join("tenma.dev.php"), "<?php return [new Tenma\\Hook(inputs: ['src/**/*.txt'], name: 'txt', run: fn (array $changed) => print('changed ' . implode(',', array_map('basename', $changed)) . \"\\n\"))];").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--watch", "app.php"]).current_dir(&directory).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let _child = Server(child);
+    let (sender, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || std::io::BufReader::new(stdout).lines().map_while(Result::ok).for_each(|line| drop(sender.send(line))));
+    let wait_for = |expected: &str| loop {
+        match lines.recv_timeout(Duration::from_secs(5)) {
+            Ok(line) if line == expected => break,
+            Ok(_) => {}
+            Err(_) => panic!("no {expected:?}"),
+        }
+    };
+    wait_for("loaded");
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(directory.join("src/sub/deep.txt"), "x").unwrap();
+    wait_for("changed deep.txt");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 /// A minimal DAP client: requests with a Content-Length header, answers in order.
 struct Dap {
     stream: TcpStream,
@@ -1135,6 +1163,15 @@ fn inspect_stops_at_breakpoints_and_steps() {
     // Also in the caller's frame
     let caller = dap.request("stackTrace", serde_json::json!({"threadId": stop.event["threadId"]}))["stackFrames"][1]["id"].clone();
     assert_eq!(dap.request("evaluate", serde_json::json!({"expression": "$id * 2", "frameId": caller}))["result"], "84");
+    // Paged like VS Code asks for long stacks; IDs and references stay below 2^31 as DAP wants
+    let page = dap.request("stackTrace", serde_json::json!({"threadId": stop.event["threadId"], "startFrame": 1, "levels": 1}));
+    assert_eq!(page["stackFrames"].as_array().unwrap().len(), 1);
+    assert_eq!(page["stackFrames"][0]["id"], caller);
+    assert!(page["totalFrames"].as_u64().unwrap() > 1);
+    let scopes = dap.request("scopes", serde_json::json!({"frameId": caller}));
+    let locals = scopes["scopes"][0]["variablesReference"].as_u64().unwrap();
+    assert!(locals < 1 << 31);
+    assert!(dap.variables(locals).iter().any(|(name, _, _)| name == "$id"));
     dap.command("stepOut");
     assert_eq!(dap.stopped().line, 30);
     // Over the sleep: the fiber waits meanwhile, the step ends in the same fiber

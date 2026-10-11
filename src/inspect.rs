@@ -39,11 +39,13 @@ unsafe extern "C" {
 /// The address without --inspect=…: only this machine, a debugger can run any code.
 pub const DEFAULT: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9229);
 
-/// A frame's ID is its thread times this plus its position in the stack.
-const FRAMES_PER_THREAD: u64 = 10_000;
 /// Variable references from here on are a frame's locals (frame ID added), below it arrays and
-/// objects to expand.
-const LOCALS: u64 = 1 << 32;
+/// objects to expand. DAP wants references and IDs below 2^31.
+const LOCALS: u64 = 1 << 30;
+
+/// The frames the editor has seen during this stop, as (thread, position in its stack); a frame's
+/// ID is its place here plus 1.
+static FRAMES: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
 
 /// Breakpoints by file (canonical path), from setBreakpoints.
 static BREAKPOINTS: LazyLock<Mutex<HashMap<Vec<u8>, Vec<Breakpoint>>>> = LazyLock::new(Default::default);
@@ -652,6 +654,8 @@ fn stop(mut body: Value) -> Option<Step> {
         }
         STOPPED.store(true, Ordering::Relaxed);
     }
+    // Frame IDs hold for one stop
+    FRAMES.lock().unwrap().clear();
     let thread = unsafe { tenma_inspect_thread_id() };
     STOPPED_THREAD.store(thread, Ordering::Relaxed);
     body["threadId"] = json!(thread);
@@ -684,26 +688,41 @@ fn answer(request: &Value) {
         }
         Some("stackTrace") => {
             let thread = arguments["threadId"].as_u64().unwrap_or_default();
-            let frames: Vec<Value> = fields(|len| unsafe { tenma_inspect_frames(u32::try_from(thread).unwrap_or_default(), len) })
+            let all = fields(|len| unsafe { tenma_inspect_frames(u32::try_from(thread).unwrap_or_default(), len) });
+            let total = all.len() / 3;
+            let start = arguments["startFrame"].as_u64().unwrap_or_default() as usize;
+            let levels = arguments["levels"].as_u64().filter(|&levels| levels > 0).map_or(total, |levels| levels as usize);
+            let frames: Vec<Value> = all
                 .chunks_exact(3)
-                .take(FRAMES_PER_THREAD as usize)
                 .enumerate()
+                .skip(start)
+                .take(levels)
                 .map(|(index, frame)| {
                     let name = frame[0].rsplit('/').next().unwrap_or_default();
                     let line: u64 = frame[1].parse().unwrap_or_default();
                     // Closures are called {closure:/full/path.php:8}
                     let function = frame[2].replace(&frame[0], name);
-                    json!({"id": thread * FRAMES_PER_THREAD + index as u64, "name": function, "source": {"name": name, "path": frame[0]}, "line": line, "column": 1})
+                    let id = {
+                        let mut frames = FRAMES.lock().unwrap();
+                        let known = frames.iter().position(|&known| known == (thread, index as u32));
+                        known.unwrap_or_else(|| {
+                            frames.push((thread, index as u32));
+                            frames.len() - 1
+                        }) + 1
+                    };
+                    json!({"id": id, "name": function, "source": {"name": name, "path": frame[0]}, "line": line, "column": 1})
                 })
                 .collect();
-            respond(request, json!({"stackFrames": frames, "totalFrames": frames.len()}));
+            respond(request, json!({"stackFrames": frames, "totalFrames": total}));
         }
         Some("variables") => {
             let reference = arguments["variablesReference"].as_u64().unwrap_or_default();
             let packed = if reference >= LOCALS {
-                let frame = reference - LOCALS;
-                let (thread, index) = (frame / FRAMES_PER_THREAD, frame % FRAMES_PER_THREAD);
-                fields(|len| unsafe { tenma_inspect_locals(u32::try_from(thread).unwrap_or_default(), index as u32, len) })
+                let frame = (reference - LOCALS).checked_sub(1).and_then(|position| usize::try_from(position).ok()).and_then(|position| FRAMES.lock().unwrap().get(position).copied());
+                let Some((thread, index)) = frame else {
+                    return respond(request, json!({"variables": []}));
+                };
+                fields(|len| unsafe { tenma_inspect_locals(u32::try_from(thread).unwrap_or_default(), index, len) })
             } else {
                 fields(|len| unsafe { tenma_inspect_children(reference as u32, len) })
             };
@@ -758,7 +777,8 @@ fn frame_index(frame: Option<u64>) -> Option<u32> {
         return Some(0);
     };
     let thread = u64::from(STOPPED_THREAD.load(Ordering::Relaxed));
-    (frame / FRAMES_PER_THREAD == thread).then_some((frame % FRAMES_PER_THREAD) as u32)
+    let (of, index) = *FRAMES.lock().unwrap().get(usize::try_from(frame).ok()?.checked_sub(1)?)?;
+    (of == thread).then_some(index)
 }
 
 /// The null-terminated fields C packed into malloc() memory; freed here.

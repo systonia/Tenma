@@ -127,6 +127,12 @@ pub fn start() -> Result<UnboundedReceiver<Changes>, String> {
     Ok(receiver)
 }
 
+/// Below a hook root watched recursively: watching the directory on its own again would replace
+/// that watch on macOS (FSEvents keeps one mode per path) and lose its subdirectories.
+fn covered(directory: &Path, roots: &[(PathBuf, bool)]) -> bool {
+    roots.iter().any(|(root, recursive)| *recursive && (directory.starts_with(root) || root.canonicalize().is_ok_and(|root| directory.starts_with(root))))
+}
+
 fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Message>, changes: &UnboundedSender<Changes>, hooks: &UnboundedSender<Vec<(PathBuf, f64)>>) {
     // Fingerprints of the content of the files seen so far (None: missing)
     let mut files: HashMap<PathBuf, Option<u64>> = HashMap::new();
@@ -151,6 +157,7 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                 }
                 *groups |= group;
                 if let Some(directory) = path.parent()
+                    && !covered(directory, &roots)
                     && directories.insert(directory.to_path_buf())
                 {
                     let _ = watcher.watch(directory, notify::RecursiveMode::NonRecursive);
