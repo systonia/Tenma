@@ -307,6 +307,8 @@ namespace Tenma {
         private int $nextListener = 0;
         /** @internal @var array<int, mixed> AsyncLocal values, copied from the creator at start */
         public array $context;
+        /** @internal What tenma --inspect calls the task: method and URI of a request, Timer, Task. */
+        public string $label = 'Task';
 
         /** @param array<int, mixed>|null $context null: that of the running code */
         private function __construct(?int $request, ?array $context = null)
@@ -319,9 +321,10 @@ namespace Tenma {
          * @internal Starts $work right away; runs until the first op, then the caller continues. The
          * task belongs to $request (default: the current one) and is cancelled with it.
          */
-        public static function start(callable $work, int|null|false $request = false, ?array $context = null): self
+        public static function start(callable $work, int|null|false $request = false, ?array $context = null, string $label = 'Task'): self
         {
             $task = new self($request === false ? Internal\Current::$request : $request, $context);
+            $task->label = $label;
             $task->begin($work);
             return $task;
         }
@@ -599,7 +602,7 @@ namespace Tenma {
             }
             // The callback runs as background work, as before (exit() inside it ends Tenma); only the
             // wait until then belongs to the request
-            Task::start($this->callback, null, $this->context);
+            Task::start($this->callback, null, $this->context, $this->repeat ? 'Interval' : 'Timer');
         }
 
         /** Stops the timer; a callback already running runs to completion. */
@@ -1700,7 +1703,7 @@ function serve(int $port, callable $handler, string|array|null $static = null): 
                 error_log('Uncaught ' . $error);
                 \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
             }
-        });
+        }, false, null, $raw['method'] . ' ' . $raw['uri']);
     }, $mounts);
 }
 

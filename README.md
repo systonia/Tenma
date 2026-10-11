@@ -133,6 +133,7 @@ Waypoint itself no longer needs classic mode: the app is itself a handler, `Tenm
 tenma app.php                    # one worker: one thread, one shared state
 tenma --watch app.php            # reload when a file the script loaded changes, like node --watch
 tenma --inspect app.php          # debugger (DAP) on 127.0.0.1:9229, like node --inspect
+tenma --inspect-brk app.php      # wait for the debugger, stop at the script's first line
 tenma build                      # run the hooks of tenma.dev.php once (CI, Dockerfile)
 tenma --workers 4 app.php        # four workers, each with its own PHP interpreter and its own state
 tenma --workers auto app.php     # one worker per core
@@ -172,7 +173,7 @@ A hook runs once at startup, before the first request, and again when a file mat
 
 `.tenma-ignore` next to `tenma.dev.php` lists what below the hooks' directories is no input, so a glob like `**/*.php` neither triggers on nor reads every file in `vendor/`. One entry per line, `#` for comments: with a slash a path in the project (`storage/cache`), without one any file or directory name (`node_modules`, `*.log`). Without the file, `.git`, `node_modules` and `vendor` are left out. A changed `.tenma-ignore` reloads the hooks.
 
-`--inspect` starts a debugger that speaks the Debug Adapter Protocol: connect Neovim (`nvim-dap`), Zed, Helix or Emacs (`dape`) as a DAP server on `127.0.0.1:9229` (`--inspect=9230` or `--inspect=host:port` for another address; one reachable from the network gets a warning, a debugger can run any code). Line breakpoints, continue, step over, in and out, the stack and the local variables of each frame. A step stays in its request: stepping over `Tenma::sleep()` or a query lets other requests run meanwhile and stops at the next line of the same one. A stopped request stops its worker, with its other requests and timers, as in Node. `--inspect` runs one worker and without opcache; Tenma's standard library is never stepped into. Breakpoints in the script's top level only hit if the editor connects before it runs, which comes with `--inspect-brk`.
+`--inspect` starts a debugger that speaks the Debug Adapter Protocol: connect Neovim (`nvim-dap`), Zed, Helix or Emacs (`dape`) as a DAP server on `127.0.0.1:9229` (`--inspect=9230` or `--inspect=host:port` for another address; one reachable from the network gets a warning, a debugger can run any code). VS Code needs the small extension in `editors/vscode` (`npx @vscode/vsce package`, then install the `.vsix`) and an `attach` configuration of type `tenma`. Line breakpoints, continue, step over, in and out, the stack and the variables of each frame, arrays and objects expandable. Every request, timer and `Tenma::async()` task is a thread of its own: while stopped, the editor lists them, named after method and URI, and shows where each waiting one waits. A step stays in its request: stepping over `Tenma::sleep()` or a query lets other requests run meanwhile and stops at the next line of the same one. Exceptions the app does not catch stop where they are thrown, with the frames still alive (the filter "All exceptions" also stops at caught ones). A stopped request stops its worker, with its other requests and timers, as in Node. `--inspect` runs one worker and without opcache; Tenma's standard library is never stepped into. With `--watch` the editor stays connected across reloads and the breakpoints keep applying; a change while stopped reloads after continuing. `--inspect-brk` waits until the editor has set its breakpoints and stops at the script's first statement.
 
 With several workers, the script runs once per worker, and each has its own memory: an in-memory counter or cache exists per worker, as with Node `cluster` or FrankenPHP. Shared state then belongs in a database or Redis.
 
@@ -199,6 +200,7 @@ PhpStorm and Intelephense pick them up from `vendor/`; for PHPStan the package b
 | `src/watch.rs` | `--watch`: watches the files PHP loaded and the hooks' directories, reports real changes (content, not timestamps) |
 | `src/dev.rs` | Hooks of `tenma.dev.php`: the dev thread's ops, command hooks as processes (`tokio::process`) |
 | `src/inspect.rs` | `--inspect`: DAP server thread, breakpoints and steps; stops the worker inside PHP's statement handler |
+| `editors/vscode` | VS Code extension: registers the debug type `tenma` and connects to `--inspect` |
 | `src/streams.rs` | Streaming responses (body from a channel with backpressure) and WebSockets (tokio-tungstenite after the HTTP upgrade) |
 | `shim/tenma.c` | C layer: embed PHP, `tenma_listen()` for PHP, call handlers, convert PHP values to C values, catch fatal errors with `zend_try` |
 | `stdlib/tenma.php` | Standard library in PHP, embedded in the binary: `Tenma::serve()`, `Tenma::serveClassic()`, `Request`, `Response` |
@@ -248,7 +250,7 @@ Measured with `ab` on an M-series Mac, Waypoint demo, `GET /waypoints/1`: tenma 
 - Streaming for large request bodies (up to the limit they are buffered completely in memory).
 - A timeout for handlers that compute instead of waiting: an infinite loop holds up its worker.
 - Multiple accepting threads (`SO_REUSEPORT`) for many short connections without keep-alive.
-- `--inspect`: requests as threads of their own, expanding arrays and objects, stopping at uncaught exceptions, `--inspect-brk`, a VS Code extension; conditional breakpoints and evaluating expressions after that.
+- `--inspect`: conditional breakpoints, logpoints, evaluating expressions (watch, hover, debug console), changing variables.
 
 ## License
 
