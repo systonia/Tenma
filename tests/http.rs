@@ -1298,6 +1298,15 @@ fn inspect_moves_breakpoints_to_the_next_statement() {
     assert_eq!(dap.stopped().line, 27);
     dap.command("continue");
     assert_eq!(dap.stopped().function, "greet");
+    // The closing brace stops as greet() returns, after its return statement, with the value
+    dap.command("continue");
+    let stop = dap.stopped();
+    assert_eq!((stop.function.as_str(), stop.line), ("greet", 6));
+    assert_eq!(stop.local("return value").unwrap().0, "'Hello world'");
+    assert_eq!(stop.local("$text").unwrap().0, "'Hello world'");
+    // A step from a return goes on in the caller
+    dap.command("next");
+    assert_eq!(dap.stopped().line, 30);
     dap.command("continue");
     assert!(response.join().unwrap().ends_with("Hello world slept"));
 }

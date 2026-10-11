@@ -9,6 +9,7 @@
 #include <Zend/zend_fibers.h>
 #include <Zend/zend_enum.h>
 #include <Zend/zend_lazy_objects.h>
+#include <Zend/zend_observer.h>
 #include <Zend/zend_signal.h>
 #include <main/rfc1867.h>
 #include <main/php_ini_builder.h>
@@ -84,6 +85,8 @@ extern void tenma_rs_exit(int status);
 extern void tenma_rs_included(const char *path, size_t len);
 /** tenma --inspect: a statement is about to run, see inspect_statement. */
 extern void tenma_rs_statement(const char *file, size_t file_len, uint32_t line, uintptr_t frame, uintptr_t fiber);
+/** tenma --inspect: a function is about to return, at its closing brace on `line`. */
+extern void tenma_rs_return(const char *file, size_t file_len, uint32_t line, uintptr_t frame, uintptr_t fiber);
 /** tenma --inspect: PHP compiled a function (or a file's top level, `main`) with statements on these lines. */
 extern void tenma_rs_compiled(const char *file, size_t file_len, uint32_t start, uint32_t end, bool main, const uint32_t *lines, size_t count);
 extern uint64_t tenma_rs_dev(const char *op, size_t op_len, const char *arg, size_t arg_len);
@@ -358,11 +361,13 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE_END
 };
 
+static PHP_MINIT_FUNCTION(tenma);
+
 static zend_module_entry tenma_module = {
     STANDARD_MODULE_HEADER,
     "tenma",
     tenma_functions,
-    NULL, NULL, NULL, NULL, NULL,
+    PHP_MINIT(tenma), NULL, NULL, NULL, NULL,
     "0.1.0",
     STANDARD_MODULE_PROPERTIES
 };
@@ -427,6 +432,9 @@ void tenma_set_inspect(void) {
 
 /** The frame of the statement the debugger stopped at, NULL while PHP runs. */
 static _Thread_local zend_execute_data *paused = NULL;
+/** Stopped as the paused frame returns: the line of its closing brace and its return value. */
+static _Thread_local uint32_t paused_line = 0;
+static _Thread_local zval *paused_return = NULL;
 
 static void inspect_throw(zend_object *exception);
 /** The debugger runs on this thread: tenma_inspect_thread ran (not on the dev thread). */
@@ -460,6 +468,47 @@ static void inspect_statement(zend_execute_data *frame) {
     tenma_rs_statement(ZSTR_VAL(file), ZSTR_LEN(file), frame->opline->lineno, (uintptr_t) frame, (uintptr_t) EG(active_fiber));
     paused = NULL;
     bail_after_fatal_evaluation();
+}
+
+/**
+ * A function returns (return, the end of its code or an exception): a breakpoint on its closing
+ * brace stops here, whichever way it leaves, with the return value to look at.
+ */
+static void inspect_return(zend_execute_data *frame, zval *value) {
+    if (!inspecting || evaluating || !frame->func || !ZEND_USER_CODE(frame->func->type) || (frame->func->common.fn_flags & ZEND_ACC_GENERATOR)) {
+        return;
+    }
+    zend_op_array *op_array = &frame->func->op_array;
+    zend_execute_data *outer = paused;
+    paused = frame;
+    paused_line = op_array->line_end;
+    paused_return = value;
+    tenma_rs_return(ZSTR_VAL(op_array->filename), ZSTR_LEN(op_array->filename), op_array->line_end, (uintptr_t) frame, (uintptr_t) EG(active_fiber));
+    paused = outer;
+    paused_line = 0;
+    paused_return = NULL;
+    bail_after_fatal_evaluation();
+}
+
+/** Without this flag PHP moves a returned variable into the return value, leaving NULL behind. */
+static void inspect_call(zend_execute_data *frame) {
+    ZEND_ADD_CALL_FLAG(frame, ZEND_CALL_OBSERVED);
+}
+
+/** Functions and methods, not a file's top level, whose end is the end of the file. */
+static zend_observer_fcall_handlers inspect_observe(zend_execute_data *frame) {
+    if (!frame->func || !frame->func->common.function_name) {
+        return (zend_observer_fcall_handlers) {NULL, NULL};
+    }
+    return (zend_observer_fcall_handlers) {inspect_call, inspect_return};
+}
+
+/** Observers are registered while PHP starts its modules, before it knows which are in use. */
+static PHP_MINIT_FUNCTION(tenma) {
+    if (inspect_mode) {
+        zend_observer_fcall_register(inspect_observe);
+    }
+    return SUCCESS;
 }
 
 /** The debugger moves a breakpoint to the next line where a statement of the same function starts. */
@@ -800,7 +849,7 @@ char *tenma_inspect_frames(uint32_t thread, size_t *len) {
         }
         zend_function *function = frame->func;
         add_field(&out, ZSTR_VAL(function->op_array.filename), ZSTR_LEN(function->op_array.filename));
-        smart_str_append_unsigned(&out, frame->opline->lineno);
+        smart_str_append_unsigned(&out, frame == paused && paused_line ? paused_line : frame->opline->lineno);
         smart_str_appendc(&out, 0);
         if (!function->common.function_name) {
             smart_str_appends(&out, "{main}");
@@ -904,6 +953,9 @@ char *tenma_inspect_locals(uint32_t thread, uint32_t index, size_t *len) {
     FOREACH_FRAME(top, bottom, frame) {
         if (!shown_frame(frame) || index-- > 0) {
             continue;
+        }
+        if (frame == paused && paused_return) {
+            add_variable(&out, "", ZEND_STRL("return value"), paused_return);
         }
         if (Z_TYPE(frame->This) == IS_OBJECT) {
             add_variable(&out, "$", ZEND_STRL("this"), &frame->This);

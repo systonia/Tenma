@@ -373,13 +373,30 @@ extern "C" fn tenma_rs_statement(file: *const u8, file_len: usize, line: u32, fr
     if ENDING.load(Ordering::Relaxed) || PREVIOUS.replace((frame, line)) == (frame, line) {
         return;
     }
-    let reason = if ENTRY.swap(false, Ordering::Relaxed) {
+    arrive(bytes(file, file_len), line, fiber, ENTRY.swap(false, Ordering::Relaxed));
+}
+
+/// A function returns, at its closing brace on `line`: a breakpoint there stops, and a step stops
+/// there before it leaves the function, as in Node.
+#[unsafe(no_mangle)]
+extern "C" fn tenma_rs_return(file: *const u8, file_len: usize, line: u32, frame: usize, fiber: usize) {
+    // Ran off its end: the statement PHP puts at the closing brace has just been there
+    if ENDING.load(Ordering::Relaxed) || PREVIOUS.replace((frame, line)) == (frame, line) {
+        return;
+    }
+    arrive(bytes(file, file_len), line, fiber, false);
+}
+
+/// Stops at this line of `file` if the editor wants it: `entry` for --inspect-brk, on pause, after a
+/// step or at a breakpoint.
+fn arrive(file: &[u8], line: u32, fiber: usize, entry: bool) {
+    let reason = if entry {
         "entry"
     } else if PAUSE.swap(false, Ordering::Relaxed) {
         "pause"
     } else if STEPPING.get().is_some_and(|(step, since, depth)| since == fiber && arrived(step, depth)) {
         "step"
-    } else if breakpoints_at(bytes(file, file_len), line).iter().any(hits) {
+    } else if breakpoints_at(file, line).iter().any(hits) {
         "breakpoint"
     } else {
         return;
