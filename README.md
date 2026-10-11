@@ -182,7 +182,7 @@ With several workers, the script runs once per worker, and each has its own memo
 The PHP API lives inside the binary, so IDEs and PHPStan don't know `Tenma` on their own. Install the stubs as a dev dependency ([systonia/Tenma-Stubs](https://github.com/systonia/Tenma-Stubs)):
 
 ```bash
-composer require --dev systonia/tenma-stubs
+composer require --dev tenma/stubs
 ```
 
 PhpStorm and Intelephense pick them up from `vendor/`; for PHPStan the package brings an `extension.neon` (automatic with `phpstan/extension-installer`). The stubs are never autoloaded, so nothing changes at runtime. `tenma --stubs` prints them for the binary at hand.
