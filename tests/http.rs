@@ -711,7 +711,7 @@ fn static_files() {
     assert!(get(port, "/missing.css").ends_with("php: /missing.css\n"));
 
     // Never served: hidden files, ways out of the directory, symlinks to the outside
-    for path in ["/.env", "/../secret.txt", "/%2e%2e/secret.txt", "/sub/..%2f..%2fsecret.txt", "/link.txt"] {
+    for path in ["/.env", "/../secret.txt", "/%2e%2e/secret.txt", "/sub/..%2f..%2fsecret.txt", "/link.txt", "/front.php", "/front.PHP"] {
         let response = get(port, path);
         assert!(response.contains("php: ") && !response.contains("SECRET") && !response.contains("secret\n"), "{path}: {response}");
     }

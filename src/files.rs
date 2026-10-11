@@ -85,15 +85,19 @@ fn fd_path(file: &File) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
 }
 
-/// Opens $candidate and checks that the opened file really is under $root and is not hidden.
+/// Extensions PHP may execute: their source is never handed out, so the front controller can sit in the directory.
+const SOURCE_EXTENSIONS: [&str; 7] = ["php", "phtml", "phar", "phps", "pht", "php5", "php7"];
+
+/// Opens $candidate and checks that the opened file really is under $root, is not hidden and is no PHP source.
 fn open_inside(root: &Path, candidate: &Path) -> Option<(File, std::fs::Metadata, PathBuf)> {
     // O_NONBLOCK: a named pipe in the directory would otherwise make open() wait forever; files do not mind
     let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(candidate).ok()?;
     let real = fd_path(&file)?;
     let inside = real.strip_prefix(root).ok()?;
     let hidden = inside.components().any(|part| !matches!(part, Component::Normal(name) if !name.as_bytes().starts_with(b".")));
+    let source = real.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| SOURCE_EXTENSIONS.iter().any(|php| ext.eq_ignore_ascii_case(php)));
     let meta = file.metadata().ok()?;
-    (!hidden).then_some((file, meta, real))
+    (!hidden && !source).then_some((file, meta, real))
 }
 
 /// The file for the path under $root, if there is one that may be served. Blocks: runs on a
