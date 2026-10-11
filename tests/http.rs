@@ -1277,3 +1277,27 @@ fn inspect_evaluates_logs_and_changes_variables() {
     let body = response.join().unwrap();
     assert!(body.ends_with("changed slept"), "{body}");
 }
+
+#[test]
+fn inspect_moves_breakpoints_to_the_next_statement() {
+    let (port, debugger) = (18_127, 19_234);
+    let _server = inspected(port, debugger, "--inspect");
+    let mut dap = Dap::start(debugger);
+    let path = std::fs::canonicalize("tests/fixtures/inspect.php").unwrap();
+    // A function's head, its closing brace (PHP's implicit return), a line between two statements,
+    // the start of a return over several lines, after the last line
+    let breakpoints = serde_json::json!([{"line": 3}, {"line": 6}, {"line": 26}, {"line": 36}, {"line": 80}]);
+    let set = dap.request("setBreakpoints", serde_json::json!({"source": {"path": path}, "breakpoints": breakpoints}));
+    let placed: Vec<(bool, u64)> = set["breakpoints"].as_array().unwrap().iter().map(|breakpoint| (breakpoint["verified"].as_bool().unwrap(), breakpoint["line"].as_u64().unwrap())).collect();
+    assert_eq!(placed[..3], [(true, 4), (true, 6), (true, 27)]);
+    assert!(placed[3].0 && (36..=37).contains(&placed[3].1), "{placed:?}");
+    assert_eq!(placed[4], (false, 80));
+    dap.request("configurationDone", serde_json::json!({}));
+
+    let response = std::thread::spawn(move || get(port, "/"));
+    assert_eq!(dap.stopped().line, 27);
+    dap.command("continue");
+    assert_eq!(dap.stopped().function, "greet");
+    dap.command("continue");
+    assert!(response.join().unwrap().ends_with("Hello world slept"));
+}

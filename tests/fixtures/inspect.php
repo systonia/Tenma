@@ -31,3 +31,9 @@ Tenma::serve((int) getenv('PORT'), function ($request) {
     $after = 'slept';
     return "$message $after";
 });
+
+function info(): array {
+    return [
+        'a' => 1,
+    ];
+}

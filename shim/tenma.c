@@ -84,6 +84,8 @@ extern void tenma_rs_exit(int status);
 extern void tenma_rs_included(const char *path, size_t len);
 /** tenma --inspect: a statement is about to run, see inspect_statement. */
 extern void tenma_rs_statement(const char *file, size_t file_len, uint32_t line, uintptr_t frame, uintptr_t fiber);
+/** tenma --inspect: PHP compiled a function (or a file's top level, `main`) with statements on these lines. */
+extern void tenma_rs_compiled(const char *file, size_t file_len, uint32_t start, uint32_t end, bool main, const uint32_t *lines, size_t count);
 extern uint64_t tenma_rs_dev(const char *op, size_t op_len, const char *arg, size_t arg_len);
 extern uint64_t tenma_rs_db(const char *op, size_t op_len, const char *target, size_t target_len,
     const char *sql, size_t sql_len, const char *params, size_t params_len);
@@ -427,6 +429,8 @@ void tenma_set_inspect(void) {
 static _Thread_local zend_execute_data *paused = NULL;
 
 static void inspect_throw(zend_object *exception);
+/** The debugger runs on this thread: tenma_inspect_thread ran (not on the dev thread). */
+static _Thread_local int inspecting = 0;
 /** The debugger evaluates code: what it calls must not stop the debugger again. */
 static _Thread_local int evaluating = 0;
 /**
@@ -458,9 +462,27 @@ static void inspect_statement(zend_execute_data *frame) {
     bail_after_fatal_evaluation();
 }
 
+/** The debugger moves a breakpoint to the next line where a statement of the same function starts. */
+static void inspect_compiled(zend_op_array *op_array) {
+    if (!inspecting || !op_array->filename) {
+        return;
+    }
+    uint32_t *lines = malloc((op_array->last + 1) * sizeof(*lines));
+    size_t count = 0;
+    for (uint32_t i = 0; i < op_array->last; i++) {
+        if (op_array->opcodes[i].opcode == ZEND_EXT_STMT) {
+            lines[count++] = op_array->opcodes[i].lineno;
+        }
+    }
+    tenma_rs_compiled(ZSTR_VAL(op_array->filename), ZSTR_LEN(op_array->filename), op_array->line_start, op_array->line_end,
+        op_array->function_name == NULL, lines, count);
+    free(lines);
+}
+
 static zend_extension inspector = {
     .name = "tenma inspector",
     .version = PHP_VERSION,
+    .op_array_handler = inspect_compiled,
     .statement_handler = inspect_statement,
 };
 
@@ -639,9 +661,6 @@ size_t tenma_report_included(size_t from) {
     } ZEND_HASH_FOREACH_END();
     return count;
 }
-
-/** The debugger runs on this thread: tenma_inspect_thread ran (not on the dev thread). */
-static _Thread_local int inspecting = 0;
 
 /**
  * tenma --inspect: code this thread compiles from now on stops the debugger before each statement.

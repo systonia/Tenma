@@ -11,7 +11,7 @@
 //! it waits in.
 
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStrExt;
@@ -44,8 +44,11 @@ const FRAMES_PER_THREAD: u64 = 10_000;
 /// objects to expand.
 const LOCALS: u64 = 1 << 32;
 
-/// Breakpoints by file (canonical path) and line, from setBreakpoints.
-static BREAKPOINTS: LazyLock<Mutex<HashMap<Vec<u8>, HashMap<u32, Breakpoint>>>> = LazyLock::new(Default::default);
+/// Breakpoints by file (canonical path), from setBreakpoints.
+static BREAKPOINTS: LazyLock<Mutex<HashMap<Vec<u8>, Vec<Breakpoint>>>> = LazyLock::new(Default::default);
+static NEXT_BREAKPOINT: AtomicU64 = AtomicU64::new(1);
+/// The code PHP compiled, by file: where breakpoints can stop.
+static CODE: LazyLock<Mutex<HashMap<Vec<u8>, Code>>> = LazyLock::new(Default::default);
 /// Exceptions to stop at, from setExceptionBreakpoints.
 static EXCEPTIONS: AtomicU8 = AtomicU8::new(UNCAUGHT);
 const UNCAUGHT: u8 = 1;
@@ -74,10 +77,57 @@ static SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 struct Breakpoint {
+    id: u64,
+    /// The line the editor set it on.
+    line: u32,
+    /// Where it stops: the next line where a statement starts, once PHP compiled the file; None if
+    /// no statement follows in its function (a closing brace).
+    at: Option<u32>,
+    /// PHP compiled the file and it stops somewhere.
+    verified: bool,
     /// Stops only if this PHP expression is true.
     condition: Option<String>,
     /// A logpoint: prints this instead of stopping, `{expression}` replaced by its value.
     log: Option<String>,
+}
+
+impl Breakpoint {
+    /// Moves it to the next statement in the innermost function around its line, as Node does:
+    /// a statement spanning lines counts at the line PHP gives it, a method's head or a comment
+    /// has none.
+    fn resolve(&mut self, code: Option<&Code>) {
+        let Some(code) = code else {
+            // Not compiled yet: the line as set, until the file loads
+            (self.at, self.verified) = (Some(self.line), false);
+            return;
+        };
+        let function = code.functions.iter().filter(|function| function.start <= self.line && self.line <= function.end).min_by_key(|function| function.end - function.start);
+        self.at = function.and_then(|function| function.statements.iter().copied().find(|&statement| statement >= self.line));
+        self.verified = self.at.is_some();
+    }
+
+    fn json(&self) -> Value {
+        let mut json = json!({"id": self.id, "verified": self.verified, "line": self.at.unwrap_or(self.line)});
+        if !self.verified {
+            json["message"] = json!(if self.at.is_some() { "the file is not loaded yet" } else { "no code on or after this line" });
+        }
+        json
+    }
+}
+
+/// The compiled functions of a file, its top level included.
+#[derive(Default)]
+struct Code {
+    functions: Vec<Function>,
+    /// Functions of a compile under way: PHP compiles a file's functions before its top level.
+    compiling: Vec<Function>,
+}
+
+struct Function {
+    start: u32,
+    end: u32,
+    /// Lines where its statements start, in order.
+    statements: Vec<u32>,
 }
 
 enum Command {
@@ -255,21 +305,23 @@ fn handle(request: &Value) -> bool {
             // PHP knows files by their real path (on macOS /tmp is /private/tmp)
             let file = std::fs::canonicalize(path).map_or_else(|_| path.as_bytes().to_vec(), |path| path.as_os_str().as_bytes().to_vec());
             let text = |value: &Value| value.as_str().filter(|text| !text.trim().is_empty()).map(str::to_owned);
-            let lines: HashMap<u32, Breakpoint> = arguments["breakpoints"]
+            let code = CODE.lock().unwrap();
+            let set: Vec<Breakpoint> = arguments["breakpoints"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|breakpoint| Some((u32::try_from(breakpoint["line"].as_u64()?).ok()?, Breakpoint { condition: text(&breakpoint["condition"]), log: text(&breakpoint["logMessage"]) })))
+                .filter_map(|breakpoint| {
+                    let line = u32::try_from(breakpoint["line"].as_u64()?).ok()?;
+                    let id = NEXT_BREAKPOINT.fetch_add(1, Ordering::Relaxed);
+                    let mut breakpoint = Breakpoint { id, line, at: None, verified: false, condition: text(&breakpoint["condition"]), log: text(&breakpoint["logMessage"]) };
+                    breakpoint.resolve(code.get(&file));
+                    Some(breakpoint)
+                })
                 .collect();
-            let verified: Vec<Value> = lines.keys().collect::<BTreeSet<_>>().into_iter().map(|line| json!({"verified": true, "line": line})).collect();
-            let mut breakpoints = BREAKPOINTS.lock().unwrap();
-            if lines.is_empty() {
-                breakpoints.remove(&file);
-            } else {
-                breakpoints.insert(file, lines);
-            }
-            drop(breakpoints);
-            respond(request, json!({"breakpoints": verified}));
+            drop(code);
+            let answer: Vec<Value> = set.iter().map(Breakpoint::json).collect();
+            BREAKPOINTS.lock().unwrap().insert(file, set);
+            respond(request, json!({"breakpoints": answer}));
         }
         "scopes" => {
             let frame = arguments["frameId"].as_u64().unwrap_or_default();
@@ -327,9 +379,7 @@ extern "C" fn tenma_rs_statement(file: *const u8, file_len: usize, line: u32, fr
         "pause"
     } else if STEPPING.get().is_some_and(|(step, since, depth)| since == fiber && arrived(step, depth)) {
         "step"
-    } else if let Some(breakpoint) = breakpoint_at(bytes(file, file_len), line)
-        && hits(&breakpoint)
-    {
+    } else if breakpoints_at(bytes(file, file_len), line).iter().any(hits) {
         "breakpoint"
     } else {
         return;
@@ -353,9 +403,43 @@ extern "C" fn tenma_rs_exception(description: *const u8, description_len: usize,
     let _ = stop(json!({"reason": "exception", "description": description, "text": text}));
 }
 
-/// A copy: evaluating its condition must not hold the lock.
-fn breakpoint_at(file: &[u8], line: u32) -> Option<Breakpoint> {
-    BREAKPOINTS.lock().unwrap().get(file)?.get(&line).cloned()
+/// The breakpoints that stop at this line; copies: evaluating a condition must not hold the lock.
+fn breakpoints_at(file: &[u8], line: u32) -> Vec<Breakpoint> {
+    let breakpoints = BREAKPOINTS.lock().unwrap();
+    breakpoints.get(file).map(|set| set.iter().filter(|breakpoint| breakpoint.at == Some(line)).cloned().collect()).unwrap_or_default()
+}
+
+/// PHP compiled a function of `file`, or with `main` its top level, the last of a file: the file's
+/// breakpoints move to where its statements are, and the editor hears where they went.
+#[unsafe(no_mangle)]
+extern "C" fn tenma_rs_compiled(file: *const u8, file_len: usize, start: u32, end: u32, main: bool, lines: *const u32, count: usize) {
+    let mut statements = if lines.is_null() || count == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(lines, count) }.to_vec() };
+    statements.sort_unstable();
+    statements.dedup();
+    let file = bytes(file, file_len).to_vec();
+    let mut code = CODE.lock().unwrap();
+    let entry = code.entry(file.clone()).or_default();
+    // The top level covers the whole file
+    entry.compiling.push(if main { Function { start: 0, end: u32::MAX, statements } } else { Function { start, end, statements } });
+    if !main {
+        return;
+    }
+    entry.functions = std::mem::take(&mut entry.compiling);
+    let mut breakpoints = BREAKPOINTS.lock().unwrap();
+    let changed: Vec<Value> = breakpoints
+        .get_mut(&file)
+        .into_iter()
+        .flatten()
+        .filter_map(|breakpoint| {
+            let before = (breakpoint.at, breakpoint.verified);
+            breakpoint.resolve(code.get(&file));
+            (before != (breakpoint.at, breakpoint.verified)).then(|| breakpoint.json())
+        })
+        .collect();
+    drop((breakpoints, code));
+    for breakpoint in changed {
+        event("breakpoint", json!({"reason": "changed", "breakpoint": breakpoint}));
+    }
 }
 
 /// Does a breakpoint stop? Not if its condition is false; a logpoint prints instead. A condition
