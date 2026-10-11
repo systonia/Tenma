@@ -1159,6 +1159,15 @@ namespace Tenma\Db {
         }
 
         /**
+         * Several statements separated by semicolons, without parameters, such as a migration file. Inside
+         * transaction() they run in that transaction; otherwise each statement commits on its own.
+         */
+        public function script(string $sql): void
+        {
+            $this->call('script', $sql, []);
+        }
+
+        /**
          * For statements without a result; returns the number of affected rows.
          *
          * @param list<mixed> $params

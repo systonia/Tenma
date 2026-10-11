@@ -166,8 +166,13 @@ fn release(url: &str, lease: Lease) {
     });
 }
 
-/// Runs a query: "query" returns the rows as a JSON array, "execute" the number of affected rows.
+/// Runs a query: "query" returns the rows as a JSON array, "execute" the number of affected rows,
+/// "script" runs several statements without parameters (simple query protocol).
 async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result<String, Failure> {
+    if mode == "script" {
+        client.batch_execute(sql).await?;
+        return Ok("null".to_owned());
+    }
     let params = text_params(params);
     let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|param| param as &(dyn ToSql + Sync)).collect();
     if mode == "execute" {
@@ -280,7 +285,7 @@ fn redis_json(value: redis::Value) -> Value {
     }
 }
 
-/// Starts a database op. $op: "pg.query", "pg.execute", "pg.begin", "pg.commit", "pg.rollback" or
+/// Starts a database op. $op: "pg.query", "pg.execute", "pg.script", "pg.begin", "pg.commit", "pg.rollback" or
 /// "redis"; $target: URL or "tx:<id>"; $params: JSON array. The result comes as JSON text.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_db(op: *const u8, op_len: usize, target: *const u8, target_len: usize, sql: *const u8, sql_len: usize, params: *const u8, params_len: usize) -> u64 {

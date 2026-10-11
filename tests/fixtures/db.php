@@ -25,6 +25,11 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
             return $db->first("SELECT count(*) AS n FROM $table WHERE name = 'discarded'");
         })(),
         '/commit' => $db->transaction(fn (Postgres $tx) => $tx->execute("UPDATE $table SET amount = amount + 1")),
+        // Several statements in one call, in a transaction: a migration file
+        '/script' => $db->transaction(function (Postgres $tx) {
+            $tx->script("CREATE TEMP TABLE script_test (n int);\nINSERT INTO script_test VALUES (1), (2);\n-- a comment; with a semicolon\nINSERT INTO script_test VALUES (3);");
+            return $tx->first('SELECT count(*)::int AS n FROM script_test');
+        }),
         '/slow' => $db->first('SELECT pg_sleep(0.5)::text AS slept'),
         '/error' => (function () use ($db) {
             try {
