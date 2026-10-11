@@ -14,7 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use hyper::body::{Body, Frame};
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -25,7 +25,8 @@ use crate::php::{self, OpResult, Reply, bytes};
 
 /// This many chunks may wait for a slow client, then the fiber waits when writing.
 const STREAM_BUFFER: usize = 16;
-/// This many messages a client may send that PHP has not read yet; after that tenma disconnects.
+/// This many messages may wait in either direction (PHP not reading, client not reading); after
+/// that tenma disconnects.
 const SOCKET_BACKLOG: usize = 256;
 /// Largest WebSocket message in bytes, like --max-body.
 pub static MAX_MESSAGE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(10 << 20);
@@ -44,13 +45,13 @@ impl Body for ChannelBody {
 
 /// The channels of a WebSocket, as the HTTP part gets them for the upgrade.
 pub struct Pipes {
-    outgoing: UnboundedReceiver<Message>,
+    outgoing: mpsc::Receiver<Message>,
     incoming: mpsc::Sender<Vec<u8>>,
 }
 
 /// The PHP side of a WebSocket.
 struct Socket {
-    outgoing: UnboundedSender<Message>,
+    outgoing: mpsc::Sender<Message>,
     /// Held by the op of a running receive(), otherwise here.
     incoming: Rc<RefCell<Option<mpsc::Receiver<Vec<u8>>>>>,
 }
@@ -111,7 +112,7 @@ extern "C" fn tenma_rs_stream_end(rid: u64) {
 /// Accepts the WebSocket: the request responds with 101, after that the messages belong to PHP.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
-    let (outgoing, outgoing_receiver) = unbounded_channel();
+    let (outgoing, outgoing_receiver) = mpsc::channel(SOCKET_BACKLOG);
     let (incoming_sender, incoming) = mpsc::channel(SOCKET_BACKLOG);
     if !php::reply(rid, Reply::Upgrade(Pipes { outgoing: outgoing_receiver, incoming: incoming_sender })) {
         return 0;
@@ -121,11 +122,16 @@ extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
     1
 }
 
-/// 1: on its way. 0: socket closed.
+/// 1: on its way. 0: socket closed. A client that leaves SOCKET_BACKLOG messages unread is
+/// disconnected instead of filling memory, as for incoming messages.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> c_int {
     let message = Message::text(String::from_utf8_lossy(bytes(text, len)).into_owned());
-    SOCKETS.with_borrow(|sockets| sockets.get(&rid).is_some_and(|socket| socket.outgoing.send(message).is_ok())).into()
+    let sent = SOCKETS.with_borrow(|sockets| sockets.get(&rid).is_some_and(|socket| socket.outgoing.try_send(message).is_ok()));
+    if !sent {
+        SOCKETS.with_borrow_mut(|sockets| sockets.remove(&rid));
+    }
+    sent.into()
 }
 
 /// Op for the next message: a string, or null if the client has closed. 0: no socket.

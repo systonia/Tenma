@@ -223,8 +223,9 @@ async fn postgres(mode: String, target: String, sql: String, params: Vec<Value>)
     let lease = connect(&target).await?;
     if mode == "begin" {
         lease.client.batch_execute("BEGIN").await?;
-        let id = crate::php::next_id();
+        // PHP picks the ID: if it is cancelled while this finishes, it can still roll back
         let owner = params.first().and_then(Value::as_u64).unwrap_or(0);
+        let id = params.get(1).and_then(Value::as_u64).unwrap_or_else(crate::php::next_id);
         TRANSACTIONS.with_borrow_mut(|txs| txs.insert(id, Transaction { url: target, owner, client: Rc::new(RefCell::new(Slot::Idle(lease))) }));
         return Ok(id.to_string());
     }

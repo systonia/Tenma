@@ -10,7 +10,7 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::SeekFrom;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -234,23 +234,25 @@ pub async fn serve(mounts: &[Mount], method: &Method, uri: &hyper::Uri, headers:
     Some(response)
 }
 
-/// Reads $length bytes from $start out of the already opened file, chunk by chunk on a background
-/// thread; if the client cannot keep up, reading waits; if it is gone, reading ends.
-fn stream(mut file: File, start: u64, length: u64) -> ChannelBody {
+/// Reads $length bytes from $start out of the already opened file, chunk by chunk; if the client
+/// cannot keep up, reading waits without holding a blocking thread; if it is gone, reading ends.
+fn stream(file: File, start: u64, length: u64) -> ChannelBody {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let (sender, receiver) = mpsc::channel(4);
-    tokio::task::spawn_blocking(move || {
-        if file.seek(SeekFrom::Start(start)).is_err() {
+    tokio::spawn(async move {
+        let mut file = tokio::fs::File::from_std(file);
+        if file.seek(SeekFrom::Start(start)).await.is_err() {
             return;
         }
         let mut reader = file.take(length);
         let mut buffer = BytesMut::new();
         loop {
             buffer.resize(CHUNK, 0);
-            match reader.read(&mut buffer) {
+            match reader.read(&mut buffer).await {
                 // Shorter than announced (file truncated meanwhile): hyper aborts the connection
                 Ok(0) | Err(_) => return,
                 Ok(read) => {
-                    if sender.blocking_send(buffer.split_to(read).freeze()).is_err() {
+                    if sender.send(buffer.split_to(read).freeze()).await.is_err() {
                         return;
                     }
                 }

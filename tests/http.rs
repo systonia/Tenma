@@ -1075,6 +1075,12 @@ impl Dap {
     }
 
     /// Variables as name, value and the reference to expand them (0: nothing to expand).
+    /// The reference of $point among the frame's locals.
+    fn stopped_locals(&mut self, frame: &serde_json::Value) -> (String, u64) {
+        let locals = self.request("scopes", serde_json::json!({"frameId": frame}))["scopes"][0]["variablesReference"].as_u64().unwrap();
+        self.variables(locals).into_iter().find(|(name, _, _)| name == "$point").map(|(_, value, reference)| (value, reference)).unwrap()
+    }
+
     fn variables(&mut self, reference: u64) -> Vec<(String, String, u64)> {
         let body = self.request("variables", serde_json::json!({"variablesReference": reference}));
         body["variables"].as_array().unwrap().iter().map(|variable| (variable["name"].as_str().unwrap().to_owned(), variable["value"].as_str().unwrap().to_owned(), variable["variablesReference"].as_u64().unwrap())).collect()
@@ -1321,6 +1327,16 @@ fn inspect_evaluates_logs_and_changes_variables() {
     assert_eq!(evaluate(&mut dap, "echo 'hi'; $id = 5", "repl")["success"], true);
     assert_eq!(dap.expect("event", "output")["body"]["output"], "hi");
     assert_eq!(evaluate(&mut dap, "$id", "watch")["body"]["result"], "5");
+    // A reference handed out earlier is looked up again: after the variable changed it shows nothing
+    let point = dap.stopped_locals(&frame);
+    let (_, reference) = point;
+    assert_eq!(evaluate(&mut dap, "$point = 5", "repl")["success"], true);
+    assert!(dap.variables(reference).is_empty());
+    assert_eq!(evaluate(&mut dap, "$point = new Point(7)", "repl")["success"], true);
+    // Null bytes in keys (mangled properties of a cast object) do not shift the fields
+    let cast = evaluate(&mut dap, "(array) new Point(7)", "watch")["body"]["variablesReference"].as_u64().unwrap();
+    let fields: Vec<_> = dap.variables(cast).into_iter().map(|(name, value, _)| (name, value)).collect();
+    assert_eq!(fields, [("x".to_owned(), "7".to_owned()), ("\\0Point\\0tags".to_owned(), "array(1)".to_owned())]);
 
     let locals = dap.request("scopes", serde_json::json!({"frameId": frame}))["scopes"][0]["variablesReference"].clone();
     let set = dap.request("setVariable", serde_json::json!({"variablesReference": locals, "name": "$message", "value": "'changed'"}));
@@ -1334,6 +1350,8 @@ fn inspect_evaluates_logs_and_changes_variables() {
 fn inspect_moves_breakpoints_to_the_next_statement() {
     let (port, debugger) = (18_127, 19_234);
     let _server = inspected(port, debugger, "--inspect");
+    // The script has compiled: the breakpoints are placed right away, not later
+    get(port, "/");
     let mut dap = Dap::start(debugger);
     let path = std::fs::canonicalize("tests/fixtures/inspect.php").unwrap();
     // A function's head, its closing brace (PHP's implicit return), a line between two statements,
@@ -1446,7 +1464,27 @@ fn review_fixes() {
     let raw = format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: Multipart/Form-Data; boundary=b\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{form}", form.len());
     assert!(body(request(classic, &raw)).starts_with(r#"{"post":{"secret":"hunter2"},"filter":"hunter2""#));
     assert_eq!(body(get(classic, "/")), r#"{"post":[],"filter":null,"gc":false}"#);
+    assert_eq!(body(get(port, "/all-cancelled")), "Tenma\\Cancelled");
+
     // exit() does not leave the cycle collector switched off
     get(classic, "/?exit=1");
     assert_eq!(body(get(classic, "/")), r#"{"post":[],"filter":null,"gc":false}"#);
+}
+
+#[test]
+fn a_second_sigterm_ends_at_once() {
+    let port = 18_131;
+    let mut server = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/review.php").env("PORT", port.to_string()).spawn().unwrap();
+    get(port, "/");
+    // An endless stream would hold the drain for 10 s
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(stream, "GET /forever HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    stream.read_exact(&mut [0; 64]).unwrap();
+    let started = Instant::now();
+    for _ in 0..2 {
+        Command::new("kill").args(["-TERM", &server.id().to_string()]).status().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    server.wait().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
 }

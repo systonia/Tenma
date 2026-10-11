@@ -417,6 +417,11 @@ async fn shutdown_signal() {
         _ = terminate.recv() => {}
     }
     eprintln!("tenma: shutting down");
+    // A second Ctrl+C or SIGTERM ends tenma at once, without waiting for the drain
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+    }
 }
 
 fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: UnboundedReceiver<Connection>, change: Arc<Notify>, mut ports: Option<BTreeSet<u16>>, dev: bool, options: Options) -> u8 {
@@ -677,12 +682,18 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
     drop(drained);
     // Running responses may finish, even after a fatal error (e.g. the error page): every path
     // into PHP checks BROKEN, so broken PHP does not run again
+    // ponytail: new connections wait meanwhile; an open event stream holds a --max-requests
+    // restart up to the full drain. Upgrade: end event streams and WebSockets here, clients reconnect
     ops::in_loop(|| {
         local.block_on(&runtime, async {
             let _ = drain.send(());
             let _ = tokio::time::timeout(options.drain, drain.closed()).await;
         })
     });
+    // Dropping the runtime would wait for every blocking task: a file op that hangs (a FIFO without
+    // writer, a dead network mount) would keep the worker from restarting or tenma from ending
+    drop(local);
+    runtime.shutdown_timeout(Duration::from_millis(100));
     stop
 }
 
@@ -696,12 +707,19 @@ async fn accept(port: u16, workers: Vec<UnboundedSender<Connection>>) {
             std::process::exit(1);
         }
     };
-    for next in (0..workers.len()).cycle() {
-        let Ok((stream, _)) = socket.accept().await else {
-            continue;
+    let mut next = 0;
+    loop {
+        let stream = match socket.accept().await {
+            Ok((stream, _)) => stream,
+            // Out of file descriptors (EMFILE): accept fails right away again; give connections time to close
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
         };
         if let Ok(stream) = stream.into_std() {
             let _ = workers[next].send((port, stream));
+            next = (next + 1) % workers.len();
         }
     }
 }

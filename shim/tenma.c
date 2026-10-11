@@ -784,7 +784,12 @@ static char *malloc_copy(smart_str *out, size_t *len) {
     return copy;
 }
 
+/** A field ends with a null byte: one inside (an array key, a string) is shown as \0. */
 static void add_field(smart_str *out, const char *text, size_t len) {
+    for (const char *nul; (nul = memchr(text, 0, len)); len -= nul - text + 1, text = nul + 1) {
+        smart_str_appendl(out, text, nul - text);
+        smart_str_appends(out, "\\0");
+    }
     smart_str_appendl(out, text, len);
     smart_str_appendc(out, 0);
 }
@@ -877,9 +882,9 @@ static HashTable *properties_of(zend_object *object) {
 
 /**
  * An array or object the editor may expand while stopped; its reference to one is the position in
- * expandable[] plus 1. PHP does not run while stopped, so the pointers stay valid until
- * tenma_inspect_resume. Where it lies (`parent` and `key` or `index`, or `value` for a variable)
- * lets the debugger change elements: a shared array on the way must be copied first, as PHP would.
+ * expandable[] plus 1. Where it lies: `parent` and `key` or `index`, or `value` for a variable (a
+ * slot that stays put while stopped). Elements are looked up again on each use: evaluated code may
+ * have changed or freed what was there. Changing elements copies shared arrays on the way, as PHP would.
  */
 struct expandable {
     zval *value;
@@ -912,22 +917,30 @@ static uint32_t expandable_reference(zval *value, const struct place *place) {
 }
 
 /**
- * The storage of an expandable value, ready to be changed: every shared array on its way from the
- * variable is copied first (copy on write), so other copies keep their value. NULL if it is gone.
+ * The storage of an expandable value as it is now; NULL if it is gone. `write`: ready to be changed,
+ * every shared array on its way from the variable is copied first (copy on write), so other copies
+ * keep their value.
  */
-static zval *writable(uint32_t reference) {
+static zval *lookup(uint32_t reference, bool write) {
+    if (reference == 0 || reference > expandable_count) {
+        return NULL;
+    }
     struct expandable *entry = &expandable[reference - 1];
     if (!entry->parent) {
-        return entry->value;
+        zval *value = entry->value;
+        ZVAL_DEREF(value);
+        return value;
     }
-    zval *container = writable(entry->parent);
+    zval *container = lookup(entry->parent, write);
     if (!container) {
         return NULL;
     }
     ZVAL_DEREF(container);
     zval *slot = NULL;
     if (Z_TYPE_P(container) == IS_ARRAY) {
-        SEPARATE_ARRAY(container);
+        if (write) {
+            SEPARATE_ARRAY(container);
+        }
         slot = entry->key ? zend_hash_find(Z_ARRVAL_P(container), entry->key) : zend_hash_index_find(Z_ARRVAL_P(container), entry->index);
     } else if (Z_TYPE_P(container) == IS_OBJECT) {
         HashTable *properties = properties_of(Z_OBJ_P(container));
@@ -989,6 +1002,8 @@ static void describe(smart_str *out, zval *value) {
 /** A variable as "name\0value\0type\0reference\0"; the reference is 0 for values without children. */
 static void add_variable(smart_str *out, const char *prefix, const char *name, size_t name_len, zval *value, const struct place *place) {
     ZVAL_DEINDIRECT(value);
+    // A variable's slot, not the reference it may hold: evaluated code may free that reference
+    zval *slot = value;
     ZVAL_DEREF(value);
     if (Z_TYPE_P(value) == IS_UNDEF) {
         return;
@@ -1001,7 +1016,7 @@ static void add_variable(smart_str *out, const char *prefix, const char *name, s
     smart_str_appendc(out, 0);
     int children = Z_TYPE_P(value) == IS_ARRAY ? zend_hash_num_elements(Z_ARRVAL_P(value)) > 0
         : Z_TYPE_P(value) == IS_OBJECT && !(Z_OBJCE_P(value)->ce_flags & ZEND_ACC_ENUM);
-    smart_str_append_unsigned(out, children ? expandable_reference(value, place) : 0);
+    smart_str_append_unsigned(out, children ? expandable_reference(slot, place) : 0);
     smart_str_appendc(out, 0);
 }
 
@@ -1045,8 +1060,8 @@ char *tenma_inspect_locals(uint32_t thread, uint32_t index, size_t *len) {
 /** The elements of an array or the properties of an object the editor expands, as add_variable packs them. */
 char *tenma_inspect_children(uint32_t reference, size_t *len) {
     smart_str out = {0};
-    zval *value = reference > 0 && reference <= expandable_count ? expandable[reference - 1].value : NULL;
-    HashTable *children = !value ? NULL : Z_TYPE_P(value) == IS_ARRAY ? Z_ARRVAL_P(value) : properties_of(Z_OBJ_P(value));
+    zval *value = lookup(reference, false);
+    HashTable *children = !value ? NULL : Z_TYPE_P(value) == IS_ARRAY ? Z_ARRVAL_P(value) : Z_TYPE_P(value) == IS_OBJECT ? properties_of(Z_OBJ_P(value)) : NULL;
     if (!children) {
         return malloc_copy(&out, len);
     }
@@ -1178,11 +1193,11 @@ static void pack_result(smart_str *out, zval *value) {
     smart_str_appendc(out, zend_is_true(kept) ? '1' : '0');
     smart_str_appendc(out, 0);
     if (Z_TYPE_P(kept) == IS_STRING) {
-        smart_str_append(out, Z_STR_P(kept));
+        add_field(out, Z_STRVAL_P(kept), Z_STRLEN_P(kept));
     } else {
         describe(out, kept);
+        smart_str_appendc(out, 0);
     }
-    smart_str_appendc(out, 0);
 }
 
 static zend_execute_data *shown_frame_at(uint32_t index) {
@@ -1262,7 +1277,7 @@ char *tenma_inspect_set_child(uint32_t reference, const char *name, size_t name_
     enter_frame(&run, target);
     zval value;
     if (evaluate_code(&out, code, code_len, false, &value) == 0) {
-        zval *container = writable(reference);
+        zval *container = lookup(reference, true);
         if (container && Z_TYPE_P(container) == IS_ARRAY) {
             SEPARATE_ARRAY(container);
             pack_result(&out, zend_symtable_str_update(Z_ARRVAL_P(container), name, name_len, &value));

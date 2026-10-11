@@ -28,6 +28,31 @@ Tenma::serve($port, function (Request $request) {
                 $socket->send('ready');
                 $socket->send('got ' . $socket->receive());
             });
+        case '/all-cancelled':
+            // all() is cancelled while its children clean up after one failed: the cancellation wins
+            $outer = Tenma::async(function () {
+                try {
+                    Tenma::all(fn () => throw new RuntimeException('child'), function () {
+                        try {
+                            Tenma::sleep(1);
+                        } finally {
+                            Tenma::sleep(0.05);
+                        }
+                    });
+                } catch (Throwable $error) {
+                    return get_class($error);
+                }
+            });
+            Tenma::sleep(0.02);
+            $outer->cancel();
+            return $outer->await();
+        case '/forever':
+            return Response::stream(function ($out) {
+                while (true) {
+                    $out->write('.');
+                    Tenma::sleep(0.05);
+                }
+            });
         default:
             return json_encode(['path' => $request->path, 'query' => $request->query, 'cookie' => $request->headers['cookie'] ?? null]);
     }

@@ -491,6 +491,33 @@ namespace Tenma {
         return Task::start($work);
     }
 
+    /**
+     * @internal Cancels the tasks and waits until they have cleaned up. Returns a cancellation of the
+     * waiting task itself that came meanwhile: it is delivered only once, so the caller rethrows it.
+     *
+     * @param list<Task> $tasks
+     */
+    function cancelAndWait(array $tasks): ?\Throwable
+    {
+        $cancelled = null;
+        foreach ($tasks as $task) {
+            $task->cancel();
+        }
+        foreach ($tasks as $task) {
+            while (!$task->isDone()) {
+                try {
+                    $task->await();
+                } catch (\Throwable $error) {
+                    // Thrown while the task still runs: not its error, the waiting task was interrupted
+                    if (!$task->isDone()) {
+                        $cancelled ??= $error;
+                    }
+                }
+            }
+        }
+        return $cancelled;
+    }
+
     /** @internal Behind Tenma::all(). */
     function all(callable|Task ...$tasks): array
     {
@@ -517,28 +544,15 @@ namespace Tenma {
                 Internal\suspend($token);
             } catch (\Throwable $error) {
                 // all() itself was cancelled: cancel the children too, and only continue once they have cleaned up
-                foreach ($started as $task) {
-                    $task->cancel();
-                }
-                foreach ($started as $task) {
-                    try {
-                        $task->await();
-                    } catch (\Throwable) {
-                    }
-                }
+                cancelAndWait($started);
                 throw $error;
             }
         }
         if ($failed !== null) {
-            foreach ($started as $task) {
-                $task->cancel();
-            }
-            foreach ($started as $task) {
-                try {
-                    $task->await();
-                } catch (\Throwable) {
-                    // Only the first error counts; the others are consequences of the cancellation
-                }
+            // Only the first error counts; the others are consequences of the cancellation
+            $cancelled = cancelAndWait($started);
+            if ($cancelled !== null) {
+                throw $cancelled;
             }
             $failed->await();
         }
@@ -1113,6 +1127,9 @@ namespace Tenma\Db {
      */
     final class Postgres
     {
+        /** The last transaction ID of this interpreter. */
+        private static int $transactions = 0;
+
         private function __construct(private readonly string $target) {}
 
         /** @param string $url postgres://user:password@host:5432/database */
@@ -1160,7 +1177,18 @@ namespace Tenma\Db {
          */
         public function transaction(callable $work): mixed
         {
-            $transaction = new self('tx:' . $this->call('begin', '', [\Tenma\Internal\Current::$request ?? 0]));
+            $id = ++self::$transactions;
+            $transaction = new self("tx:$id");
+            try {
+                $this->call('begin', '', [\Tenma\Internal\Current::$request ?? 0, $id]);
+            } catch (\Throwable $error) {
+                // Cancelled just as BEGIN succeeded: the transaction exists, but nobody would end it
+                try {
+                    $transaction->call('rollback', '', []);
+                } catch (\Throwable) {
+                }
+                throw $error;
+            }
             try {
                 $result = $work($transaction);
             } catch (\Throwable $error) {
