@@ -57,10 +57,16 @@ jobs:
       - run: |
           docker cp "$(docker create tenma)":/usr/local/bin/tenma tenma
           tar czf tenma-linux-${{ matrix.arch }}.tar.gz tenma NOTICE LICENSE-MIT LICENSE-APACHE
+      # Version from the tag, or 0.0.0 to check the package builds on every push
+      - run: |
+          version=0.0.0; case "$GITHUB_REF" in refs/tags/v*) version=${GITHUB_REF_NAME#v};; esac
+          docker run --rm -v "$PWD:/out" tenma-build packaging/deb.sh "$version" /out
       - uses: actions/upload-artifact@v4
         with:
           name: tenma-linux-${{ matrix.arch }}
-          path: tenma-linux-${{ matrix.arch }}.tar.gz
+          path: |
+            tenma-linux-${{ matrix.arch }}.tar.gz
+            tenma_*.deb
       - if: startsWith(github.ref, 'refs/tags/v')
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -84,7 +90,7 @@ jobs:
             docker buildx imagetools create -t ghcr.io/systonia/tenma:$tag \
               ghcr.io/systonia/tenma:$version-x64 ghcr.io/systonia/tenma:$version-arm64
           done
-      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes tenma-*.tar.gz
+      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes tenma-*.tar.gz tenma_*.deb
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # systonia/Homebrew-Tap: GITHUB_TOKEN may only write this repo, TAP_TOKEN is a token with write access to the tap

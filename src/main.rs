@@ -41,7 +41,7 @@ use tokio::task::LocalSet;
 const STDLIB: &str = include_str!("../stdlib/tenma.php");
 /// Prints the public API as stubs; only evaluated for `tenma --stubs`.
 const STUBS: &str = include_str!("../stdlib/stubs.php");
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -123,8 +123,13 @@ pub fn broken() -> bool {
 }
 
 fn main() -> ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("--stubs") {
-        return stubs();
+    match std::env::args().nth(1).as_deref() {
+        Some("--stubs") => return stubs(),
+        Some("--version" | "-v") => {
+            println!("tenma {} (PHP {})", env!("CARGO_PKG_VERSION"), env!("TENMA_PHP_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
     }
     let (argv, options) = match parse_args() {
         Ok(parsed) => parsed,

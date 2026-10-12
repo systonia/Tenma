@@ -19,6 +19,9 @@ fn main() {
         run(option).split_whitespace().map(|flag| flag.replace(&built_at, &php.display().to_string())).collect()
     };
 
+    // For tenma --version
+    println!("cargo:rustc-env=TENMA_PHP_VERSION={}", run("--version").trim());
+
     let mut build = cc::Build::new();
     build.file("shim/tenma.c").warnings(false);
     for include in flags("--includes") {
@@ -32,7 +35,7 @@ fn main() {
     let mut linker = [flags("--ldflags"), flags("--libs")].concat().into_iter();
     while let Some(flag) = linker.next() {
         if let Some(path) = flag.strip_prefix("-L") {
-            println!("cargo:rustc-link-search=native={path}");
+            println!("cargo:rustc-link-search=native={}", unversioned(path));
         } else if let Some(name) = flag.strip_prefix("-l") {
             // intl is C++; PHP calls the runtime stdc++, on macOS it is called c++
             let name = if name == "stdc++" && cfg!(target_os = "macos") { "c++" } else { name };
@@ -47,4 +50,18 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=shim/tenma.c");
     println!("cargo:rerun-if-changed=php-build/out/lib/libphp.a");
+}
+
+/// pkg-config hands PHP Homebrew's versioned paths (/opt/homebrew/Cellar/libzip/1.11.4_1/lib), which are gone
+/// after a `brew upgrade`; /opt/homebrew/opt/libzip/lib always points to the installed version.
+fn unversioned(path: &str) -> String {
+    let Some((prefix, rest)) = path.split_once("/Cellar/") else {
+        return path.to_owned();
+    };
+    let mut parts = rest.splitn(3, '/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(package), Some(_version), Some(tail)) => format!("{prefix}/opt/{package}/{tail}"),
+        (Some(package), Some(_version), None) => format!("{prefix}/opt/{package}"),
+        _ => path.to_owned(),
+    }
 }

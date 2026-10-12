@@ -591,6 +591,13 @@ fn restarts_without_leaks_or_double_signals() {
 }
 
 #[test]
+fn prints_its_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("--version").output().unwrap();
+    let version = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && version.starts_with(concat!("tenma ", env!("CARGO_PKG_VERSION"), " (PHP 8.")), "{version}");
+}
+
+#[test]
 fn nonsensical_options_are_rejected() {
     for args in [["--max-body", "99999999999999999999g"], ["--max-body", "17179869184g"], ["--workers", "0"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(args).arg("tests/fixtures/hello.php").output().unwrap();
