@@ -32,6 +32,8 @@ jobs:
 
   linux:
     strategy:
+      # One architecture failing must not cancel the other's run
+      fail-fast: false
       matrix:
         include:
           - arch: x64
