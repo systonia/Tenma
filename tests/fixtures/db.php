@@ -91,6 +91,7 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
             }
         })(),
         '/whoami' => $db->first("SELECT current_setting('application_name') AS name"),
+        '/backend' => $db->first('SELECT pg_backend_pid() AS pid'),
         default => 'ok',
     });
 });

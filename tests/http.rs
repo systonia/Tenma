@@ -508,6 +508,10 @@ fn postgres_connections_come_back_clean() {
     assert!(get(port, "/cancel-tx").contains("cancelled"));
     let whoami = get(port, "/whoami");
     assert!(whoami.contains("\"name\": \"\""), "{whoami}");
+    // Many requests at once share the one connection: the pool opens no second one while it is cleaned
+    let backends: Vec<_> = (0..20).map(|_| std::thread::spawn(move || get(port, "/backend"))).collect();
+    let pids: std::collections::HashSet<String> = backends.into_iter().map(|backend| backend.join().unwrap().rsplit("\r\n\r\n").next().unwrap().to_owned()).collect();
+    assert_eq!(pids.len(), 1, "{pids:?}");
 }
 
 #[test]

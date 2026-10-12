@@ -159,10 +159,14 @@ fn release(url: &str, lease: Lease) {
         return;
     }
     let url = url.to_owned();
+    // Both moved by name: an async block captures only the fields it uses, and a permit left
+    // behind would free its place while DISCARD ALL still runs, so the pool opens a connection more
+    let Lease { client, _permit: permit } = lease;
     tokio::task::spawn_local(async move {
-        if lease.client.batch_execute("DISCARD ALL").await.is_ok() {
-            IDLE.with_borrow_mut(|idle| idle.entry(url).or_default().push(lease.client));
+        if client.batch_execute("DISCARD ALL").await.is_ok() {
+            IDLE.with_borrow_mut(|idle| idle.entry(url).or_default().push(client));
         }
+        drop(permit);
     });
 }
 
