@@ -457,7 +457,9 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
                     let _ = ready.send(Ok(listeners.clone()));
                 }
                 let now: BTreeSet<u16> = listeners.iter().map(|listener| listener.port).collect();
-                if options.watch && !dev && *ports.get_or_insert_with(|| now.clone()) != now {
+                // No servers at all is no port change: an editor that truncates before writing, or a
+                // script that no longer serves, waits for the next change instead of restarting tenma
+                if options.watch && !dev && !now.is_empty() && *ports.get_or_insert_with(|| now.clone()) != now {
                     // ponytail: the whole process restarts; the listeners would have to move to new ports otherwise
                     eprintln!("tenma: the script's ports changed, restarting tenma");
                     restart_process();
