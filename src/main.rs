@@ -42,7 +42,7 @@ use tokio::task::LocalSet;
 const STDLIB: &str = include_str!("../stdlib/tenma.php");
 /// Prints the public API as stubs; only evaluated for `tenma --stubs`.
 const STUBS: &str = include_str!("../stdlib/stubs.php");
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -228,6 +228,7 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
                 options.request_timeout = seconds.parse::<f64>().ok().filter(|&s| s > 0.0).map(Duration::from_secs_f64).ok_or(format!("--request-timeout {seconds}: not a number above 0"))?;
             }
             "--server-name" => php::set_server_name(&value("--server-name")?)?,
+            "--pubsub" => pubsub::use_redis(&value("--pubsub")?)?,
             "--max-requests" => {
                 let number = value("--max-requests")?;
                 options.max_requests = Some(number.parse().ok().filter(|&count| count > 0).ok_or(format!("--max-requests {number}: not a number above 0"))?);

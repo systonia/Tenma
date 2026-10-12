@@ -1544,3 +1544,29 @@ fn publish_reaches_every_worker() {
         assert!(heard.ends_with("\r\n\r\na,b\n"), "{heard}");
     }
 }
+
+#[test]
+fn publish_through_redis_reaches_other_processes() {
+    if TcpStream::connect("127.0.0.1:6379").is_err() {
+        eprintln!("no Redis reachable, test skipped");
+        return;
+    }
+    let ports = [18_133, 18_134];
+    let _servers = ports.map(|port| {
+        Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--workers", "2", "--pubsub", "redis://127.0.0.1:6379", "tests/fixtures/pubsub.php"]).env("PORT", port.to_string()).spawn().unwrap())
+    });
+    for port in ports {
+        assert!(get(port, "/").starts_with("HTTP/1.1 200"));
+    }
+    // The bridges subscribe on their own thread once the workers listen
+    std::thread::sleep(Duration::from_millis(300));
+
+    assert!(get(ports[0], "/publish?message=a").ends_with("published\n"));
+    std::thread::sleep(Duration::from_millis(100));
+    for port in ports {
+        for _ in 0..2 {
+            let heard = get(port, "/");
+            assert!(heard.ends_with("\r\n\r\na\n"), "{heard}");
+        }
+    }
+}

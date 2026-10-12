@@ -141,6 +141,7 @@ tenma --workers auto app.php     # one worker per core
 tenma --max-body 50m app.php     # largest request body, default 10m, 413 above that
 tenma --max-requests 10000 app.php  # worker restarts its interpreter after N requests
 tenma --db-pool 20 app.php       # at most 20 Postgres connections per worker and URL
+tenma --pubsub redis://cache app.php   # Tenma::publish() reaches every process on that Redis
 tenma tasks.php import --force   # everything after the script ends up in $argv, as with php
 tenma -d memory_limit=512M -c prod.ini app.php   # PHP settings as with php -d and php -c
 tenma --server-name shop.example app.php         # $_SERVER['SERVER_NAME'] like server_name in nginx
@@ -179,6 +180,8 @@ A hook runs once at startup, before the first request, and again when a file mat
 With several workers, the script runs once per worker, and each has its own memory: an in-memory counter or cache exists per worker, as with Node `cluster` or FrankenPHP. Shared state then belongs in a database or Redis.
 
 Messages between workers, like PUBLISH and SUBSCRIBE in Redis: `Tenma::publish()` hands a string to every subscription of its channel in every worker of the process, the publishing one included. `Tenma::subscribe()` runs its callback with each message in its own fiber and returns a `Subscription` with `cancel()`. Made at script startup, it lasts as long as the worker; made in a request, it ends with the request, for WebSockets and streams with the connection. Messages are strings, since workers share no PHP objects: send what changed (an ID, JSON) and let each worker update its own state. A worker that is still starting or restarting misses what is published meanwhile. A subscription keeps a script without a server alive.
+
+Several processes of the same app, on one machine or behind a load balancer, start with `--pubsub redis://host`: messages then go through PUBLISH and SUBSCRIBE in Redis, and every worker of every process hears them. The PHP code stays the same. The channels are Redis channels of the same name. If Redis goes away, tenma reports it once and reconnects every second; messages published meanwhile go out after the reconnect, subscriptions in other processes miss what was published while they were cut off.
 
 ```php
 Tenma::subscribe('prices', function (string $message) use (&$prices) {
@@ -224,7 +227,7 @@ PhpStorm and Intelephense pick them up from `vendor/`; for PHPStan the package b
 | `src/ops.rs` | Asynchronous ops for PHP: `sleep` (tokio timer), `fetch` (reqwest) |
 | `src/db.rs` | Postgres (tokio-postgres, pool per worker) and Redis (one shared connection per URL) as ops |
 | `src/fs.rs` | File system ops for `Tenma\Fs`, on tokio's blocking threads |
-| `src/pubsub.rs` | `Tenma::publish()` and `subscribe()`: channels between the workers of the process |
+| `src/pubsub.rs` | `Tenma::publish()` and `subscribe()`: channels between the workers of the process, through Redis with `--pubsub` |
 | `src/files.rs` | Static files for `Tenma::serve(..., static:)`: prefixes, ETag/304, ranges, checks on the opened file |
 | `src/watch.rs` | `--watch`: watches the files PHP loaded and the hooks' directories, reports real changes (content, not timestamps) |
 | `src/dev.rs` | Hooks of `tenma.dev.php`: the dev thread's ops, command hooks as processes (`tokio::process`) |
