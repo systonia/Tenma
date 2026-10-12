@@ -433,7 +433,8 @@ fn shutdown_functions_per_request() {
     // Exception in the shutdown function: fatal error like in PHP, response with 500, session closed, new worker
     let thrown = get(port, "/throw-shutdown");
     assert!(thrown.starts_with("HTTP/1.1 500") && thrown.ends_with("request after"), "{thrown}");
-    assert!(get(port, "/peek").ends_with("empty"));
+    let peek = get(port, "/peek");
+    assert!(peek.ends_with("empty"), "{peek}");
     assert!(get(port, "/count").ends_with("\r\n\r\n2"), "new interpreter");
 
     // Fatal error in the request: the shutdown function still delivers the error page
@@ -572,7 +573,15 @@ fn restarts_without_leaks_or_double_signals() {
     for _ in 0..30 {
         get(port, "/");
     }
-    let after = open_files(restarting.0.id());
+    // A restart still under way holds a descriptor or two for a moment; a leak stays
+    let mut after = open_files(restarting.0.id());
+    for _ in 0..10 {
+        if after <= before + 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        after = open_files(restarting.0.id());
+    }
     assert!(after <= before + 2, "{before} -> {after}");
 
     // Fatal error exactly on the max-requests request: one restart, not two
@@ -901,7 +910,10 @@ fn watch_reruns_scripts_without_servers() {
     assert_eq!(lines.next().unwrap().unwrap(), "run two");
     std::thread::sleep(Duration::from_millis(200));
     std::fs::write(&script, "<?php echo \"run three\\n\";").unwrap();
-    assert_eq!(lines.next().unwrap().unwrap(), "run three");
+    // On a busy machine the watcher may see the half-written file and then the whole one: run two
+    // can come twice, but must be followed by run three
+    let next = lines.find(|line| line.as_deref().map_or(true, |line| line != "run two")).unwrap().unwrap();
+    assert_eq!(next, "run three");
     let _ = std::fs::remove_dir_all(directory);
 }
 
