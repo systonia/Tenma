@@ -148,7 +148,8 @@ fn fatal_error_restarts_only_the_worker() {
     let started = std::time::Instant::now();
     assert!(get(port, "/slow-oom").starts_with("HTTP/1.1 500"));
     assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
-    assert!(get(port, "/").ends_with("request 1\n"));
+    let after = get(port, "/");
+    assert!(after.ends_with("request 1\n"), "{after}");
 }
 
 #[test]
