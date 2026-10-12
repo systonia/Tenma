@@ -568,7 +568,10 @@ fn restarts_without_leaks_or_double_signals() {
     // One interpreter per request: 30 restarts must not cost file descriptors
     let port = 18_098;
     let restarting = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--max-requests", "1", "tests/fixtures/hello.php"]).env("PORT", port.to_string()).spawn().unwrap());
-    get(port, "/");
+    // The first restarts open what every later one reuses (event loops, sockets): count after them
+    for _ in 0..5 {
+        get(port, "/");
+    }
     let before = open_files(restarting.0.id());
     for _ in 0..30 {
         get(port, "/");
