@@ -1,9 +1,9 @@
-# Tests on every push, and on a tag v* a release with the binaries and the Docker image on ghcr.io.
+# Tests on every pushed branch, and on a tag v* a release with the binaries and the Docker image on ghcr.io.
 name: build
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
     tags: ['v*']
   pull_request:
 
