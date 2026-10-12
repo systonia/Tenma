@@ -22,6 +22,7 @@ COPY --from=build /packages /packages
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates $(cat /packages) \
     && rm -rf /var/lib/apt/lists/* /packages
 COPY --from=build /src/target/release/tenma /usr/local/bin/tenma
+COPY NOTICE LICENSE-MIT LICENSE-APACHE /usr/share/doc/tenma/
 ENV PORT=8080
 EXPOSE 8080
 STOPSIGNAL SIGTERM
