@@ -73,9 +73,32 @@ jobs:
           image=ghcr.io/systonia/tenma:${GITHUB_REF_NAME#v}-${{ matrix.arch }}
           docker tag tenma "$image" && docker push "$image"
 
+  # The .deb for Ubuntu 24.04 LTS, whose libraries (ICU 74) are older than Debian 13's
+  ubuntu:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target build --build-arg BASE=ubuntu:24.04 -t tenma-ubuntu .
+      - run: docker run --rm -e USER=root tenma-ubuntu cargo test --release
+      - run: |
+          version=0.0.0; case "$GITHUB_REF" in refs/tags/v*) version=${GITHUB_REF_NAME#v};; esac
+          docker run --rm -v "$PWD:/out" tenma-ubuntu packaging/deb.sh "$version" /out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tenma-ubuntu-${{ matrix.arch }}
+          path: tenma_*.deb
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [macos, linux]
+    needs: [macos, linux, ubuntu]
     runs-on: ubuntu-24.04
     env:
       TAP_TOKEN: ${{ secrets.TAP_TOKEN }}

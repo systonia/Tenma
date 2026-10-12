@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs the latest tenma: curl -fsSL https://raw.githubusercontent.com/systonia/Tenma/main/packaging/install.sh | sh
-# macOS through Homebrew (the binary links Homebrew's libraries), Debian and Ubuntu through the .deb,
+# macOS through Homebrew (the binary links Homebrew's libraries), Debian 13 and Ubuntu 24.04 through their .deb,
 # any other Linux as the binary in ~/.local/bin (TENMA_DIR), with a list of the libraries it still misses.
 # TENMA_VERSION=0.1.2 installs that version on Linux.
 set -eu
@@ -30,7 +30,12 @@ temp=$(mktemp -d)
 trap 'rm -rf "$temp"' EXIT
 
 if command -v apt-get >/dev/null; then
-  deb="tenma_${version}_$debarch.deb"
+  # Ubuntu 24.04 has its own build; Debian 13 and everything newer take Debian's
+  . /etc/os-release
+  case "$ID$VERSION_ID" in
+    ubuntu24.04) deb="tenma_${version}_ubuntu24.04_$debarch.deb" ;;
+    *) deb="tenma_${version}_$debarch.deb" ;;
+  esac
   curl -fsSL -o "$temp/$deb" "$download/$deb"
   sudo=""; [ "$(id -u)" = 0 ] || sudo=sudo
   # apt resolves the libraries; on a release without them (older Debian or Ubuntu) it says which are missing

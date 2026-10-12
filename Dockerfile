@@ -2,11 +2,17 @@
 #   docker build -t tenma .
 #   docker run -p 8080:8080 -v "$PWD:/app" tenma /app/index.php
 # The binary alone (for a Debian 13 host with the same libraries): docker cp $(docker create tenma):/usr/local/bin/tenma .
-FROM rust:1-trixie AS build
+# Built against another release for its .deb: docker build --target build --build-arg BASE=ubuntu:24.04 .
+ARG BASE=rust:1-trixie
+FROM $BASE AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl ca-certificates perl \
     pkg-config xz-utils libxml2-dev zlib1g-dev libsqlite3-dev libcurl4-openssl-dev libssl-dev libpq-dev \
     libicu-dev libsodium-dev libzip-dev libgmp-dev libonig-dev libpng-dev libjpeg-dev libwebp-dev libfreetype-dev \
     && rm -rf /var/lib/apt/lists/*
+# The rust image brings cargo; another base gets it from rustup
+ENV PATH=/usr/local/cargo/bin:$PATH CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup
+RUN command -v cargo || curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
 WORKDIR /src
 COPY php-build/build.sh php-build/
 RUN php-build/build.sh
