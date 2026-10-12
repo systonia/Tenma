@@ -14,9 +14,10 @@ class Tenma < Formula
   license any_of: ["MIT", "Apache-2.0"]
 
   depends_on arch: :arm64
-  depends_on :macos
 RUBY
-otool -L "$binary" | sed -n 's#^[[:space:]]*/opt/homebrew/opt/\([^/]*\)/.*#  depends_on "\1"#p' | sort -u
+# brew style wants the dependencies sorted by name, :macos among them
+{ echo macos; otool -L "$binary" | sed -n 's#^[[:space:]]*/opt/homebrew/opt/\([^/]*\)/.*#\1#p'; } | sort -u \
+  | sed 's/^macos$/  depends_on :macos/; /depends_on/!s/.*/  depends_on "&"/'
 cat <<'RUBY'
 
   def install
