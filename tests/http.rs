@@ -558,7 +558,11 @@ fn restarts_without_leaks_or_double_signals() {
             let _ = Command::new("kill").args(["-KILL", &self.0.to_string()]).status();
         }
     }
-    let open_files = |pid: u32| String::from_utf8_lossy(&Command::new("lsof").args(["-p", &pid.to_string()]).output().unwrap().stdout).lines().count();
+    // Linux lists them in /proc, macOS has no /proc but lsof
+    let open_files = |pid: u32| match std::fs::read_dir(format!("/proc/{pid}/fd")) {
+        Ok(fds) => fds.count(),
+        Err(_) => String::from_utf8_lossy(&Command::new("lsof").args(["-p", &pid.to_string()]).output().unwrap().stdout).lines().count(),
+    };
 
     // One interpreter per request: 30 restarts must not cost file descriptors
     let port = 18_098;

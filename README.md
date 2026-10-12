@@ -228,6 +228,16 @@ cargo test --release
 ./target/release/tenma demo/waypoint/index.php
 ```
 
+On Linux, `php-build/build.sh` takes the libraries from the distribution's `-dev` packages instead; the `Dockerfile` builds both on Debian 13 and keeps only the binary and the libraries it links (about 270 MB):
+
+```
+docker build -t tenma .
+docker run -p 8080:8080 -v "$PWD:/app" tenma /app/index.php
+docker run --rm -e USER=root $(docker build -q --target build .) cargo test --release
+```
+
+A tag `v*` builds the binaries for macOS arm64 and Linux x64 and arm64 as a GitHub release, and the image as `ghcr.io/systonia/tenma` (`.github/workflows/build.yml`). The Linux binaries link Debian 13's libraries: on another distribution, use the image.
+
 Databases on one worker: one Postgres query per request about 25,000 requests per second (35,000 without the `DISCARD ALL` cleanup), at 200 concurrent requests with 10 connections; four Redis commands per request about 42,000.
 
 Streaming: 500 concurrent streams of 0.6 s each on one worker, about 780 per second, 58 MB. WebSocket echo: 46,000 round trips per second over one connection, about 118,000 over four.

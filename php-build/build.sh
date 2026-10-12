@@ -2,10 +2,11 @@
 # Builds PHP as a static library with the embed SAPI and ZTS into php-build/out.
 # tenma links libphp.a in, the system PHP stays untouched.
 #
-# Libraries for extensions come from the macOS SDK (libxml2, zlib, sqlite, curl) and from Homebrew:
+# Libraries for extensions are linked dynamically. On macOS they come from the SDK (libxml2, zlib,
+# sqlite, curl) and from Homebrew:
 #   brew install pkgconf openssl@3 libpq icu4c libsodium libzip gmp oniguruma libpng jpeg-turbo webp freetype
-# ponytail: Homebrew libraries are linked dynamically, the binary only runs on Macs with these
-# packages; Linux and Docker get their own build
+# On Linux from the distribution's -dev packages (Debian's are in the Dockerfile).
+# ponytail: the binary only runs where these libraries are installed; the Docker image brings them
 set -eu
 VERSION=8.5.9
 SHA256=0db7855f25bcd0ab1d592cdb35e284d6f6a5d2ae0f6f621122e364cc39b708f4
@@ -18,17 +19,23 @@ echo "$SHA256  php-$VERSION.tar.xz" | shasum -a 256 -c -
 rm -rf "php-$VERSION" && tar xf "php-$VERSION.tar.xz"
 
 cd "php-$VERSION"
-SDK="$(xcrun --show-sdk-path)"
-BREW="$(brew --prefix)"
-export LIBXML_CFLAGS="-I$SDK/usr/include/libxml2" LIBXML_LIBS="-lxml2"
-export ZLIB_CFLAGS="" ZLIB_LIBS="-lz"
-export SQLITE_CFLAGS="" SQLITE_LIBS="-lsqlite3"
-export CURL_CFLAGS="" CURL_LIBS="-lcurl"
-# Homebrew does not put some packages in the default path (keg-only)
-for package in openssl@3 libpq icu4c libsodium libzip gmp oniguruma libpng jpeg-turbo webp freetype; do
-  PKG_CONFIG_PATH="$BREW/opt/$package/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-done
-export PKG_CONFIG_PATH
+if [ "$(uname -s)" = Darwin ]; then
+  SDK="$(xcrun --show-sdk-path)"
+  BREW="$(brew --prefix)"
+  export LIBXML_CFLAGS="-I$SDK/usr/include/libxml2" LIBXML_LIBS="-lxml2"
+  export ZLIB_CFLAGS="" ZLIB_LIBS="-lz"
+  export SQLITE_CFLAGS="" SQLITE_LIBS="-lsqlite3"
+  export CURL_CFLAGS="" CURL_LIBS="-lcurl"
+  # Homebrew does not put some packages in the default path (keg-only)
+  for package in openssl@3 libpq icu4c libsodium libzip gmp oniguruma libpng jpeg-turbo webp freetype; do
+    PKG_CONFIG_PATH="$BREW/opt/$package/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+  done
+  export PKG_CONFIG_PATH
+  PGSQL="=$BREW/opt/libpq" GMP="=$BREW/opt/gmp" CPUS="$(sysctl -n hw.ncpu)"
+else
+  # Linux: everything is found through pkg-config and the default paths
+  PGSQL="" GMP="" CPUS="$(nproc)"
+fi
 
 ./configure \
   --prefix="$(pwd)/../out" \
@@ -48,11 +55,11 @@ export PKG_CONFIG_PATH
   `# Databases` \
   --enable-pdo --with-pdo-mysql=mysqlnd --with-mysqli=mysqlnd --enable-mysqlnd \
   --with-pdo-sqlite --with-sqlite3 \
-  --with-pdo-pgsql="$BREW/opt/libpq" --with-pgsql="$BREW/opt/libpq" \
+  --with-pdo-pgsql$PGSQL --with-pgsql$PGSQL \
   `# Network and cryptography` \
   --with-openssl --with-curl --with-sodium \
   `# Other` \
-  --enable-intl --with-gmp="$BREW/opt/gmp" --with-zip \
+  --enable-intl --with-gmp$GMP --with-zip \
   --enable-gd --with-jpeg --with-webp --with-freetype
-make -j"$(sysctl -n hw.ncpu)"
+make -j"$CPUS"
 make install

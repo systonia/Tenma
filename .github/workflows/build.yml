@@ -1,0 +1,78 @@
+# Tests on every push, and on a tag v* a release with the binaries and the Docker image on ghcr.io.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install pkgconf openssl@3 libpq icu4c libsodium libzip gmp oniguruma libpng jpeg-turbo webp freetype
+      - uses: actions/cache@v4
+        with:
+          path: php-build/out
+          key: php-macos-${{ hashFiles('php-build/build.sh') }}
+      - run: test -f php-build/out/bin/php-config || php-build/build.sh
+      - run: cargo build --release
+      - run: cargo test --release
+      - run: tar czf tenma-macos-arm64.tar.gz -C target/release tenma
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tenma-macos-arm64
+          path: tenma-macos-arm64.tar.gz
+
+  linux:
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t tenma .
+      # A one-line script proves the binary starts with the image's libraries
+      - run: docker run --rm --entrypoint sh tenma -c 'echo "<?php echo PHP_VERSION;" > /tmp/v.php && tenma /tmp/v.php'
+      - run: docker build --target build -t tenma-build . && docker run --rm -e USER=root tenma-build cargo test --release
+      - run: |
+          docker cp "$(docker create tenma)":/usr/local/bin/tenma tenma
+          tar czf tenma-linux-${{ matrix.arch }}.tar.gz tenma
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tenma-linux-${{ matrix.arch }}
+          path: tenma-linux-${{ matrix.arch }}.tar.gz
+      - if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          image=ghcr.io/systonia/tenma:${GITHUB_REF_NAME#v}-${{ matrix.arch }}
+          docker tag tenma "$image" && docker push "$image"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          version=${GITHUB_REF_NAME#v}
+          for tag in "$version" latest; do
+            docker buildx imagetools create -t ghcr.io/systonia/tenma:$tag \
+              ghcr.io/systonia/tenma:$version-x64 ghcr.io/systonia/tenma:$version-arm64
+          done
+      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes tenma-*.tar.gz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
