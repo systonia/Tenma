@@ -604,6 +604,9 @@ fn prints_its_version() {
     let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("--version").output().unwrap();
     let version = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && version.starts_with(concat!("tenma ", env!("CARGO_PKG_VERSION"), " (PHP 8.")), "{version}");
+    // The extension reports the same version to PHP
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/version.php").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), env!("CARGO_PKG_VERSION"));
 }
 
 #[test]

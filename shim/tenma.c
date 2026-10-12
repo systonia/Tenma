@@ -370,7 +370,8 @@ static zend_module_entry tenma_module = {
     "tenma",
     tenma_functions,
     PHP_MINIT(tenma), NULL, NULL, NULL, NULL,
-    "0.1.0",
+    /* From Cargo.toml (build.rs): phpversion('tenma') and phpinfo() show the binary's version */
+    TENMA_VERSION,
     STANDARD_MODULE_PROPERTIES
 };
 

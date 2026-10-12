@@ -23,7 +23,7 @@ fn main() {
     println!("cargo:rustc-env=TENMA_PHP_VERSION={}", run("--version").trim());
 
     let mut build = cc::Build::new();
-    build.file("shim/tenma.c").warnings(false);
+    build.file("shim/tenma.c").warnings(false).define("TENMA_VERSION", format!("\"{}\"", std::env::var("CARGO_PKG_VERSION").unwrap()).as_str());
     for include in flags("--includes") {
         build.include(include.trim_start_matches("-I"));
     }
@@ -48,6 +48,8 @@ fn main() {
             println!("cargo:rustc-link-arg={flag}");
         }
     }
+    // The version in Cargo.toml goes into the binary
+    println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=shim/tenma.c");
     println!("cargo:rerun-if-changed=php-build/out/lib/libphp.a");
 }
