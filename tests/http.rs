@@ -112,6 +112,14 @@ fn fibers_wait_without_blocking_the_server() {
     let started = Instant::now();
     assert!(get(port, "/fetch-timeout").ends_with("timeout\n"));
     assert!(started.elapsed() < Duration::from_secs(1));
+    // Output buffers belong to their request, even while many of them wait inside ob_start()
+    let buffered: Vec<_> = (0..20).map(|id| std::thread::spawn(move || (id, get(port, &format!("/buffered?id={id}"))))).collect();
+    for request in buffered {
+        let (id, response) = request.join().unwrap();
+        assert!(response.ends_with(&format!("\r\n\r\n<{id}>INNER {id}</{id}>\n")), "{response}");
+    }
+    assert!(get(port, "/buffer-left-open").ends_with("level 1\n"));
+    assert!(get(port, "/level").ends_with("level 0\n"));
     assert!(get(port, "/").ends_with("hello\n"));
 }
 

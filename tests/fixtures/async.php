@@ -44,6 +44,26 @@ Tenma::serve($port, function (Request $request) use ($port, &$ticks): string {
             } catch (RuntimeException $error) {
                 return "caught: {$error->getMessage()}\n";
             }
+        case '/buffered':
+            // A template that waits while it renders: its buffer stays its own, with a callback one inside
+            $id = $request->query['id'] ?? '';
+            ob_start();
+            echo "<$id>";
+            ob_start(fn (string $text): string => strtoupper($text));
+            echo "inner $id";
+            Tenma::sleep(0.05);
+            ob_end_flush();
+            Tenma::sleep(0.01);
+            echo "</$id>";
+            return ob_get_clean() . "\n";
+        case '/buffer-left-open':
+            // Ends with a buffer still open: it goes with the request, the next one starts without it
+            ob_start();
+            echo 'never sent';
+            Tenma::sleep(0.01);
+            return 'level ' . ob_get_level() . "\n";
+        case '/level':
+            return 'level ' . ob_get_level() . "\n";
         case '/nested':
             // A task that starts tasks itself, and a fetch to the same server in between
             $outer = Tenma::async(fn () => Tenma::all(fn () => Tenma::fetch("http://127.0.0.1:$port/hello")->body, function () {

@@ -519,11 +519,74 @@ static zend_observer_fcall_handlers inspect_observe(zend_execute_data *frame) {
     return (zend_observer_fcall_handlers) {inspect_call, inspect_return};
 }
 
+/**
+ * Output buffers per fiber. PHP keeps one stack of ob_start() buffers per interpreter; with many
+ * requests in one worker, a request that waits inside ob_start() (a template asking the database)
+ * would leave its buffer open for the next request to write into. So a fiber that is switched
+ * away from takes its buffers along, and gets them back when it runs again, as under FPM, where
+ * every request has the stack to itself. A fiber starts without buffers, also the ones open where
+ * it was started.
+ */
+typedef struct {
+    zend_stack handlers;
+    php_output_handler *active;
+    php_output_handler *running;
+} output_state;
+
+/** The set-aside buffers by fiber context: (zend_ulong) context → output_state *. */
+static _Thread_local HashTable *output_states = NULL;
+
+static void output_switch(zend_fiber_context *from, zend_fiber_context *to) {
+    bool open = zend_stack_count(&OG(handlers)) > 0;
+    if (!open && (!output_states || zend_hash_num_elements(output_states) == 0)) {
+        return;
+    }
+    if (!output_states) {
+        output_states = pemalloc(sizeof(HashTable), 1);
+        zend_hash_init(output_states, 8, NULL, NULL, 1);
+    }
+    if (open) {
+        output_state *state = pemalloc(sizeof(output_state), 1);
+        *state = (output_state) {OG(handlers), OG(active), OG(running)};
+        zend_hash_index_update_ptr(output_states, (zend_ulong) (uintptr_t) from, state);
+        zend_stack_init(&OG(handlers), sizeof(php_output_handler *));
+        OG(active) = NULL;
+        OG(running) = NULL;
+    }
+    output_state *state = zend_hash_index_find_ptr(output_states, (zend_ulong) (uintptr_t) to);
+    if (state) {
+        zend_stack_destroy(&OG(handlers));
+        OG(handlers) = state->handlers;
+        OG(active) = state->active;
+        OG(running) = state->running;
+        zend_hash_index_del(output_states, (zend_ulong) (uintptr_t) to);
+        pefree(state, 1);
+    }
+}
+
+/** A fiber that ended with buffers still open: they go with it, unsent, as at the end of a request. */
+static void output_destroy(zend_fiber_context *context) {
+    output_state *state = output_states ? zend_hash_index_find_ptr(output_states, (zend_ulong) (uintptr_t) context) : NULL;
+    if (!state) {
+        return;
+    }
+    php_output_handler **handler;
+    while ((handler = zend_stack_top(&state->handlers))) {
+        zend_stack_del_top(&state->handlers);
+        php_output_handler_free(handler);
+    }
+    zend_stack_destroy(&state->handlers);
+    zend_hash_index_del(output_states, (zend_ulong) (uintptr_t) context);
+    pefree(state, 1);
+}
+
 /** Observers are registered while PHP starts its modules, before it knows which are in use. */
 static PHP_MINIT_FUNCTION(tenma) {
     if (inspect_mode) {
         zend_observer_fcall_register(inspect_observe);
     }
+    zend_observer_fiber_switch_register(output_switch);
+    zend_observer_fiber_destroy_register(output_destroy);
     return SUCCESS;
 }
 
@@ -704,6 +767,16 @@ void tenma_thread_stop(void) {
     }
     handler_count = 0;
     php_request_shutdown(NULL);
+    if (output_states) {
+        // What fibers still held went with the request's memory; only the records are left
+        output_state *state;
+        ZEND_HASH_FOREACH_PTR(output_states, state) {
+            pefree(state, 1);
+        } ZEND_HASH_FOREACH_END();
+        zend_hash_destroy(output_states);
+        pefree(output_states, 1);
+        output_states = NULL;
+    }
     ts_free_thread();
 }
 
