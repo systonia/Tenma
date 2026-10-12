@@ -541,7 +541,8 @@ fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
     let change = CHANGE.with_borrow(Arc::clone);
     runtime.block_on(async {
-        loop {
+        let mut answering = tokio::task::JoinSet::new();
+        let stop = loop {
             tokio::select! {
                 connection = connections.recv() => {
                     let Some((_, stream)) = connection else {
@@ -551,18 +552,23 @@ fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options
                         continue;
                     };
                     let service = service_fn(|_| async { Ok::<_, Infallible>(plain(StatusCode::SERVICE_UNAVAILABLE, "The script failed to load, see the console. Waiting for changes.\n")) });
-                    // No keep-alive: the connection ends with this runtime at the next change
-                    tokio::spawn(
+                    // No keep-alive: each connection gets its 503 and ends
+                    answering.spawn(
                         http1::Builder::new()
                             .timer(hyper_util::rt::TokioTimer::new())
                             .header_read_timeout(options.request_timeout)
                             .keep_alive(false)
                             .serve_connection(TokioIo::new(stream), service),
                     );
+                    while answering.try_join_next().is_some() {}
                 }
                 () = change.notified() => break Stop::Restart,
             }
-        }
+        };
+        // Connections accepted just before the change still get their answer: dropping the runtime
+        // would reset them while their request is already on the way
+        let _ = tokio::time::timeout(options.drain, async { while answering.join_next().await.is_some() {} }).await;
+        stop
     })
 }
 
