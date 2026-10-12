@@ -568,10 +568,12 @@ fn restarts_without_leaks_or_double_signals() {
     // One interpreter per request: 30 restarts must not cost file descriptors
     let port = 18_098;
     let restarting = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--max-requests", "1", "tests/fixtures/hello.php"]).env("PORT", port.to_string()).spawn().unwrap());
-    // The first restarts open what every later one reuses (event loops, sockets): count after them
-    for _ in 0..5 {
+    // The first restarts open what every later one reuses (event loops, sockets), on a busy machine
+    // spread over more of them: a leak grows with every restart, so compare two rounds of 30
+    for _ in 0..30 {
         get(port, "/");
     }
+    std::thread::sleep(Duration::from_millis(300));
     let before = open_files(restarting.0.id());
     for _ in 0..30 {
         get(port, "/");
