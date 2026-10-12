@@ -308,6 +308,7 @@ pub fn thread_stop() {
     forget_waiting();
     crate::streams::clear();
     crate::db::clear();
+    crate::pubsub::clear();
     crate::ops::clear();
     unsafe { tenma_thread_stop() }
 }

@@ -1524,3 +1524,23 @@ fn a_second_sigterm_ends_at_once() {
     server.wait().unwrap();
     assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
 }
+
+#[test]
+fn publish_reaches_every_worker() {
+    let port = 18_132;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--workers", "3", "tests/fixtures/pubsub.php"]).env("PORT", port.to_string()).spawn().unwrap());
+
+    assert!(get(port, "/publish?message=a").ends_with("published\n"));
+    // A subscription made in a request waits there for the next message, from another worker
+    let waiting = std::thread::spawn(move || get(port, "/wait"));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(get(port, "/publish?message=b").ends_with("published\n"));
+    let waited = waiting.join().unwrap();
+    assert!(waited.ends_with("waited for b\n"), "{waited}");
+
+    // Round robin: all three workers heard both messages, the cancelled subscription nothing
+    for _ in 0..3 {
+        let heard = get(port, "/");
+        assert!(heard.ends_with("\r\n\r\na,b\n"), "{heard}");
+    }
+}

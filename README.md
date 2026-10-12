@@ -178,6 +178,15 @@ A hook runs once at startup, before the first request, and again when a file mat
 
 With several workers, the script runs once per worker, and each has its own memory: an in-memory counter or cache exists per worker, as with Node `cluster` or FrankenPHP. Shared state then belongs in a database or Redis.
 
+Messages between workers, like PUBLISH and SUBSCRIBE in Redis: `Tenma::publish()` hands a string to every subscription of its channel in every worker of the process, the publishing one included. `Tenma::subscribe()` runs its callback with each message in its own fiber and returns a `Subscription` with `cancel()`. Made at script startup, it lasts as long as the worker; made in a request, it ends with the request, for WebSockets and streams with the connection. Messages are strings, since workers share no PHP objects: send what changed (an ID, JSON) and let each worker update its own state. A worker that is still starting or restarting misses what is published meanwhile. A subscription keeps a script without a server alive.
+
+```php
+Tenma::subscribe('prices', function (string $message) use (&$prices) {
+    $prices = json_decode($message, true);   // every worker gets the new prices
+});
+Tenma::publish('prices', json_encode($prices));
+```
+
 ## Install
 
 ```
@@ -215,6 +224,7 @@ PhpStorm and Intelephense pick them up from `vendor/`; for PHPStan the package b
 | `src/ops.rs` | Asynchronous ops for PHP: `sleep` (tokio timer), `fetch` (reqwest) |
 | `src/db.rs` | Postgres (tokio-postgres, pool per worker) and Redis (one shared connection per URL) as ops |
 | `src/fs.rs` | File system ops for `Tenma\Fs`, on tokio's blocking threads |
+| `src/pubsub.rs` | `Tenma::publish()` and `subscribe()`: channels between the workers of the process |
 | `src/files.rs` | Static files for `Tenma::serve(..., static:)`: prefixes, ETag/304, ranges, checks on the opened file |
 | `src/watch.rs` | `--watch`: watches the files PHP loaded and the hooks' directories, reports real changes (content, not timestamps) |
 | `src/dev.rs` | Hooks of `tenma.dev.php`: the dev thread's ops, command hooks as processes (`tokio::process`) |

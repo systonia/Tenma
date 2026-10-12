@@ -16,6 +16,8 @@ namespace Tenma\Internal {
         public static array $ops = [];
         /** @var array<int, \Tenma\Timer> */
         public static array $timers = [];
+        /** @var array<int, \Tenma\Subscription> */
+        public static array $subscriptions = [];
     }
 
     /** The request whose code is running right now; tasks and ops belong to it, exit() ends it. */
@@ -53,7 +55,7 @@ namespace Tenma\Internal {
         public static array $tasks = [];
         /** @var array<int, \Tenma\Task> Fiber ID → task */
         public static array $taskOfFiber = [];
-        /** @var array<int, array<int, \Tenma\Task|\Tenma\Timer>> Request → running tasks and timers, by object ID */
+        /** @var array<int, array<int, \Tenma\Task|\Tenma\Timer|\Tenma\Subscription>> Request → running tasks, timers and subscriptions, by object ID */
         public static array $ofRequest = [];
         /** @var array<int, mixed> Values of Tenma\AsyncLocal outside any task (script, start of a request) */
         public static array $rootContext = [];
@@ -162,7 +164,7 @@ namespace Tenma\Internal {
     function cancelRequest(int $request, \Throwable $error): void
     {
         foreach (Scheduler::$ofRequest[$request] ?? [] as $entry) {
-            $entry instanceof \Tenma\Timer ? $entry->cancel() : $entry->cancel($error);
+            $entry instanceof \Tenma\Task ? $entry->cancel($error) : $entry->cancel();
         }
         unset(Scheduler::$ofRequest[$request]);
     }
@@ -177,7 +179,7 @@ namespace Tenma\Internal {
         $error = new \Tenma\Cancelled('The connection ended');
         foreach (Scheduler::$ofRequest[$request] ?? [] as $entry) {
             if ($entry !== $current) {
-                $entry instanceof \Tenma\Timer ? $entry->cancel() : $entry->cancel($error);
+                $entry instanceof \Tenma\Task ? $entry->cancel($error) : $entry->cancel();
             }
         }
     }
@@ -216,6 +218,13 @@ namespace Tenma\Internal {
             unset(Waiting::$timers[$op]);
             Current::$request = null;
             $timer->fire();
+            return;
+        }
+        $subscription = Waiting::$subscriptions[$op] ?? null;
+        if ($subscription !== null) {
+            unset(Waiting::$subscriptions[$op]);
+            Current::$request = null;
+            $subscription->fire($ok, $value);
             return;
         }
         if (isset(Waiting::$ops[$op])) {
@@ -650,6 +659,84 @@ namespace Tenma {
         Internal\Loop::$running && Internal\requireFiber();
         Internal\whenRunning($timer->arm(...));
         return $timer;
+    }
+
+    /** A subscription from Tenma::subscribe(). */
+    final class Subscription
+    {
+        private readonly int $id;
+        private int $op = 0;
+        private bool $cancelled = false;
+        /** The request the subscription was made in: if the client leaves, it ends too. */
+        private readonly ?int $request;
+        /** @var array<int, mixed> AsyncLocal values from where it was made */
+        private readonly array $context;
+
+        /** @internal */
+        public function __construct(string $channel, private readonly \Closure $callback)
+        {
+            // Right away, also at script startup: what is published until the loop runs waits in the queue
+            $this->id = \tenma_pubsub('subscribe', 0, $channel, '');
+            $this->request = Internal\Current::$request;
+            $this->context = Internal\context();
+            if ($this->request !== null) {
+                Internal\Scheduler::$ofRequest[$this->request][spl_object_id($this)] = $this;
+            }
+        }
+
+        /** @internal Waits for the next message. */
+        public function arm(): void
+        {
+            if ($this->cancelled) {
+                return;
+            }
+            $this->op = \tenma_pubsub('receive', $this->id, '', '');
+            if ($this->op !== 0) {
+                Internal\Waiting::$subscriptions[$this->op] = $this;
+            }
+        }
+
+        /** @internal A message came: the callback runs in its own Fiber, the next wait starts right away. */
+        public function fire(bool $ok, mixed $message): void
+        {
+            $this->op = 0;
+            if ($this->cancelled || !$ok || !is_string($message)) {
+                return;
+            }
+            $this->arm();
+            $callback = $this->callback;
+            Task::start(static fn () => $callback($message), null, $this->context, 'Subscription');
+        }
+
+        /** Stops the subscription; callbacks already running run to completion. */
+        public function cancel(): void
+        {
+            if ($this->cancelled) {
+                return;
+            }
+            $this->cancelled = true;
+            if ($this->request !== null) {
+                unset(Internal\Scheduler::$ofRequest[$this->request][spl_object_id($this)]);
+                if (empty(Internal\Scheduler::$ofRequest[$this->request])) {
+                    unset(Internal\Scheduler::$ofRequest[$this->request]);
+                }
+            }
+            if ($this->op !== 0) {
+                unset(Internal\Waiting::$subscriptions[$this->op]);
+                \tenma_op_cancel($this->op);
+                $this->op = 0;
+            }
+            \tenma_pubsub('unsubscribe', $this->id, '', '');
+        }
+    }
+
+    /** @internal Behind Tenma::subscribe(). */
+    function subscribe(string $channel, callable $callback): Subscription
+    {
+        Internal\Loop::$running && Internal\requireFiber();
+        $subscription = new Subscription($channel, $callback(...));
+        Internal\whenRunning($subscription->arm(...));
+        return $subscription;
     }
 
     /**
@@ -2056,6 +2143,28 @@ namespace {
         public static function setInterval(callable $callback, float $seconds): \Tenma\Timer
         {
             return \Tenma\setInterval($callback, $seconds);
+        }
+
+        /**
+         * Sends $message to every subscription of $channel, in every worker of this process, this one
+         * included, like PUBLISH in Redis. Messages are strings: workers share no PHP objects. A worker that
+         * has not subscribed yet (still starting, restarting) misses the message.
+         */
+        public static function publish(string $channel, string $message): void
+        {
+            \tenma_pubsub('publish', 0, $channel, $message);
+        }
+
+        /**
+         * Calls $callback with every message published to $channel, in its own Fiber, until cancel(). Works
+         * at script startup and in asynchronous code; made in a request, it ends with the request, for
+         * WebSockets and streams with the connection. Keeps a script without a server alive.
+         *
+         * @param callable(string): mixed $callback
+         */
+        public static function subscribe(string $channel, callable $callback): \Tenma\Subscription
+        {
+            return \Tenma\subscribe($channel, $callback);
         }
 
         /**

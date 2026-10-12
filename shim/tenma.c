@@ -76,6 +76,8 @@ extern void tenma_rs_ws_close(uint64_t rid);
 /** Databases, see src/db.rs. */
 extern void tenma_rs_db_abandon(uint64_t rid);
 extern void tenma_rs_op_cancel(uint64_t op);
+extern uint64_t tenma_rs_pubsub(const char *op, size_t op_len, uint64_t id, const char *channel, size_t channel_len,
+    const char *message, size_t message_len);
 /** File system, see src/fs.rs. */
 extern uint64_t tenma_rs_fs(const char *op, size_t op_len, const char *path, size_t path_len,
     const char *second, size_t second_len, bool flag, const char *data, size_t data_len);
@@ -327,6 +329,15 @@ ZEND_END_ARG_INFO()
 PHP_FUNCTION(tenma_op_dev);
 PHP_FUNCTION(tenma_debugger);
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_pubsub, 0, 4, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, op, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, id, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, channel, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, message, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(tenma_pubsub);
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_shutdown, 0, 0, IS_VOID, 0)
 ZEND_END_ARG_INFO()
 
@@ -357,6 +368,7 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE(tenma_exit_process, arginfo_tenma_shutdown)
     ZEND_FE(tenma_op_fs, arginfo_tenma_op_fs)
     ZEND_FE(tenma_op_dev, arginfo_tenma_op_dev)
+    ZEND_FE(tenma_pubsub, arginfo_tenma_pubsub)
     ZEND_FE(tenma_debugger, arginfo_tenma_shutdown)
     ZEND_FE(tenma_classic_begin, arginfo_tenma_shutdown)
     ZEND_FE(tenma_take_output, arginfo_tenma_take_output)
@@ -1954,6 +1966,20 @@ PHP_FUNCTION(tenma_op_fs) {
         efree(destination);
     }
     RETURN_LONG((zend_long) id);
+}
+
+/** tenma_pubsub(string $op, int $id, string $channel, string $message): int. Messages between workers (src/pubsub.rs). */
+PHP_FUNCTION(tenma_pubsub) {
+    zend_string *op, *channel, *message;
+    zend_long id;
+    ZEND_PARSE_PARAMETERS_START(4, 4)
+        Z_PARAM_STR(op)
+        Z_PARAM_LONG(id)
+        Z_PARAM_STR(channel)
+        Z_PARAM_STR(message)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_LONG((zend_long) tenma_rs_pubsub(ZSTR_VAL(op), ZSTR_LEN(op), (uint64_t) id, ZSTR_VAL(channel), ZSTR_LEN(channel),
+        ZSTR_VAL(message), ZSTR_LEN(message)));
 }
 
 /** tenma_op_dev(string $op, string $arg): int. Starts an op for the hooks of tenma.dev.php (src/dev.rs). */

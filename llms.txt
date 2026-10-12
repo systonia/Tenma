@@ -31,6 +31,7 @@ API at a glance:
   - Serving: `serve(port, handler, static: [...])`, `serveClassic(port, app)`.
   - Tasks: `async(fn)`, `all(...fns)`, `detach(fn)`.
   - Waiting and timers: `sleep(seconds)`, `setTimeout(fn, seconds)`, `setInterval(fn, seconds)`. Both timer functions return a `Timer` with `cancel()`.
+  - Messages between workers: `publish(channel, message)` reaches every `subscribe(channel, fn (string $message))` in every worker, the sender's included. Messages are strings; `subscribe()` returns a `Subscription` with `cancel()` and ends with the request it was made in.
   - HTTP and debugging: `fetch(url, method, headers, body, timeout)` returns a `FetchResponse` with `status`, `body`, `header()` and `json()`. `debugger()` works like `debugger;` in JavaScript.
 - `Tenma\Db\Postgres`: `connect(url)`, `query()`, `first()`, `execute()`, `transaction(fn)`, with `$1`-style parameters. Connections are pooled per worker.
 - `Tenma\Db\Redis`: `connect(url)`, `command(name, ...args)`, `get()`, `set(key, value, seconds)`.

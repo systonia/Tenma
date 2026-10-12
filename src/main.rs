@@ -14,6 +14,7 @@ mod fs;
 mod inspect;
 mod ops;
 mod php;
+mod pubsub;
 mod streams;
 mod watch;
 
