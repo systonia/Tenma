@@ -16,7 +16,8 @@ Tenma::serve((int) getenv('PORT'), function (Tenma\Http\Request $request) use ($
             return $task->await();
     }
     // A timer of the request ends with it; detach() keeps running
-    Tenma::setTimeout(fn () => file_put_contents("$marker-timer", "timer ran\n"), 0.3);
+    // Long enough that a slow machine notices the client leaving first
+    Tenma::setTimeout(fn () => file_put_contents("$marker-timer", "timer ran\n"), 1.0);
     Tenma::detach(function () use ($marker) {
         Tenma::sleep(0.3);
         file_put_contents("$marker-detach", "detach ran\n");
