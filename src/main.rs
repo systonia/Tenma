@@ -186,6 +186,7 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
     let mut args = std::env::args().skip(1);
     let mut options = Options { workers: 1, max_body: 10 << 20, max_requests: None, request_timeout: Duration::from_secs(30), watch: false, drain: DRAIN, inspect: None, inspect_brk: false };
     let mut argv = Vec::new();
+    let mut pool = None;
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
@@ -217,7 +218,7 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
             "--db-pool" => {
                 let number = value("--db-pool")?;
                 let size = number.parse().ok().filter(|&count: &usize| count > 0).ok_or(format!("--db-pool {number}: not a number above 0"))?;
-                db::POOL_SIZE.store(size, std::sync::atomic::Ordering::Relaxed);
+                pool = Some(size);
             }
             // As with php: -d name=value or -dname=value, -c path
             "-d" => php::define_ini(&value("-d")?)?,
@@ -249,6 +250,8 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         eprintln!("tenma: --inspect runs one worker");
         options.workers = 1;
     }
+    // About 20 connections in all by default, Postgres allows 100: ten workers with ten each ran out of them
+    db::POOL_SIZE.store(pool.unwrap_or((20 / options.workers).clamp(2, 10)), std::sync::atomic::Ordering::Relaxed);
     Ok((argv, options))
 }
 

@@ -23,7 +23,8 @@ use crate::php::{OpResult, text};
 
 type Failure = Box<dyn Error + Send + Sync>;
 
-/// At most this many Postgres connections per worker and URL (--db-pool); anyone beyond that waits.
+/// At most this many Postgres connections per worker and URL (--db-pool, by default 20 / workers, from 2 to 10);
+/// anyone beyond that waits.
 pub static POOL_SIZE: AtomicUsize = AtomicUsize::new(10);
 
 thread_local! {
