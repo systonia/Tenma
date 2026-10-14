@@ -662,6 +662,12 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
         }
         loop {
             tokio::select! {
+                // A restart first: the response that asked for it may already be out, and the client's
+                // next connection waiting too. That one belongs to the fresh interpreter: here it would
+                // land in the old one, broken after a fatal error, and the drain would reset it unread
+                biased;
+                () = restart.notified() => break Stop::Restart,
+                () = change.notified() => break Stop::Restart,
                 connection = connections.recv() => {
                     let Some((port, stream)) = connection else {
                         break Stop::Closed;
@@ -692,8 +698,6 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
                         }
                     });
                 }
-                () = restart.notified() => break Stop::Restart,
-                () = change.notified() => break Stop::Restart,
             }
         }
     }));
