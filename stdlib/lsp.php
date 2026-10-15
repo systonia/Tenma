@@ -180,7 +180,7 @@ final class Server
     /** @var array<string, array<string, list<array>>> project => uri => what the running app published there */
     private array $published = [];
 
-    /** @var array<string, string> project => its lists as they were last read: names, sizes and times */
+    /** @var array<string, string> project => its lists as they were last read: names and hashes */
     private array $lists = [];
 
     /** @param resource $out */
@@ -197,7 +197,8 @@ final class Server
         foreach (array_unique(array_filter($this->projects)) as $project) {
             $directory = \Tenma\Internal\Diagnostics::directory($project);
             $files = glob("$directory/*.json") ?: [];
-            $state = implode('|', array_map(static fn (string $f) => $f . ':' . @filesize($f) . ':' . @filemtime($f), $files));
+            // By content: a rewrite within the same second with the same size is a change too
+            $state = implode('|', array_map(static fn (string $f) => $f . ':' . md5((string) @file_get_contents($f)), $files));
             if (($this->lists[$project] ?? '') === $state) {
                 continue;
             }
