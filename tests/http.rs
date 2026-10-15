@@ -411,6 +411,38 @@ fn streaming_sse_und_websockets() {
 }
 
 #[test]
+fn clients_that_hold_the_server_are_limited() {
+    let port = 18_139;
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args(["--request-timeout", "0.5", "--max-connections", "3", "tests/fixtures/streams.php"])
+            .env("PORT", port.to_string())
+            .spawn()
+            .unwrap(),
+    );
+    get(port, "/");
+
+    // A client that stops reading: once the buffers are full, the write stalls and tenma disconnects
+    let started = Instant::now();
+    let mut stuck = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(stuck, "GET /forever?kb=64 HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    while !get(port, "/closed").ends_with("closed") {
+        assert!(started.elapsed() < Duration::from_secs(5), "the writer still waits for a client that does not read");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(stuck);
+
+    // Three connections are the limit: the fourth gets 503 at once, and once one closes there is room again
+    let idle: Vec<TcpStream> = (0..3).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
+    std::thread::sleep(Duration::from_millis(100));
+    let refused = get(port, "/");
+    assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
+    drop(idle);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(get(port, "/").ends_with("ok"));
+}
+
+#[test]
 fn postgres_and_redis_async() {
     let port = 18_090;
     let user = std::env::var("USER").unwrap();

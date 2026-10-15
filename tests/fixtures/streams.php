@@ -21,10 +21,10 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
                 $events->send("two\nlines");
             });
         case '/forever':
-            return Response::stream(function (Stream $out) use (&$closed) {
+            return Response::stream(function (Stream $out) use (&$closed, $request) {
                 try {
                     while (true) {
-                        $out->write(str_repeat('x', 1024));
+                        $out->write(str_repeat('x', 1024 * (int) ($request->query['kb'] ?? 1)));
                         Tenma::sleep(0.01);
                     }
                 } finally {

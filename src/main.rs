@@ -42,7 +42,7 @@ use tokio::task::LocalSet;
 const STDLIB: &str = include_str!("../stdlib/tenma.php");
 /// Prints the public API as stubs; only evaluated for `tenma --stubs`.
 const STUBS: &str = include_str!("../stdlib/stubs.php");
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -74,8 +74,11 @@ struct Options {
     max_body: usize,
     /// After this many requests a worker restarts its interpreter, against slow leaks.
     max_requests: Option<u64>,
-    /// How long the headers and body of a request may take to arrive (against Slowloris).
+    /// How long the headers and body of a request may take to arrive (against Slowloris), and how
+    /// long a write to a client may stall.
     request_timeout: Duration,
+    /// Open connections per worker; more get 503.
+    max_connections: usize,
     /// Reload when a file the script loaded changes.
     watch: bool,
     /// How long running requests may take to finish on shutdown or restart.
@@ -184,7 +187,17 @@ fn stubs() -> ExitCode {
 /// Options for tenma, then the script; everything after it belongs to the script ($argv), as with `php script.php …`.
 fn parse_args() -> Result<(Vec<String>, Options), String> {
     let mut args = std::env::args().skip(1);
-    let mut options = Options { workers: 1, max_body: 10 << 20, max_requests: None, request_timeout: Duration::from_secs(30), watch: false, drain: DRAIN, inspect: None, inspect_brk: false };
+    let mut options = Options {
+        workers: 1,
+        max_body: 10 << 20,
+        max_requests: None,
+        request_timeout: Duration::from_secs(30),
+        max_connections: 1024,
+        watch: false,
+        drain: DRAIN,
+        inspect: None,
+        inspect_brk: false,
+    };
     let mut argv = Vec::new();
     let mut pool = None;
     while let Some(arg) = args.next() {
@@ -227,6 +240,10 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
             "--request-timeout" => {
                 let seconds = value("--request-timeout")?;
                 options.request_timeout = seconds.parse::<f64>().ok().filter(|&s| s > 0.0).map(Duration::from_secs_f64).ok_or(format!("--request-timeout {seconds}: not a number above 0"))?;
+            }
+            "--max-connections" => {
+                let number = value("--max-connections")?;
+                options.max_connections = number.parse().ok().filter(|&count| count > 0).ok_or(format!("--max-connections {number}: not a number above 0"))?;
             }
             "--server-name" => php::set_server_name(&value("--server-name")?)?,
             "--pubsub" => pubsub::use_redis(&value("--pubsub")?)?,
@@ -660,6 +677,7 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
     let local = LocalSet::new();
     // Each connection holds a receiver; drain sends the stop signal and waits until all are gone
     let (drain, drained) = tokio::sync::watch::channel(());
+    let open = Rc::new(Cell::new(0));
     let restart = RESTART.with(Rc::clone);
     // A restart signal from the previous interpreter (e.g. a fatal error and max-requests at once)
     // does not apply to this one; a change does, it may have come while the script was loading
@@ -685,6 +703,13 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
                     let Some((port, stream)) = connection else {
                         break Stop::Closed;
                     };
+                    // Every connection holds memory and a file descriptor: beyond the limit a short answer
+                    if open.get() >= options.max_connections {
+                        if let Some(refused) = refuse(stream, options, "Too many connections, try again later.\n") {
+                            tokio::task::spawn_local(refused);
+                        }
+                        continue;
+                    }
                     let (Ok(remote), Ok(local)) = (stream.peer_addr(), stream.local_addr()) else {
                         continue;
                     };
@@ -695,11 +720,13 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
                     let peers = (remote, local);
                     let service = service_fn(move |request| respond(handler, mounts.clone(), request, options, peers));
                     let mut drained = drained.clone();
+                    let open = Open::count(&open);
                     tokio::task::spawn_local(async move {
+                        let _open = open;
                         let connection = http1::Builder::new()
                             .timer(hyper_util::rt::TokioTimer::new())
                             .header_read_timeout(options.request_timeout)
-                            .serve_connection(TokioIo::new(stream), service)
+                            .serve_connection(TokioIo::new(WriteTimeout::new(stream, options.request_timeout)), service)
                             .with_upgrades();
                         tokio::pin!(connection);
                         tokio::select! {
@@ -756,6 +783,81 @@ async fn accept(port: u16, workers: Vec<UnboundedSender<Connection>>) {
             let _ = workers[next].send((port, stream));
             next = (next + 1) % workers.len();
         }
+    }
+}
+
+/// Counts a worker's open connections while it lives.
+struct Open(Rc<Cell<usize>>);
+
+impl Open {
+    fn count(open: &Rc<Cell<usize>>) -> Self {
+        open.set(open.get() + 1);
+        Self(Rc::clone(open))
+    }
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
+
+/// A connection whose writes may stall at most $limit: a client that stops reading is disconnected
+/// instead of holding its task, its buffers and a stream writer that waits for room forever.
+struct WriteTimeout {
+    stream: TcpStream,
+    limit: Duration,
+    stalled: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl WriteTimeout {
+    fn new(stream: TcpStream, limit: Duration) -> Self {
+        Self { stream, limit, stalled: None }
+    }
+
+    /// Pending starts the clock, or fails once it ran out; any progress stops it.
+    fn check<T>(&mut self, context: &mut std::task::Context<'_>, poll: std::task::Poll<std::io::Result<T>>) -> std::task::Poll<std::io::Result<T>> {
+        if poll.is_ready() {
+            self.stalled = None;
+            return poll;
+        }
+        let limit = self.limit;
+        let stalled = self.stalled.get_or_insert_with(|| Box::pin(tokio::time::sleep(limit)));
+        match stalled.as_mut().poll(context) {
+            std::task::Poll::Ready(()) => std::task::Poll::Ready(Err(std::io::ErrorKind::TimedOut.into())),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for WriteTimeout {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>, buffer: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_read(context, buffer)
+    }
+}
+
+impl tokio::io::AsyncWrite for WriteTimeout {
+    fn poll_write(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>, data: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+        let poll = std::pin::Pin::new(&mut self.stream).poll_write(context, data);
+        self.check(context, poll)
+    }
+
+    fn poll_write_vectored(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>, data: &[std::io::IoSlice<'_>]) -> std::task::Poll<std::io::Result<usize>> {
+        let poll = std::pin::Pin::new(&mut self.stream).poll_write_vectored(context, data);
+        self.check(context, poll)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        let poll = std::pin::Pin::new(&mut self.stream).poll_flush(context);
+        self.check(context, poll)
+    }
+
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_shutdown(context)
     }
 }
 

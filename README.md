@@ -148,9 +148,10 @@ tenma tasks.php import --force   # everything after the script ends up in $argv,
 tenma -d memory_limit=512M -c prod.ini app.php   # PHP settings as with php -d and php -c
 tenma --server-name shop.example app.php         # $_SERVER['SERVER_NAME'] like server_name in nginx
 tenma --request-timeout 10 app.php               # headers and body must arrive within 10 s (default 30)
+tenma --max-connections 4096 app.php             # open connections per worker, default 1024, 503 above that
 ```
 
-Limits: a request's headers and body must arrive within `--request-timeout` (otherwise disconnect or 408, against Slowloris); bodies and WebSocket messages are at most `--max-body` in size. A WebSocket client may send at most 256 messages that PHP has not read yet, then tenma disconnects it. `Tenma::fetch()` has a `timeout` (default 30 s); connections to Postgres, Redis and via `Tenma::fetch()` must be established within 10 s.
+Limits: a request's headers and body must arrive within `--request-timeout` (otherwise disconnect or 408, against Slowloris), and a write to a client may stall no longer than that: a client that stops reading is disconnected, and a stream writer waiting for it gets `ConnectionClosed`. Each worker holds at most `--max-connections` open connections; more get a 503 right away. Bodies and WebSocket messages are at most `--max-body` in size. A WebSocket client may send at most 256 messages that PHP has not read yet, then tenma disconnects it. `Tenma::fetch()` has a `timeout` (default 30 s); connections to Postgres, Redis and via `Tenma::fetch()` must be established within 10 s.
 
 Robust: a fatal PHP error (out of memory, stack overflow) restarts only the interpreter of the affected worker and runs the script there again; the request gets a 500. Ctrl+C and SIGTERM stop accepting connections and let running requests finish for up to 10 seconds. PHP's own signal handlers are disabled; signals belong to Rust.
 
