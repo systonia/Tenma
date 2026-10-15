@@ -252,6 +252,8 @@ fn session(stream: TcpStream) {
     detach();
 }
 
+const MAX_MESSAGE: usize = 16 << 20;
+
 /// The next message: headers up to an empty line, then Content-Length bytes of JSON.
 fn read_message(reader: &mut impl BufRead) -> Option<Value> {
     let mut length = None;
@@ -270,7 +272,8 @@ fn read_message(reader: &mut impl BufRead) -> Option<Value> {
             length = value.trim().parse().ok();
         }
     }
-    let mut body = vec![0; length?];
+    // An editor's messages are small: a length beyond this is a broken or hostile client
+    let mut body = vec![0; length.filter(|&length| length <= MAX_MESSAGE)?];
     reader.read_exact(&mut body).ok()?;
     serde_json::from_slice(&body).ok()
 }

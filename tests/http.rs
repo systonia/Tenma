@@ -1261,6 +1261,22 @@ fn inspect_without_an_editor_never_stops() {
     let started = Instant::now();
     assert!(get(port, "/throw").starts_with("HTTP/1.1 500"));
     assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+
+    // A message length nobody could send: the session ends, tenma and the next editor carry on
+    for length in ["18446744073709551615", "4611686018427387904"] {
+        let mut stream = TcpStream::connect(("127.0.0.1", debugger)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.write_all(format!("Content-Length: {length}\r\n\r\n").as_bytes()).unwrap();
+        let _ = stream.read_to_end(&mut Vec::new());
+        // With a timeout: a worker stopped for a debugger that is gone would never answer
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.write_all(b"GET /throw HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        assert!(response.starts_with("HTTP/1.1 500"), "after Content-Length {length}: {response:?}");
+    }
+    Dap::start(debugger);
 }
 
 #[test]
