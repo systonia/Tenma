@@ -1221,6 +1221,7 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
     let list = directory.join(".tenma/diagnostics/app.checks.json");
     let publish = "<?php\nTenma::diagnostics('checks', [['file' => __FILE__, 'line' => 2, 'message' => 'run one', 'severity' => 'warning']]);\necho 'run one' . (Tenma::reloadedBy() === null ? '' : ' again') . \"\\n\";";
     std::fs::write(&script, publish).unwrap();
+    std::fs::write(directory.join("bin/tenma.dev.php"), "<?php\nreturn [new Tenma\\Hook(name: 'check', inputs: [], run: fn () => Tenma::diagnostics('hooks', [['file' => __FILE__, 'line' => 1, 'message' => 'from a hook']]))];\n").unwrap();
 
     // Without --watch nobody shows it: nothing is written
     let plain = Command::new(env!("CARGO_BIN_EXE_tenma")).arg(&script).output().unwrap();
@@ -1239,6 +1240,15 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
     assert_eq!(std::fs::read_to_string(directory.join(".tenma/.gitignore")).unwrap(), "*\n");
     let line = errors.find(|line| line.as_deref().map_or(true, |line| line.contains("run one"))).unwrap().unwrap();
     assert_eq!(line, format!("{}:2:1: warning: run one", script.canonicalize().unwrap().display()));
+    // tenma.dev.php's hooks run without a script of their own: their lists go to the same project
+    let hooks = directory.join(".tenma/diagnostics/dev.hooks.json");
+    for _ in 0..50 {
+        if hooks.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(std::fs::read_to_string(&hooks).unwrap().contains("from a hook"));
 
     // Fixed: the reload clears it without the script taking it back
     std::thread::sleep(Duration::from_millis(200));

@@ -1057,8 +1057,15 @@ namespace Tenma\Internal {
         if (get_cfg_var('tenma.watch') !== '1') {
             return;
         }
-        $script = (string) ($_SERVER['SCRIPT_FILENAME'] ?? getcwd());
-        $directory = Diagnostics::directory(Diagnostics::project(dirname(realpath($script) ?: $script)));
+        // The hooks run without a script of their own (eval): their project is the one of tenma.dev.php, which is
+        // also where --watch clears their lists
+        $script = $_SERVER['SCRIPT_FILENAME'] ?? null;
+        $from = match (true) {
+            Diagnostics::$group === 'dev' => Dev::$directory,
+            is_string($script) => dirname(realpath($script) ?: $script),
+            default => (string) getcwd(),
+        };
+        $directory = Diagnostics::directory(Diagnostics::project($from));
         if (!is_dir($directory)) {
             @mkdir($directory, 0777, true);
             // Nothing of it belongs in the repository
