@@ -732,7 +732,7 @@ fn exit_status_is_not_stale() {
 }
 
 #[test]
-fn a_big_form_field_is_not_copied_while_parsed() {
+fn forms_at_their_limits() {
     let port = 18_134;
     // 8 MB in one text field: the parser once needed ten times that, now it fits next to the body
     let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["-d", "memory_limit=48M", "tests/fixtures/request_response.php"]).env("PORT", port.to_string()).spawn().unwrap());
@@ -743,6 +743,13 @@ fn a_big_form_field_is_not_copied_while_parsed() {
         &format!("POST /form-size HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()),
     );
     assert!(response.contains(r#""blob": 8388608"#), "{response}");
+
+    // Exactly as many parts as allowed: the closing boundary is not one of them
+    let form = |parts: usize| (1..=parts).map(|i| format!("--{boundary}\r\nContent-Disposition: form-data; name=\"f{i}\"\r\n\r\n{i}\r\n")).collect::<String>() + &format!("--{boundary}--\r\n");
+    let send = |body: String| request(port, &format!("POST /form-size HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()));
+    let full = send(form(1000));
+    assert!(full.contains(r#""f1000": 4"#), "{}", &full[..full.len().min(300)]);
+    assert!(send(form(1001)).starts_with("HTTP/1.1 500"));
 }
 
 #[test]

@@ -1504,7 +1504,8 @@ final class Multipart
         $parts = preg_split('/\r?\n--' . preg_quote($boundary, '/') . '/', "\n" . $body, self::MAX_PARTS + 2);
         // Nothing useful comes before the first boundary; nor after the last one (--)
         array_shift($parts);
-        if (count($parts) > self::MAX_PARTS) {
+        // The closing boundary (--) is no part of its own
+        if (count($parts) > self::MAX_PARTS && !(count($parts) === self::MAX_PARTS + 1 && str_starts_with(end($parts), '--'))) {
             throw new \RuntimeException('Too many parts in the form');
         }
         $fields = [];
