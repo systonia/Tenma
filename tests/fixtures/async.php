@@ -6,10 +6,12 @@ use Tenma\Http\Request;
 $port = (int) getenv('PORT');
 // An interval that runs in the background next to the requests
 $ticks = 0;
+// What requests left behind: their tasks, timers and subscriptions must end with the response
+$left = ['interval' => 0, 'message' => 0, 'task' => 0, 'detached' => 0];
 Tenma::setInterval(function () use (&$ticks) {
     $ticks++;
 }, 0.05);
-Tenma::serve($port, function (Request $request) use ($port, &$ticks): string {
+Tenma::serve($port, function (Request $request) use ($port, &$ticks, &$left): string {
     switch ($request->path) {
         case '/slow':
             Tenma::sleep(0.5);
@@ -28,6 +30,16 @@ Tenma::serve($port, function (Request $request) use ($port, &$ticks): string {
             }
         case '/ticks':
             return "ticks $ticks\n";
+        case '/leave-behind':
+            Tenma::setInterval(function () use (&$left) { $left['interval']++; }, 0.01);
+            Tenma::subscribe('left', function () use (&$left) { $left['message']++; });
+            Tenma::async(function () use (&$left) { Tenma::sleep(0.05); $left['task']++; });
+            Tenma::detach(function () use (&$left) { Tenma::sleep(0.05); $left['detached']++; });
+            return "started\n";
+        case '/left':
+            Tenma::publish('left', 'anyone?');
+            Tenma::sleep(0.1);
+            return json_encode($left) . "\n";
         case '/all':
             // Three waits of 0.3 s each at the same time, named results like Promise.all
             $slow = fn (string $name) => function () use ($name) {

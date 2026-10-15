@@ -170,8 +170,8 @@ namespace Tenma\Internal {
     }
 
     /**
-     * A stream or WebSocket is over (the client left or the handler returned): the request's timers and
-     * other tasks end with the connection, as they do when a client leaves before a normal response.
+     * The response is out, or a stream or WebSocket is over: the request's tasks, timers and
+     * subscriptions end with it, as they do when a client leaves before the response.
      */
     function connectionEnded(int $request): void
     {
@@ -1814,34 +1814,44 @@ function serve(int $port, callable $handler, string|array|null $static = null): 
         // cancelled together with all tasks it starts
         \Tenma\Internal\Current::$request = $rid;
         \Tenma\Task::start(static function () use ($handler, $raw, $rid): void {
-            $request = new Request($raw);
-            // An exception in the handler ends only this request, not the server
             try {
-                $response = $handler($request);
-            } catch (\Tenma\Cancelled) {
-                // Cancelled: after exit() or without a client the request is already answered, then this does nothing.
-                // Otherwise (a cancelled task the handler was waiting for) the client gets 500
-                \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
-                return;
-            } catch (\Throwable $error) {
-                error_log('Uncaught ' . $error);
-                $response = new Response("Internal Server Error\n", 500);
-            }
-            // A wrong response too (for example a forgotten return) ends only this request
-            try {
-                match (true) {
-                    $response instanceof StreamedResponse => runStream($rid, $response),
-                    $response instanceof WebSocketResponse => runWebSocket($rid, $request, $response),
-                    $response instanceof Response => \tenma_respond($rid, [$response->status, headerLines($response->headers), $response->body]),
-                    is_string($response) => \tenma_respond($rid, [200, headerLines((new Response())->headers), $response]),
-                    default => throw new \TypeError('A Tenma::serve() handler must return Response, StreamedResponse, WebSocketResponse or string, not ' . get_debug_type($response)),
-                };
-            } catch (\Throwable $error) {
-                error_log('Uncaught ' . $error);
-                \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
+                respond($rid, new Request($raw), $handler);
+            } finally {
+                // The response is out: what the request started ends with it, only detach() outlives it
+                \Tenma\Internal\connectionEnded($rid);
             }
         }, false, null, $raw['method'] . ' ' . $raw['uri']);
     }, $mounts);
+}
+
+/** Runs the handler and sends what it returns: a response, a stream or a WebSocket. */
+function respond(int $rid, Request $request, callable $handler): void
+{
+    // An exception in the handler ends only this request, not the server
+    try {
+        $response = $handler($request);
+    } catch (\Tenma\Cancelled) {
+        // Cancelled: after exit() or without a client the request is already answered, then this does nothing.
+        // Otherwise (a cancelled task the handler was waiting for) the client gets 500
+        \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
+        return;
+    } catch (\Throwable $error) {
+        error_log('Uncaught ' . $error);
+        $response = new Response("Internal Server Error\n", 500);
+    }
+    // A wrong response too (for example a forgotten return) ends only this request
+    try {
+        match (true) {
+            $response instanceof StreamedResponse => runStream($rid, $response),
+            $response instanceof WebSocketResponse => runWebSocket($rid, $request, $response),
+            $response instanceof Response => \tenma_respond($rid, [$response->status, headerLines($response->headers), $response->body]),
+            is_string($response) => \tenma_respond($rid, [200, headerLines((new Response())->headers), $response]),
+            default => throw new \TypeError('A Tenma::serve() handler must return Response, StreamedResponse, WebSocketResponse or string, not ' . get_debug_type($response)),
+        };
+    } catch (\Throwable $error) {
+        error_log('Uncaught ' . $error);
+        \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
+    }
 }
 
 function runStream(int $rid, StreamedResponse $response): void
@@ -1857,7 +1867,6 @@ function runStream(int $rid, StreamedResponse $response): void
         error_log('Uncaught ' . $error);
     } finally {
         \tenma_stream_end($rid);
-        \Tenma\Internal\connectionEnded($rid);
     }
 }
 
@@ -1879,7 +1888,6 @@ function runWebSocket(int $rid, Request $request, WebSocketResponse $response): 
         error_log('Uncaught ' . $error);
     } finally {
         $socket->close();
-        \Tenma\Internal\connectionEnded($rid);
     }
 }
 

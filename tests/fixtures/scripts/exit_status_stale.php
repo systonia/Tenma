@@ -4,6 +4,10 @@ Tenma::serve((int) getenv('PORT'), function (Tenma\Http\Request $request) {
     if ($request->path === '/exit5') {
         exit(5);
     }
-    Tenma::setTimeout(fn () => die("bye\n"), 0.01);
+    // Background work that outlives the response; die() there ends tenma
+    Tenma::detach(function () {
+        Tenma::sleep(0.01);
+        die("bye\n");
+    });
     return "ok\n";
 });

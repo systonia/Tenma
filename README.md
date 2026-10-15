@@ -19,7 +19,7 @@ Tenma::serve(8080, function () {
 });
 ```
 
-Several things at once, like `Promise.all` in Node: `Tenma::all()` starts each function in its own fiber and returns the results under the same keys. `Tenma::async()` starts one and returns a `Task` whose `await()` later fetches the result or throws the error. If a function in `all()` fails, `all()` cancels the others (`Tenma\Cancelled` is thrown where they are currently waiting, and their `finally` and `catch` blocks run), waits until they have cleaned up, and then throws the first error: nothing is left running in the background. `$task->cancel()` cancels a specific task. Tasks belong to their request; if the request ends with `exit()`, its tasks are cancelled.
+Several things at once, like `Promise.all` in Node: `Tenma::all()` starts each function in its own fiber and returns the results under the same keys. `Tenma::async()` starts one and returns a `Task` whose `await()` later fetches the result or throws the error. If a function in `all()` fails, `all()` cancels the others (`Tenma\Cancelled` is thrown where they are currently waiting, and their `finally` and `catch` blocks run), waits until they have cleaned up, and then throws the first error: nothing is left running in the background. `$task->cancel()` cancels a specific task. Tasks, timers and subscriptions belong to their request: when the response is out (for a stream or WebSocket, when it ends), when the client leaves or when the request calls `exit()`, they are cancelled. Work that has to outlive the response goes in `Tenma::detach()`.
 
 ```php
 ['user' => $user, 'weather' => $weather] = Tenma::all(
