@@ -177,7 +177,12 @@ extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
 /// disconnected instead of filling memory, as for incoming messages.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> c_int {
-    let message = Message::text(String::from_utf8_lossy(bytes(text, len)).into_owned());
+    // Text if it is UTF-8, otherwise a binary frame: bytes arrive as they were sent
+    let data = bytes(text, len).to_vec();
+    let message = match String::from_utf8(data) {
+        Ok(text) => Message::text(text),
+        Err(error) => Message::binary(error.into_bytes()),
+    };
     let sent = SOCKETS.with_borrow(|sockets| sockets.get(&rid).is_some_and(|socket| socket.outgoing.try_send(message).is_ok()));
     if !sent {
         SOCKETS.with_borrow_mut(|sockets| sockets.remove(&rid));

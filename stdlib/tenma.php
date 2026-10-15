@@ -1934,7 +1934,10 @@ final class WebSocket
 {
     public function __construct(private readonly int $rid) {}
 
-    /** Waits for the next message without blocking the server; null when the client has closed. */
+    /**
+     * Waits for the next message without blocking the server; null when the client has closed. Text and binary
+     * messages both arrive as a string of their bytes.
+     */
     public function receive(): ?string
     {
         \Tenma\Internal\requireFiber();
@@ -1942,9 +1945,10 @@ final class WebSocket
         return $op === 0 ? null : \Tenma\Internal\await($op);
     }
 
-    public function send(string $text): void
+    /** Sends $data as a text message if it is valid UTF-8, otherwise as a binary one. */
+    public function send(string $data): void
     {
-        if (!\tenma_ws_send($this->rid, $text)) {
+        if (!\tenma_ws_send($this->rid, $data)) {
             throw new ConnectionClosed('The WebSocket is closed');
         }
     }

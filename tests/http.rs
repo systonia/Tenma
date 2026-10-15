@@ -375,6 +375,9 @@ fn streaming_sse_und_websockets() {
         socket.send(Message::text(word)).unwrap();
         assert_eq!(socket.read().unwrap(), Message::text(format!("echo: {word}")));
     }
+    // Bytes that are no UTF-8 come back unchanged, as a binary message
+    socket.send(Message::binary(vec![0xff, 0x00, 0xfe])).unwrap();
+    assert_eq!(socket.read().unwrap(), Message::binary(b"echo: \xff\x00\xfe".to_vec()));
     socket.close(None).unwrap();
     assert!(get(port, "/").ends_with("ok"));
 
