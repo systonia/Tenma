@@ -268,6 +268,8 @@ docker run -p 8080:8080 -v "$PWD:/app" tenma /app/index.php
 docker run --rm -e USER=root $(docker build -q --target build .) cargo test --release
 ```
 
+The image runs tenma as the unprivileged user `tenma` (uid 1000), so files the app writes into a mounted checkout belong to the usual first user of a Linux host; `--user "$(id -u)"` fits another one.
+
 A tag `v*` builds the binaries for macOS arm64 and Linux x64 and arm64 as a GitHub release, and the image as `ghcr.io/systonia/tenma` (`.github/workflows/build.yml`). The Linux binaries link Debian 13's libraries: on another distribution, use the image.
 
 Databases on one worker: one Postgres query per request about 25,000 requests per second (35,000 without the cleanup), at 200 concurrent requests with 10 connections; four Redis commands per request about 42,000.

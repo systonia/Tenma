@@ -30,6 +30,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/* /packages
 COPY --from=build /src/target/release/tenma /usr/local/bin/tenma
 COPY NOTICE LICENSE-MIT LICENSE-APACHE /usr/share/doc/tenma/
+# Not root: what the app writes into a mounted checkout belongs to uid 1000, the usual first user of
+# a Linux host. docker run --user root (or --user "$(id -u)") when that doesn't fit
+RUN useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin tenma
+USER tenma
 ENV PORT=8080
 EXPOSE 8080
 STOPSIGNAL SIGTERM
