@@ -1,0 +1,8 @@
+{
+    "name": "fixture/hints",
+    "extra": {
+        "tenma": {
+            "lsp": "Fixture\\Hints"
+        }
+    }
+}

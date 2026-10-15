@@ -1,0 +1,11 @@
+{
+    "packages": [
+        {
+            "name": "fixture/hints",
+            "install-path": "../fixture/hints",
+            "extra": {
+                "comment": "a copy from before its composer.json named the provider, as after a path repository changed"
+            }
+        }
+    ]
+}

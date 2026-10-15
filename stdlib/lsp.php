@@ -3,10 +3,11 @@
 // `$this` is bound to in a template. It runs next to that server (Intelephense, PHP Tools); the editor
 // merges the answers. Packages add their part through a Tenma\Lsp\Provider.
 //
-// Two processes: the server speaks LSP on stdin and stdout and keeps the open documents; a worker
-// (`tenma lsp --worker DIR`) loads the project's autoloader and its providers and answers by
-// reflection. PHP cannot load a changed class again, so a saved .php file ends the worker, and the
-// next question starts a new one.
+// The server speaks LSP on stdin and stdout and keeps the open documents. Each project (the nearest
+// directory with a composer.json above a file, so a workspace may hold several) gets a worker
+// (`tenma lsp --worker DIR`) that loads its autoloader and its providers and answers by reflection.
+// PHP cannot load a changed class again, so a saved .php file ends the workers, and the next
+// question starts new ones.
 
 namespace Tenma\Internal\Lsp;
 
@@ -17,20 +18,34 @@ const ANSWER_SECONDS = 5;
 
 function main(string $binary, array $args): void
 {
-    // Output of the project's code must not end up in the protocol
+    // Output of the project's code must not end up in the protocol, PHP's warnings and errors go to the
+    // editor's log; the embed SAPI would print them as output, which the buffer below swallows
+    ini_set('display_errors', 'stderr');
     ob_start(static fn (): string => '');
+    register_shutdown_function(static function (): void {
+        $error = error_get_last();
+        if ($error !== null && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+            log("ended by {$error['message']} in {$error['file']}:{$error['line']}");
+        }
+    });
     if (($args[0] ?? null) === '--worker') {
         work((string) ($args[1] ?? getcwd()));
         return;
     }
     $in = fopen('php://stdin', 'rb');
     $server = new Server($binary, fopen('php://stdout', 'wb'));
-    while (($message = read($in)) !== null) {
-        if (!$server->handle($message)) {
-            break;
+    try {
+        while (($message = read($in)) !== null) {
+            if (!$server->handle($message)) {
+                return;
+            }
         }
+        log('the editor closed the input');
+    } catch (\Throwable $e) {
+        log('ended by ' . $e::class . ': ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
+    } finally {
+        $server->stopWorkers();
     }
-    $server->stopWorker();
 }
 
 /** One LSP message (Content-Length framing), or null at the end of the input. */
@@ -119,9 +134,11 @@ final class Server
     /** @var array<string, string> uri => text of the open documents */
     private array $documents = [];
 
-    private ?Worker $worker = null;
+    /** @var array<string, Worker> project directory => its worker */
+    private array $workers = [];
 
-    private ?string $root = null;
+    /** @var array<string, ?string> directory => the project it belongs to */
+    private array $projects = [];
 
     /** @param resource $out */
     public function __construct(private readonly string $binary, private $out)
@@ -166,10 +183,12 @@ final class Server
         return true;
     }
 
-    public function stopWorker(): void
+    public function stopWorkers(): void
     {
-        $this->worker?->stop();
-        $this->worker = null;
+        foreach ($this->workers as $worker) {
+            $worker->stop();
+        }
+        $this->workers = [];
     }
 
     private function send(array $message): void
@@ -181,8 +200,6 @@ final class Server
 
     private function initialize(array $params): array
     {
-        $folder = $params['workspaceFolders'][0]['uri'] ?? $params['rootUri'] ?? null;
-        $this->root = is_string($folder) ? path($folder) : (is_string($params['rootPath'] ?? null) ? $params['rootPath'] : null);
         return [
             'capabilities' => [
                 // The whole text on every change: templates are small, and nothing can drift
@@ -195,17 +212,30 @@ final class Server
         ];
     }
 
-    private function ask(string $method, mixed ...$args): mixed
+    /** Asks the worker of the project $file belongs to; null outside a project. */
+    private function ask(string $method, string $file, mixed ...$args): mixed
     {
-        if ($this->root === null) {
+        $root = $this->project(dirname($file));
+        if ($root === null) {
             return null;
         }
-        $this->worker ??= new Worker($this->binary, $this->root);
-        $answer = $this->worker->ask($method, $args);
-        if (!$this->worker->alive()) {
-            $this->stopWorker();
+        $worker = $this->workers[$root] ??= new Worker($this->binary, $root);
+        $answer = $worker->ask($method, [$file, ...$args]);
+        if (!$worker->alive()) {
+            $worker->stop();
+            unset($this->workers[$root]);
         }
         return $answer;
+    }
+
+    /** The nearest directory with a composer.json, $directory included. */
+    private function project(string $directory): ?string
+    {
+        if (array_key_exists($directory, $this->projects)) {
+            return $this->projects[$directory];
+        }
+        $parent = dirname($directory);
+        return $this->projects[$directory] = is_file("$directory/composer.json") ? $directory : ($parent !== $directory ? $this->project($parent) : null);
     }
 
     private function open(string $uri, string $text): null
@@ -220,9 +250,9 @@ final class Server
         if ($text !== null) {
             $this->documents[$uri] = $text;
         }
-        // A class may have changed: only a new worker sees it
+        // A class may have changed, in this project or in one that uses it: only new workers see it
         if (str_ends_with($uri, '.php')) {
-            $this->stopWorker();
+            $this->stopWorkers();
             foreach (array_keys($this->documents) as $open) {
                 $this->diagnose($open);
             }
@@ -382,7 +412,8 @@ function work(string $root): void
 
 /**
  * The providers named in `extra.tenma.lsp` of the project's composer.json and of every installed
- * package.
+ * package. A package's own composer.json counts, not the copy in installed.json: a package from a
+ * path repository is a symlink whose composer.json may be newer than the last `composer update`.
  *
  * @return list<Provider>
  */
@@ -393,7 +424,8 @@ function providers(string $root): array
     $extras[] = $project['extra']['tenma']['lsp'] ?? null;
     $installed = json_decode((string) @file_get_contents("$root/vendor/composer/installed.json"), true);
     foreach ($installed['packages'] ?? (array_is_list((array) $installed) ? (array) $installed : []) as $package) {
-        $extras[] = $package['extra']['tenma']['lsp'] ?? null;
+        $own = is_string($package['install-path'] ?? null) ? json_decode((string) @file_get_contents("$root/vendor/composer/{$package['install-path']}/composer.json"), true) : null;
+        $extras[] = is_array($own) ? $own['extra']['tenma']['lsp'] ?? null : $package['extra']['tenma']['lsp'] ?? null;
     }
     $providers = [];
     foreach ($extras as $extra) {

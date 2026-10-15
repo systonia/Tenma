@@ -19,6 +19,7 @@ impl Drop for Lsp {
 }
 
 impl Lsp {
+    /// A server for a workspace: the projects are the directories with a composer.json in it.
     fn start(root: &std::path::Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("lsp").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
@@ -105,19 +106,22 @@ fn uri(path: &std::path::Path) -> String {
 
 /// A copy of the fixture project, for tests that change its files.
 fn project(name: &str) -> std::path::PathBuf {
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp");
     let target = std::env::temp_dir().join(format!("tenma-lsp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&target);
-    for directory in ["", "src", "vendor"] {
-        std::fs::create_dir_all(target.join(directory)).unwrap();
-        for entry in std::fs::read_dir(source.join(directory)).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_file() {
-                std::fs::copy(entry.path(), target.join(directory).join(entry.file_name())).unwrap();
-            }
+    copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp"), &target);
+    target.canonicalize().unwrap()
+}
+
+fn copy(source: &std::path::Path, target: &std::path::Path) {
+    std::fs::create_dir_all(target).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            copy(&entry.path(), &target.join(entry.file_name()));
+        } else {
+            std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
         }
     }
-    target.canonicalize().unwrap()
 }
 
 #[test]
@@ -185,6 +189,25 @@ fn a_saved_class_is_seen_after_the_save() {
     lsp.notify("textDocument/didSave", json!({ "textDocument": { "uri": uri(&page) } }));
     lsp.diagnostics();
     assert!(lsp.labels(&template, 0, 11).contains(&"subtitle".to_owned()));
+}
+
+#[test]
+fn each_file_belongs_to_the_nearest_project_with_its_packages() {
+    // A workspace above the project, as with several folders open: the first one is no project
+    let workspace = project("workspace");
+    let root = workspace.join("app");
+    copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp"), &root);
+    let template = root.join("page.tpl.php");
+    let mut lsp = Lsp::start(&workspace.join("src"));
+    lsp.open(&template, "<?= $this-> /* hints */");
+    let labels = lsp.labels(&template, 0, 11);
+    assert!(labels.contains(&"title".to_owned()), "{labels:?}");
+    // The package's own composer.json names its provider, though installed.json is older
+    assert!(labels.contains(&"from-package".to_owned()), "{labels:?}");
+    // Outside any project: nothing, and no error
+    let outside = std::env::temp_dir().join("tenma-lsp-no-project.php");
+    lsp.open(&outside, "<?php $this->");
+    assert!(lsp.labels(&outside, 0, 13).is_empty());
 }
 
 #[test]
