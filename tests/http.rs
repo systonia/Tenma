@@ -346,6 +346,13 @@ fn streaming_sse_und_websockets() {
     drop(forever);
     std::thread::sleep(Duration::from_millis(200));
     assert!(get(port, "/closed").ends_with("closed"));
+    // Also while the handler waits without writing
+    let mut quiet = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(quiet, "GET /quiet HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    quiet.read(&mut [0; 4096]).unwrap();
+    drop(quiet);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(get(port, "/quiet-closed").ends_with("closed"));
 
     // exit() in the stream: the client gets what was already written, and the connection ends
     let exited = get(port, "/exit-stream");

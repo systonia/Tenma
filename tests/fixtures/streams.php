@@ -4,8 +4,9 @@ use Tenma\Http\{EventStream, Request, Response, Stream, WebSocket};
 
 
 $closed = false;
+$quiet = false;
 $ticks = 0;
-Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$ticks) {
+Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$quiet, &$ticks) {
     switch ($request->path) {
         case '/stream':
             return Response::stream(function (Stream $out) {
@@ -50,6 +51,18 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
                 Tenma::sleep(0.01);
                 $request->path === '/ws-fatal' ? str_repeat('x', 512 * 1024 * 1024) : throw new RuntimeException('handler failed');
             });
+        case '/quiet':
+            // Waits for something that does not come (a rare event): the client leaving must end it anyway
+            return Response::events(function (EventStream $events) use (&$quiet) {
+                $events->comment('waiting');
+                try {
+                    Tenma::sleep(10);
+                } finally {
+                    $quiet = true;
+                }
+            });
+        case '/quiet-closed':
+            return $quiet ? 'closed' : 'open';
         case '/closed':
             return $closed ? 'closed' : 'open';
         case '/ws-ignore':

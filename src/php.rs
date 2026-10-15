@@ -352,14 +352,22 @@ impl std::future::Future for Pending {
 
 impl Drop for Pending {
     fn drop(&mut self) {
-        // Already answered; or the interpreter is broken; or the loop is over (shutdown after the
-        // deadline): then the cleanup in PHP could not start any more ops
-        if WAITING.with_borrow_mut(|waiting| waiting.remove(&self.rid)).is_none() || crate::broken() || !crate::ops::looping() {
-            return;
+        // Already answered: nothing to cancel
+        if WAITING.with_borrow_mut(|waiting| waiting.remove(&self.rid)).is_some() {
+            gone(self.rid);
         }
-        if unsafe { tenma_request_gone(self.rid) } < 0 {
-            crate::interpreter_broken();
-        }
+    }
+}
+
+/// The client left before the request was done: its tasks get Tenma\Cancelled. Not if the
+/// interpreter is broken or the loop is over (shutdown after the deadline): then the cleanup in PHP
+/// could not start any more ops.
+pub fn gone(rid: u64) {
+    if crate::broken() || !crate::ops::looping() {
+        return;
+    }
+    if unsafe { tenma_request_gone(rid) } < 0 {
+        crate::interpreter_broken();
     }
 }
 

@@ -40,12 +40,24 @@ pub struct ChannelBody {
     finished: Arc<AtomicBool>,
     /// Cut off and polled once more: hyper has flushed what came before, now the error may follow.
     flushed: bool,
+    /// The request of a PHP stream: dropped while PHP still writes, it learns that the client left.
+    rid: Option<u64>,
+}
+
+impl Drop for ChannelBody {
+    fn drop(&mut self) {
+        if let Some(rid) = self.rid
+            && STREAMS.with_borrow_mut(|streams| streams.remove(&rid)).is_some()
+        {
+            php::gone(rid);
+        }
+    }
 }
 
 impl ChannelBody {
     /// A body whose end is checked by its Content-Length, as for files.
     pub fn sized(chunks: mpsc::Receiver<Bytes>) -> Self {
-        Self { chunks, finished: Arc::new(AtomicBool::new(true)), flushed: false }
+        Self { chunks, finished: Arc::new(AtomicBool::new(true)), flushed: false, rid: None }
     }
 }
 
@@ -109,7 +121,7 @@ extern "C" fn tenma_rs_stream_start(rid: u64, status: u16, headers: *const u8, h
     let (sender, chunks) = mpsc::channel(STREAM_BUFFER);
     let finished = Arc::new(AtomicBool::new(false));
     let headers = php::parse_header_lines(bytes(headers, headers_len));
-    if !php::reply(rid, Reply::Stream { status, headers, body: ChannelBody { chunks, finished: Arc::clone(&finished), flushed: false } }) {
+    if !php::reply(rid, Reply::Stream { status, headers, body: ChannelBody { chunks, finished: Arc::clone(&finished), flushed: false, rid: Some(rid) } }) {
         return 0;
     }
     STREAMS.with_borrow_mut(|streams| streams.insert(rid, (sender, finished)));
