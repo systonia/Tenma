@@ -238,6 +238,8 @@ fn resume(step: Option<Step>) {
 }
 
 fn session(stream: TcpStream) {
+    // The worker writes its echo and events while holding CLIENT: an editor that stops reading
+    // (hung, a laptop asleep) must not stall it, nor the DAP thread waiting for the lock
     let Ok(writer) = stream.try_clone() else {
         return;
     };
@@ -253,6 +255,7 @@ fn session(stream: TcpStream) {
 }
 
 const MAX_MESSAGE: usize = 16 << 20;
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The next message: headers up to an empty line, then Content-Length bytes of JSON.
 fn read_message(reader: &mut impl BufRead) -> Option<Value> {
@@ -282,9 +285,35 @@ fn read_message(reader: &mut impl BufRead) -> Option<Value> {
 fn send(mut message: Value) {
     message["seq"] = json!(SEQ.fetch_add(1, Ordering::Relaxed));
     let body = message.to_string();
-    if let Some(client) = CLIENT.lock().unwrap().as_mut() {
-        let _ = write!(client, "Content-Length: {}\r\n\r\n{body}", body.len());
+    let mut client = CLIENT.lock().unwrap();
+    // Failed or timed out, perhaps halfway through a message: the session is over, its thread
+    // sees the closed socket and detaches
+    if let Some(stream) = client.as_mut()
+        && write_within(stream, format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).is_err()
+    {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        *client = None;
     }
+}
+
+/// Writes all of $data within WRITE_TIMEOUT, partial writes included: a socket timeout alone would
+/// start over with every partial write.
+fn write_within(stream: &mut TcpStream, mut data: &[u8]) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + WRITE_TIMEOUT;
+    while !data.is_empty() {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        stream.set_write_timeout(Some(left))?;
+        match stream.write(data) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(written) => data = &data[written..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn respond(request: &Value, body: Value) {

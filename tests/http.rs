@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 struct Server(Child);
@@ -1410,6 +1410,31 @@ fn inspect_without_an_editor_never_stops() {
     let _ = stream.read_to_string(&mut answer);
     assert_eq!(answer, "");
     Dap::start(debugger);
+}
+
+#[test]
+fn a_debugger_client_that_stops_reading_does_not_stall_the_worker() {
+    let (port, debugger) = (18_140, 19_240);
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([&format!("--inspect={debugger}"), "tests/fixtures/scripts/loud.php"])
+            .env("PORT", port.to_string())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    get(port, "/");
+    // Connected, but never reads: echo goes to it as output events until its buffers are full
+    let _silent = TcpStream::connect(("127.0.0.1", debugger)).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    for i in 0..30 {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        assert!(response.ends_with("ok\n"), "request {i}: {response:?}");
+    }
 }
 
 #[test]
