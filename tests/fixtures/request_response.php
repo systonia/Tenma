@@ -7,6 +7,9 @@ Tenma::serve((int) getenv('PORT'), function (Request $request): Response {
     switch ($request->path) {
         case '/cookies':
             return Response::json([$request->cookies(), $request->cookie('sid')]);
+        case '/form-size':
+            // A big text field must fit in memory_limit alongside the body, without copies of it
+            return Response::json(array_map(strlen(...), $request->form()));
         case '/form':
             $describe = fn (UploadedFile $file) => [$file->name, $file->type, $file->size(), $file->contents()];
             $files = array_map(fn ($entry) => is_array($entry) ? array_map($describe, $entry) : $describe($entry), $request->files());

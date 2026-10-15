@@ -1508,6 +1508,7 @@ final class Multipart
             throw new \RuntimeException('Too many parts in the form');
         }
         $fields = [];
+        $values = [];
         $paths = [];
         $uploads = [];
         foreach ($parts as $part) {
@@ -1527,7 +1528,8 @@ final class Multipart
             }
             $filename = $disposition['filename'] ?? null;
             if ($filename === null) {
-                $fields[] = self::encodeName($name) . '=' . rawurlencode($content);
+                $values[] = $content;
+                $fields[] = self::encodeName($name) . '=' . (count($values) - 1);
                 continue;
             }
             if ($filename === '') {
@@ -1538,10 +1540,13 @@ final class Multipart
             $uploads[] = new UploadedFile(basename(str_replace('\\', '/', $filename)), self::header($head, 'content-type') ?? 'application/octet-stream', $content);
             $paths[] = self::encodeName($name) . '=' . (count($uploads) - 1);
         }
-        // Fields and file names go through PHP's own parser: a[] appends, a[b] nests, a.b becomes
-        // a_b, later ones overwrite; for files it holds numbers first, then the files
+        // Names go through PHP's own parser: a[] appends, a[b] nests, a.b becomes a_b, later ones
+        // overwrite. It holds numbers first, then the values: a value never gets copied or encoded
         parse_str(implode('&', $fields), $parsed);
         parse_str(implode('&', $paths), $files);
+        array_walk_recursive($parsed, function (mixed &$index) use ($values): void {
+            $index = $values[(int) $index];
+        });
         array_walk_recursive($files, function (mixed &$index) use ($uploads): void {
             $index = $uploads[(int) $index];
         });

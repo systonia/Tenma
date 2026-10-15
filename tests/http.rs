@@ -732,6 +732,20 @@ fn exit_status_is_not_stale() {
 }
 
 #[test]
+fn a_big_form_field_is_not_copied_while_parsed() {
+    let port = 18_134;
+    // 8 MB in one text field: the parser once needed ten times that, now it fits next to the body
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["-d", "memory_limit=48M", "tests/fixtures/request_response.php"]).env("PORT", port.to_string()).spawn().unwrap());
+    let boundary = "tenmaboundary";
+    let body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"blob\"\r\n\r\n{}\r\n--{boundary}--\r\n", "x".repeat(8 << 20));
+    let response = request(
+        port,
+        &format!("POST /form-size HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()),
+    );
+    assert!(response.contains(r#""blob": 8388608"#), "{response}");
+}
+
+#[test]
 fn request_and_response_in_fiber_mode() {
     let port = 18_114;
     let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/request_response.php").env("PORT", port.to_string()).spawn().unwrap());
