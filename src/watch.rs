@@ -13,7 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, mpsc};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use notify::Watcher;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -28,7 +28,8 @@ const APP: u8 = 1;
 const DEV: u8 = 2;
 
 enum Message {
-    Loaded(PathBuf, u8),
+    /// A file PHP loaded, by whom, and the earliest time it may have been loaded.
+    Loaded(PathBuf, u8, SystemTime),
     /// Directories the hooks read, recursively or not, and the project with `.tenma-ignore`.
     Roots(Vec<(PathBuf, bool)>, PathBuf),
     Event(notify::Result<notify::Event>),
@@ -49,6 +50,8 @@ static HOOKS: OnceLock<tokio::sync::Mutex<UnboundedReceiver<Vec<(PathBuf, f64)>>
 thread_local! {
     /// How many of this interpreter's loaded files are already reported.
     static REPORTED: Cell<usize> = const { Cell::new(0) };
+    /// Since when the files not yet reported may have been loaded: the last report, or the start.
+    static SINCE: Cell<SystemTime> = const { Cell::new(UNIX_EPOCH) };
     static GROUP: Cell<u8> = const { Cell::new(APP) };
 }
 
@@ -61,20 +64,23 @@ unsafe extern "C" {
 extern "C" fn tenma_rs_included(path: *const u8, len: usize) {
     if let Some(watcher) = WATCHER.get() {
         let path = Path::new(std::ffi::OsStr::from_bytes(crate::php::bytes(path, len)));
-        let _ = watcher.send(Message::Loaded(path.to_path_buf(), GROUP.get()));
+        let _ = watcher.send(Message::Loaded(path.to_path_buf(), GROUP.get(), SINCE.get()));
     }
 }
 
 /// Reports the files PHP loaded since the last call. Cheap when nothing is new: compares a count.
 pub fn report() {
     if WATCHER.get().is_some() {
+        let now = SystemTime::now();
         REPORTED.set(unsafe { tenma_report_included(REPORTED.get()) });
+        SINCE.set(now);
     }
 }
 
 /// A new interpreter starts with nothing reported.
 pub fn forget() {
     REPORTED.set(0);
+    SINCE.set(SystemTime::now());
 }
 
 /// This thread runs tenma.dev.php: its files restart it, not the workers.
@@ -150,7 +156,7 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
             None => messages.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
         match message {
-            Ok(Message::Loaded(path, group)) => {
+            Ok(Message::Loaded(path, group, since)) => {
                 let groups = loaded.entry(path.clone()).or_insert(0);
                 if *groups & group != 0 {
                     continue;
@@ -162,7 +168,17 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                 {
                     let _ = watcher.watch(directory, notify::RecursiveMode::NonRecursive);
                 }
-                files.entry(path.clone()).or_insert_with(|| fingerprint(&path));
+                if let std::collections::hash_map::Entry::Vacant(entry) = files.entry(path.clone()) {
+                    // Reported only after the request that loaded it: saved since then, the worker may
+                    // run the old content, and the fingerprint now would already be the new one
+                    if std::fs::metadata(&path).and_then(|meta| meta.modified()).is_ok_and(|modified| modified >= since) {
+                        entry.insert(None);
+                        candidates.insert(path);
+                        wait_for_more(&mut settle);
+                    } else {
+                        entry.insert(fingerprint(&path));
+                    }
+                }
             }
             Ok(Message::Roots(new, project)) => {
                 // A changed .tenma-ignore reloads the hooks, like a file tenma.dev.php loaded
@@ -193,9 +209,7 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                 for path in event.paths {
                     if let Some(path) = relevant(&loaded, &roots, &ignore, path) {
                         candidates.insert(path);
-                        let now = Instant::now();
-                        let since = settle.map_or(now, |(since, _)| since);
-                        settle = Some((since, (now + SETTLE).min(since + MAX_SETTLE)));
+                        wait_for_more(&mut settle);
                     }
                 }
             }
@@ -233,6 +247,13 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
     }
+}
+
+/// Something to compare came: wait SETTLE for more, at most MAX_SETTLE since the first.
+fn wait_for_more(settle: &mut Option<(Instant, Instant)>) {
+    let now = Instant::now();
+    let since = settle.map_or(now, |(since, _)| since);
+    *settle = Some((since, (now + SETTLE).min(since + MAX_SETTLE)));
 }
 
 fn below(roots: &[(PathBuf, bool)], path: &Path) -> bool {

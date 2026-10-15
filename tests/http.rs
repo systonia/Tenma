@@ -1112,6 +1112,33 @@ fn watch_reloads_on_changes() {
 }
 
 #[test]
+fn watch_reloads_a_file_saved_while_the_request_that_loaded_it_ran() {
+    let port = 18_150;
+    let directory = scratch("watch-slow");
+    let app = directory.join("app.php");
+    let lazy = directory.join("lazy.php");
+    std::fs::write(
+        &app,
+        format!("<?php\nTenma::serve({port}, function ($request) {{\n    if ($request->path === '/slow') {{ require_once __DIR__ . '/lazy.php'; Tenma::sleep(0.5); }}\n    return function_exists('lazy') ? lazy() : \"none\\n\";\n}});\n"),
+    )
+    .unwrap();
+    std::fs::write(&lazy, "<?php function lazy() { return \"lazy one\\n\"; }").unwrap();
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("--watch").arg(&app).spawn().unwrap());
+    assert!(get(port, "/").ends_with("none\n"));
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Saved after the request loaded it, before the request ended and reported it
+    let slow = std::thread::spawn(move || get(port, "/slow"));
+    std::thread::sleep(Duration::from_millis(200));
+    std::fs::write(&lazy, "<?php function lazy() { return \"lazy two\\n\"; }").unwrap();
+    assert!(slow.join().unwrap().ends_with("lazy one\n"));
+    // The worker still has the old code: it must reload, and the next load gets the new one
+    let response = eventually(port, "/slow", |response| response.ends_with("lazy two\n"));
+    assert!(response.ends_with("lazy two\n"), "{response}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn watch_reruns_scripts_without_servers() {
     use std::io::BufRead;
     let directory = scratch("watch-script");
