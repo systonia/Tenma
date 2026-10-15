@@ -2310,6 +2310,15 @@ namespace {
         }
 
         /**
+         * Under --watch: the file whose change made the script run again, null on the first run and without
+         * --watch. A framework can tell from it whether only a part of the app changed.
+         */
+        public static function reloadedBy(): ?string
+        {
+            return \tenma_reloaded_by();
+        }
+
+        /**
          * Replaces the problems $source reports: the editor shows them at their line (through `tenma lsp`), and new
          * ones go to stderr as `path:line:column: error: message`, the form problem matchers and quickfix read. An
          * empty list clears them. Only under --watch, which also clears the script's lists when it reloads it;

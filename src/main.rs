@@ -412,6 +412,7 @@ fn run(argv: &[String], options: Options) -> u8 {
                     if let Some(path) = batch.app {
                         eprintln!("tenma: {} changed, reloading", shown(&path));
                         watch::clear_diagnostics(&script, "app");
+                        watch::reloaded_by(&path);
                         for change in &changed {
                             change.notify_one();
                         }

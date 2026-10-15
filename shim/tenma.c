@@ -85,6 +85,8 @@ extern uint64_t tenma_rs_fs(const char *op, size_t op_len, const char *path, siz
 extern void tenma_rs_exit(int status);
 /** tenma --watch: a file PHP loaded, see tenma_report_included. */
 extern void tenma_rs_included(const char *path, size_t len);
+/** tenma --watch: copies the path of the change behind the last reload into buffer, its length; SIZE_MAX for none. */
+extern size_t tenma_rs_reloaded_by(char *buffer, size_t capacity);
 /** tenma --inspect: a statement is about to run, see inspect_statement. */
 extern void tenma_rs_statement(const char *file, size_t file_len, uint32_t line, uintptr_t frame, uintptr_t fiber);
 /** tenma --inspect: a function is about to return, at its closing brace on `line`. */
@@ -334,6 +336,11 @@ ZEND_END_ARG_INFO()
 PHP_FUNCTION(tenma_op_dev);
 PHP_FUNCTION(tenma_debugger);
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_reloaded_by, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(tenma_reloaded_by);
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_pubsub, 0, 4, IS_LONG, 0)
     ZEND_ARG_TYPE_INFO(0, op, IS_STRING, 0)
     ZEND_ARG_TYPE_INFO(0, id, IS_LONG, 0)
@@ -375,6 +382,7 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE(tenma_op_dev, arginfo_tenma_op_dev)
     ZEND_FE(tenma_pubsub, arginfo_tenma_pubsub)
     ZEND_FE(tenma_debugger, arginfo_tenma_shutdown)
+    ZEND_FE(tenma_reloaded_by, arginfo_tenma_reloaded_by)
     ZEND_FE(tenma_classic_begin, arginfo_tenma_shutdown)
     ZEND_FE(tenma_take_output, arginfo_tenma_take_output)
     ZEND_FE_END
@@ -1420,6 +1428,16 @@ char *tenma_inspect_set_child(uint32_t reference, const char *name, size_t name_
 
 /** Tenma::debugger(): stops here if a debugger is connected, like `debugger;` in JavaScript. */
 extern void tenma_rs_debugger(uintptr_t fiber);
+
+PHP_FUNCTION(tenma_reloaded_by) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    char buffer[4096];
+    size_t len = tenma_rs_reloaded_by(buffer, sizeof buffer);
+    if (len > sizeof buffer) {
+        RETURN_NULL();
+    }
+    RETURN_STRINGL(buffer, len);
+}
 
 PHP_FUNCTION(tenma_debugger) {
     ZEND_PARSE_PARAMETERS_NONE();

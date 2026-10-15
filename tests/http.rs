@@ -1212,14 +1212,14 @@ fn watch_reruns_scripts_without_servers() {
 }
 
 #[test]
-fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload() {
+fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_script_learns_about() {
     use std::io::BufRead;
     let directory = scratch("diagnostics");
     std::fs::write(directory.join("composer.json"), "{}").unwrap();
     std::fs::create_dir(directory.join("bin")).unwrap();
     let script = directory.join("bin/script.php");
     let list = directory.join(".tenma/diagnostics/app.checks.json");
-    let publish = "<?php\nTenma::diagnostics('checks', [['file' => __FILE__, 'line' => 2, 'message' => 'run one', 'severity' => 'warning']]);\necho \"run one\\n\";";
+    let publish = "<?php\nTenma::diagnostics('checks', [['file' => __FILE__, 'line' => 2, 'message' => 'run one', 'severity' => 'warning']]);\necho 'run one' . (Tenma::reloadedBy() === null ? '' : ' again') . \"\\n\";";
     std::fs::write(&script, publish).unwrap();
 
     // Without --watch nobody shows it: nothing is written
@@ -1242,8 +1242,9 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload() {
 
     // Fixed: the reload clears it without the script taking it back
     std::thread::sleep(Duration::from_millis(200));
-    std::fs::write(&script, "<?php echo \"run two\\n\";").unwrap();
-    assert_eq!(lines.find(|line| line.as_deref().map_or(true, |line| line != "run one")).unwrap().unwrap(), "run two");
+    // and the script learns what changed
+    std::fs::write(&script, "<?php echo 'run two by ' . basename(Tenma::reloadedBy()) . \"\\n\";").unwrap();
+    assert_eq!(lines.find(|line| line.as_deref().map_or(true, |line| line != "run one")).unwrap().unwrap(), "run two by script.php");
     assert!(!list.exists());
     let _ = std::fs::remove_dir_all(directory);
 }

@@ -114,6 +114,29 @@ pub fn configure() {
     unsafe { tenma_set_watch() }
 }
 
+/// The change behind the last reload of the script, for Tenma::reloadedBy().
+static RELOADED_BY: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Called before the workers run the script again because `path` changed.
+pub fn reloaded_by(path: &Path) {
+    *RELOADED_BY.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.to_path_buf());
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn tenma_rs_reloaded_by(buffer: *mut u8, capacity: usize) -> usize {
+    let reloaded = RELOADED_BY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(path) = reloaded.as_ref() else {
+        return usize::MAX;
+    };
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.len() > capacity {
+        return usize::MAX;
+    }
+    // SAFETY: the shim passes a buffer of `capacity` bytes
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
+    bytes.len()
+}
+
 /// Removes the Tenma::diagnostics() lists that `group` ("app": the script, "dev": tenma.dev.php) published in the
 /// project of `file`: when that group reloads, a fixed problem goes without its reporter clearing it, and what is
 /// still wrong is published again. The stdlib finds the project the same way (Diagnostics::project).
