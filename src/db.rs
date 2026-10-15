@@ -49,31 +49,50 @@ enum Slot {
     Idle(Lease),
     /// A query is running and holds the connection.
     Busy,
-    /// The running query was cancelled (Tenma\all, Task::cancel): its connection was closed with it,
-    /// Postgres has discarded the transaction.
+    /// The running query was cancelled (Tenma\all, Task::cancel, client gone): Postgres stops it and
+    /// the cleanup rolls the transaction back.
     Lost,
 }
 
-/// Holds a transaction's connection during a query. If the query is cancelled, the guard is dropped
-/// with the connection and marks the transaction as lost, instead of leaving it occupied forever.
+/// Holds a connection during a query, with the transaction's slot if it belongs to one. If the
+/// query is cancelled, the guard is dropped: Postgres is told to stop the query, and only then is
+/// the connection cleaned and pooled again. Until then it keeps its permit, so the pool never has
+/// more busy backends than --db-pool. A transaction's slot becomes Lost.
 struct Busy {
-    slot: Rc<RefCell<Slot>>,
+    url: String,
+    slot: Option<Rc<RefCell<Slot>>>,
     lease: Option<Lease>,
 }
 
 impl Busy {
-    fn restore(mut self) {
+    fn client(&self) -> &Client {
+        &self.lease.as_ref().expect("held until done").client
+    }
+
+    /// The query is done: the connection goes back to its transaction, or to the pool.
+    fn done(mut self) {
         if let Some(lease) = self.lease.take() {
-            *self.slot.borrow_mut() = Slot::Idle(lease);
+            match &self.slot {
+                Some(slot) => *slot.borrow_mut() = Slot::Idle(lease),
+                None => release(&self.url, lease),
+            }
         }
     }
 }
 
 impl Drop for Busy {
     fn drop(&mut self) {
-        if self.lease.is_some() {
-            *self.slot.borrow_mut() = Slot::Lost;
+        let Some(lease) = self.lease.take() else { return };
+        if let Some(slot) = &self.slot {
+            *slot.borrow_mut() = Slot::Lost;
         }
+        let url = std::mem::take(&mut self.url);
+        tokio::task::spawn_local(async move {
+            // Once the cancel request is through, the backend stops the query or, if it was done
+            // already, ignores it while idle: it cannot hit the cleanup sent after it
+            let _ = lease.client.cancel_token().cancel_query(NoTls).await;
+            release(&url, lease);
+        });
     }
 }
 
@@ -295,8 +314,8 @@ async fn postgres(mode: String, target: String, sql: String, params: Vec<Value>)
                 return if mode == "rollback" { Ok("null".into()) } else { Err("the transaction was aborted".into()) };
             }
         };
-        let busy = Busy { slot: Rc::clone(&cell), lease: Some(lease) };
-        let client = &busy.lease.as_ref().expect("just set").client;
+        let busy = Busy { url: url.clone(), slot: Some(Rc::clone(&cell)), lease: Some(lease) };
+        let client = busy.client();
         let result = if ending {
             client.batch_execute(if mode == "commit" { "COMMIT" } else { "ROLLBACK" }).await.map(|()| "null".to_owned()).map_err(Failure::from)
         } else {
@@ -304,12 +323,12 @@ async fn postgres(mode: String, target: String, sql: String, params: Vec<Value>)
         };
         if ending {
             TRANSACTIONS.with_borrow_mut(|txs| txs.remove(&id));
+            // Ended: the connection goes back to the pool, not to the transaction
             let mut busy = busy;
-            if let Some(lease) = busy.lease.take() {
-                release(&url, lease);
-            }
+            busy.slot = None;
+            busy.done();
         } else {
-            busy.restore();
+            busy.done();
         }
         return result;
     }
@@ -322,8 +341,9 @@ async fn postgres(mode: String, target: String, sql: String, params: Vec<Value>)
         TRANSACTIONS.with_borrow_mut(|txs| txs.insert(id, Transaction { url: target, owner, client: Rc::new(RefCell::new(Slot::Idle(lease))) }));
         return Ok(id.to_string());
     }
-    let result = run(&lease.client, &mode, &sql, &params).await;
-    release(&target, lease);
+    let busy = Busy { url: target, slot: None, lease: Some(lease) };
+    let result = run(busy.client(), &mode, &sql, &params).await;
+    busy.done();
     result
 }
 

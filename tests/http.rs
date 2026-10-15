@@ -594,6 +594,18 @@ fn postgres_connections_come_back_clean() {
     let size = get(port, "/size");
     assert!(size.contains(r#""value": "big""#), "{size}");
     get(port, "/types-drop");
+
+    // A client that leaves during a long query: Postgres stops it, before the pool hands out the connection again
+    for path in ["/sleep", "/sleep-tx"] {
+        let mut leaving = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(leaving, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        drop(leaving);
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        let sleeping = get(port, "/sleeping");
+        assert!(sleeping.contains(r#""n": 0"#) && started.elapsed() < Duration::from_secs(2), "{path}: {sleeping}");
+    }
 }
 
 #[test]

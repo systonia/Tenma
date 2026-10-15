@@ -88,6 +88,10 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
                 return 'caught: ' . $error->getMessage();
             }
         })(),
+        '/sleep' => $db->query('SELECT pg_sleep(4.5)'),
+        '/sleep-tx' => $db->transaction(fn (Postgres $tx) => $tx->query('SELECT pg_sleep(4.5)')),
+        // Backends still running /sleep's query, without this one
+        '/sleeping' => $db->first("SELECT count(*) AS n FROM pg_stat_activity WHERE query LIKE '%pg_sleep(4.5)%' AND state = 'active' AND pid <> pg_backend_pid()"),
         // The outer $db inside a transaction, with a pool of one: it waits for the connection the
         // transaction holds, until the pool gives up
         '/nested' => (function () use ($db) {
