@@ -16,6 +16,9 @@ use Tenma\Lsp\Provider;
 /** How long the worker may take for one answer before it is ended. */
 const ANSWER_SECONDS = 5;
 
+/** The semantic token types tenma sends, in this order; Tenma\Lsp\Tokens names them. */
+const TOKEN_TYPES = ['keyword', 'comment', 'variable', 'property', 'method', 'function', 'class', 'string', 'number', 'operator'];
+
 function main(string $binary, array $args): void
 {
     // Output of the project's code must not end up in the protocol, PHP's warnings and errors go to the
@@ -136,6 +139,12 @@ function lineAt(string $text, int $start): string
     return rtrim(substr($text, $start, $end === false ? null : $end - $start), "\r");
 }
 
+/** The length of a text in UTF-16 code units, as LSP counts characters. */
+function utf16(string $text): int
+{
+    return intdiv(strlen(mb_convert_encoding($text, 'UTF-16LE', 'UTF-8')), 2);
+}
+
 /** The line with number $line (from 0), and its length in UTF-16 code units. */
 function lineLength(string $text, int $line): int
 {
@@ -180,6 +189,7 @@ final class Server
                 'textDocument/completion' => $this->completion($params),
                 'textDocument/hover' => $this->hover($params),
                 'textDocument/definition' => $this->definition($params),
+                'textDocument/semanticTokens/full' => $this->tokens($params),
                 default => new \LogicException("unknown method $method"),
             };
         } catch (\Throwable $e) {
@@ -221,6 +231,7 @@ final class Server
                 'completionProvider' => ['triggerCharacters' => ['>', '"', '<', ' ', '-']],
                 'hoverProvider' => true,
                 'definitionProvider' => true,
+                'semanticTokensProvider' => ['legend' => ['tokenTypes' => TOKEN_TYPES, 'tokenModifiers' => []], 'full' => true],
             ],
             'serverInfo' => ['name' => 'tenma', 'version' => VERSION],
         ];
@@ -333,6 +344,34 @@ final class Server
         $at = $this->position($params);
         $markdown = $at === null ? null : $this->ask('hover', ...$at);
         return is_string($markdown) ? ['contents' => ['kind' => 'markdown', 'value' => $markdown]] : null;
+    }
+
+    /** The providers' tokens, encoded as LSP wants them: relative positions in UTF-16 units. */
+    private function tokens(array $params): array
+    {
+        $at = $this->position($params + ['position' => ['line' => 0, 'character' => 0]]);
+        $tokens = $at === null ? [] : (array) $this->ask('tokens', $at[0], $at[1]);
+        usort($tokens, static fn (array $a, array $b) => [$a['line'] ?? 0, $a['column'] ?? 0] <=> [$b['line'] ?? 0, $b['column'] ?? 0]);
+        $lines = $at === null ? [] : explode("\n", $at[1]);
+        $data = [];
+        [$line, $start, $end] = [0, 0, -1];
+        foreach ($tokens as $token) {
+            $type = array_search($token['type'] ?? '', TOKEN_TYPES, true);
+            $text = $lines[(int) ($token['line'] ?? 0) - 1] ?? null;
+            if ($type === false || $text === null) {
+                continue;
+            }
+            $at16 = utf16(substr($text, 0, (int) ($token['column'] ?? 0)));
+            $length = utf16(substr($text, (int) ($token['column'] ?? 0), (int) ($token['length'] ?? 0)));
+            $tokenLine = (int) $token['line'] - 1;
+            // Overlapping tokens: the first one wins
+            if ($length === 0 || ($tokenLine === $line && $at16 < $end)) {
+                continue;
+            }
+            array_push($data, $tokenLine - $line, $tokenLine === $line ? $at16 - $start : $at16, $length, $type, 0);
+            [$line, $start, $end] = [$tokenLine, $at16, $at16 + $length];
+        }
+        return ['data' => $data];
     }
 
     private function definition(array $params): ?array
@@ -477,6 +516,7 @@ final class Answers
             'definition' => $this->definition(...$args),
             'hover' => $this->hover(...$args),
             'diagnostics' => $this->collect(static fn (Provider $p) => $p->diagnostics(...$args)),
+            'tokens' => $this->collect(static fn (Provider $p) => $p instanceof \Tenma\Lsp\Tokens ? $p->tokens(...$args) : []),
             default => null,
         };
     }
@@ -484,11 +524,12 @@ final class Answers
     private function completions(string $file, string $text, int $offset): array
     {
         $items = $this->collect(static fn (Provider $p) => $p->completions($file, $text, $offset));
-        $class = $this->thisClass($file);
-        if ($class !== null && preg_match('/\$this((?:->\w+)*)->\w*$/', substr($text, 0, $offset), $m) === 1) {
-            $target = $this->follow($class, $m[1]);
+        $before = substr($text, 0, $offset);
+        if (preg_match('/\$(\w+)((?:->\w+)*)->\w*$/', $before, $m) === 1) {
+            $root = $this->variable($file, $before, $m[1]);
+            $target = $root === null ? null : $this->follow($root, $m[2]);
             if ($target !== null) {
-                array_push($items, ...self::members($target, $target->getName() === $class));
+                array_push($items, ...self::members($target, $target->getName() === $this->thisClass($file)));
             }
         }
         return $items;
@@ -526,16 +567,17 @@ final class Answers
     /** The method or property named at $offset in a `$this->a->b` chain. */
     private function member(string $file, string $text, int $offset): \ReflectionMethod|\ReflectionProperty|null
     {
-        $class = $this->thisClass($file);
         preg_match('/^\w*/', substr($text, $offset), $rest);
-        if ($class === null || preg_match('/\$this((?:->\w+)*)->(\w*)$/', substr($text, 0, $offset) . $rest[0], $m) !== 1 || $m[2] === '') {
+        $before = substr($text, 0, $offset);
+        if (preg_match('/\$(\w+)((?:->\w+)*)->(\w*)$/', $before . $rest[0], $m) !== 1 || $m[3] === '') {
             return null;
         }
-        $target = $this->follow($class, $m[1]);
+        $root = $this->variable($file, $before, $m[1]);
+        $target = $root === null ? null : $this->follow($root, $m[2]);
         return match (true) {
             $target === null => null,
-            $target->hasMethod($m[2]) => $target->getMethod($m[2]),
-            $target->hasProperty($m[2]) => $target->getProperty($m[2]),
+            $target->hasMethod($m[3]) => $target->getMethod($m[3]),
+            $target->hasProperty($m[3]) => $target->getProperty($m[3]),
             default => null,
         };
     }
@@ -551,11 +593,98 @@ final class Answers
         return null;
     }
 
-    /** The class at the end of `->a->b`: the declared types of properties and of methods' returns. */
-    private function follow(string $class, string $chain): ?\ReflectionClass
+    /**
+     * The class of `$name` in the text before the cursor: `$this` is the class a provider binds, a variable
+     * of a foreach over `$this->items` (or another such variable) has the element type of `items`, from its
+     * PHPDoc (`list<Item>`, `array<int, Item>`, `Item[]`).
+     */
+    private function variable(string $file, string $before, string $name, int $depth = 0): ?\ReflectionClass
     {
-        $target = new \ReflectionClass($class);
-        foreach (array_filter(explode('->', $chain)) as $name) {
+        if ($name === 'this') {
+            $class = $this->thisClass($file);
+            return $class === null ? null : new \ReflectionClass($class);
+        }
+        $loops = '/foreach\s*\(\s*\$(\w+)((?:->\w+(?:\(\))?)*)->(\w+)(?:\(\))?\s+as\s+(?:\$\w+\s*=>\s*)?&?\$' . preg_quote($name, '/') . '\s*\)/';
+        if ($depth > 3 || preg_match_all($loops, $before, $found, PREG_SET_ORDER) === 0) {
+            return null;
+        }
+        [, $base, $chain, $iterable] = end($found);
+        $root = $base === $name ? null : $this->variable($file, $before, $base, $depth + 1);
+        $owner = $root === null ? null : $this->follow($root, $chain);
+        $member = match (true) {
+            $owner === null => null,
+            $owner->hasProperty($iterable) => $owner->getProperty($iterable),
+            $owner->hasMethod($iterable) => $owner->getMethod($iterable),
+            default => null,
+        };
+        $element = $member === null ? null : self::elementClass($member);
+        return $element === null ? null : new \ReflectionClass($element);
+    }
+
+    /** The class of the elements a property or method holds, from `@var` or `@return`. */
+    private static function elementClass(\ReflectionProperty|\ReflectionMethod $member): ?string
+    {
+        $tag = $member instanceof \ReflectionProperty ? '@var' : '@return';
+        if (preg_match('/' . $tag . '\s+((?:[^\s<>{}]|<(?:[^<>]|<[^<>]*>)*>|\{[^}]*\})+)/', (string) $member->getDocComment(), $m) !== 1) {
+            return null;
+        }
+        foreach (explode('|', ltrim($m[1], '?')) as $type) {
+            $element = match (true) {
+                str_ends_with($type, '[]') => substr($type, 0, -2),
+                preg_match('/^[\w\\\\-]+<(.*)>$/', $type, $generic) === 1 => trim((string) preg_replace('/^(?:[^,<]|<[^>]*>)*,/', '', $generic[1])),
+                default => null,
+            };
+            $class = $element === null ? null : self::className($element, $member->getDeclaringClass());
+            if ($class !== null) {
+                return $class;
+            }
+        }
+        return null;
+    }
+
+    /** A name in a doc comment of $context, resolved like PHP does: `use` statements, then the namespace. */
+    private static function className(string $name, \ReflectionClass $context): ?string
+    {
+        if (str_starts_with($name, '\\')) {
+            $class = substr($name, 1);
+        } else {
+            [$first] = explode('\\', $name, 2);
+            $imported = self::imports((string) $context->getFileName())[strtolower($first)] ?? null;
+            $namespace = $context->getNamespaceName();
+            $class = $imported !== null ? $imported . substr($name, strlen($first)) : ($namespace !== '' ? "$namespace\\$name" : $name);
+        }
+        return class_exists($class) || interface_exists($class) ? $class : null;
+    }
+
+    /** @var array<string, array<string, string>> file => alias in lower case => class */
+    private static array $imports = [];
+
+    /** @return array<string, string> The `use` statements of a file, by lower-case alias */
+    private static function imports(string $file): array
+    {
+        if (isset(self::$imports[$file])) {
+            return self::$imports[$file];
+        }
+        $imports = [];
+        // ponytail: one namespace per file and no function or const imports, as PSR-4 files are
+        $code = (string) preg_replace('/\b(?:class|interface|trait|enum)\b.*/s', '', (string) @file_get_contents($file));
+        preg_match_all('/\buse\s+([\w\\\\]+)(?:\s*\{([^}]*)\}|\s+as\s+(\w+))?\s*;/', $code, $uses, PREG_SET_ORDER);
+        foreach ($uses as $use) {
+            $prefix = rtrim($use[1], '\\');
+            foreach (isset($use[2]) && $use[2] !== '' ? explode(',', $use[2]) : [''] as $part) {
+                $part = trim($part);
+                [$name, $alias] = preg_match('/^([\w\\\\]+)\s+as\s+(\w+)$/', $part, $as) === 1 ? [$as[1], $as[2]] : [$part, null];
+                $class = $name === '' ? $prefix : "$prefix\\$name";
+                $imports[strtolower($alias ?? ($use[3] ?? '') ?: substr((string) strrchr('\\' . $class, '\\'), 1))] = $class;
+            }
+        }
+        return self::$imports[$file] = $imports;
+    }
+
+    /** The class at the end of `->a->b` (or `->a()`): the declared types of properties and of methods' returns. */
+    private function follow(\ReflectionClass $target, string $chain): ?\ReflectionClass
+    {
+        foreach (array_filter(explode('->', str_replace('()', '', $chain))) as $name) {
             $type = match (true) {
                 $target->hasProperty($name) => $target->getProperty($name)->getType(),
                 $target->hasMethod($name) => $target->getMethod($name)->getReturnType(),

@@ -2,10 +2,10 @@
 
 namespace Fixture;
 
-use Tenma\Lsp\Provider;
+use Tenma\Lsp\{Provider, Tokens};
 
-/** Binds $this in page.tpl.php to Page, completes "data-on-" values, reports "TODO" lines. */
-final class Editor implements Provider
+/** Binds $this in page.tpl.php to Page, completes "data-on-" values, reports "TODO" lines, colours "@words". */
+final class Editor implements Provider, Tokens
 {
     public function __construct(private string $root)
     {
@@ -38,5 +38,20 @@ final class Editor implements Provider
             }
         }
         return $problems;
+    }
+
+    public function tokens(string $file, string $text): array
+    {
+        $tokens = [];
+        foreach (explode("\n", $text) as $i => $line) {
+            preg_match_all('/@\w+/', $line, $found, PREG_OFFSET_CAPTURE);
+            foreach ($found[0] as [$word, $column]) {
+                $tokens[] = ['line' => $i + 1, 'column' => $column, 'length' => strlen($word), 'type' => 'keyword'];
+                // Overlaps the keyword: left out
+                $tokens[] = ['line' => $i + 1, 'column' => $column + 1, 'length' => 1, 'type' => 'variable'];
+            }
+        }
+        // Not in the order of the text, and one of no known type
+        return [...array_reverse($tokens), ['line' => 1, 'column' => 0, 'length' => 1, 'type' => 'unknown']];
     }
 }

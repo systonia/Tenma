@@ -131,7 +131,7 @@ fn completes_this_in_a_file_a_provider_binds() {
     let mut lsp = Lsp::start(&root);
     lsp.open(&template, "<h1><?= $this-> ?></h1>\n<?= $this->author-> ?>\n<b data-on-click=\"");
     // Inside the class: private members too, no statics, no magic methods
-    assert_eq!(lsp.labels(&template, 0, 15), ["title", "author", "increment", "secret"]);
+    assert_eq!(lsp.labels(&template, 0, 15), ["title", "author", "authors", "pens", "tags", "increment", "secret", "team"]);
     // Through a typed property into another class: only its public members
     assert_eq!(lsp.labels(&template, 1, 19), ["name"]);
     // The provider's own completions
@@ -140,6 +140,47 @@ fn completes_this_in_a_file_a_provider_binds() {
     let other = root.join("other.php");
     lsp.open(&other, "<?php $this->");
     assert!(lsp.labels(&other, 0, 13).is_empty());
+}
+
+#[test]
+fn loop_variables_get_the_element_type_of_what_they_loop_over() {
+    let root = project("loops");
+    let template = root.join("page.tpl.php");
+    let mut lsp = Lsp::start(&root);
+    let text = [
+        "@foreach ($this->authors as $author) {{ $author-> }} @endforeach",
+        "<?php foreach ($this->team() as $i => $member): ?><?= $member-> ?>",
+        "<?php foreach ($this->pens as $pen) { echo $pen->",
+        "<?php foreach ($this->tags as $tag) { echo $tag->",
+        "{{ $unknown-> }}",
+    ]
+    .join("\n");
+    lsp.open(&template, &text);
+    // list<Author>, Author[] and array<int, Pen> through a use statement with an alias
+    assert_eq!(lsp.labels(&template, 0, 49), ["name"]);
+    assert_eq!(lsp.labels(&template, 1, 63), ["name"]);
+    assert_eq!(lsp.labels(&template, 2, 49), ["pen"]);
+    // Strings have no members, an unknown variable no type
+    assert!(lsp.labels(&template, 3, 49).is_empty());
+    assert!(lsp.labels(&template, 4, 13).is_empty());
+    // Hover and definition work on loop variables too
+    lsp.change(&template, "@foreach ($this->authors as $author) {{ $author->name }} @endforeach");
+    let definition = lsp.at("textDocument/definition", &template, 0, 51);
+    assert_eq!(definition["uri"], uri(&root.join("src/Author.php")), "{definition}");
+}
+
+#[test]
+fn semantic_tokens_come_from_providers_relative_and_in_utf16() {
+    let root = project("tokens");
+    let template = root.join("page.tpl.php");
+    let mut lsp = Lsp::start(&root);
+    let initialized = lsp.request("initialize", json!({ "capabilities": {} }));
+    assert_eq!(initialized["result"]["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"][0], "keyword");
+    // "ä" is two bytes but one UTF-16 unit
+    lsp.open(&template, "@if x @end\nä @foreach");
+    let tokens = lsp.request("textDocument/semanticTokens/full", json!({ "textDocument": { "uri": uri(&template) } }));
+    // line, start relative to the token before on the same line, length, type 0 = keyword
+    assert_eq!(tokens["result"]["data"], json!([0, 0, 3, 0, 0, 0, 6, 4, 0, 0, 1, 2, 8, 0, 0]), "{tokens}");
 }
 
 #[test]
@@ -152,7 +193,7 @@ fn hover_and_definition_follow_this_into_the_class() {
     assert_eq!(hover["contents"]["value"], "```php\npublic function increment(int $by): void\n```\n\nCounts up by one.", "{hover}");
     let method = lsp.at("textDocument/definition", &template, 0, 13);
     assert_eq!(method["uri"], uri(&root.join("src/Page.php")), "{method}");
-    assert_eq!(method["range"]["start"]["line"], 11, "{method}");
+    assert_eq!(method["range"]["start"]["line"], 22, "{method}");
     // A property: the line of its declaration, in the class it belongs to
     let property = lsp.at("textDocument/definition", &template, 0, 47);
     assert_eq!(property["uri"], uri(&root.join("src/Author.php")), "{property}");
