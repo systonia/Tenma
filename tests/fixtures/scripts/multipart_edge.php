@@ -24,7 +24,7 @@ try {
     echo $error->getMessage(), ' ', memory_get_peak_usage() < 64 << 20 ? 'frugal' : 'wasteful', "\n";
 }
 // Headers and cookies: null bytes and attributes cannot be smuggled in
-foreach ([fn () => Response::redirect("/x\0set-cookie: a=b"), fn () => (new Response())->cookie('a', 'b', path: '/; Domain=evil'), fn () => (new Response())->cookie('a', 'b', sameSite: 'Lax; Secure')] as $bad) {
+foreach ([fn () => Response::redirect("/x\0set-cookie: a=b"), fn () => (new Response())->cookie('a', 'b', path: '/; Domain=evil'), fn () => (new Response())->cookie('a', 'b', sameSite: 'Lax; Secure'), fn () => (new Response())->cookie('a', 'b', sameSite: 'None')] as $bad) {
     try {
         $bad();
         echo "let through\n";
@@ -33,3 +33,4 @@ foreach ([fn () => Response::redirect("/x\0set-cookie: a=b"), fn () => (new Resp
     }
 }
 echo json_encode((new Response())->cookie('s', 'v', expires: 0)->headers['set-cookie']), "\n";
+echo json_encode((new Response())->cookie('s', 'v', secure: true, sameSite: 'None')->headers['set-cookie']), "\n";

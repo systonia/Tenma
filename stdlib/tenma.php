@@ -1651,6 +1651,10 @@ final class Response
         if (!in_array($sameSite, ['', 'Lax', 'Strict', 'None'], true)) {
             throw new \ValueError("SameSite must be Lax, Strict, None or empty, not $sameSite");
         }
+        // Browsers drop such a cookie without a word: say it here instead
+        if ($sameSite === 'None' && !$secure) {
+            throw new \ValueError("Cookie $name: SameSite=None needs secure: true, browsers drop it otherwise");
+        }
         $cookie = "$name=" . rawurlencode($value);
         if ($expires) {
             $cookie .= '; Expires=' . gmdate('D, d M Y H:i:s', $expires) . ' GMT; Max-Age=' . max(0, $expires - time());

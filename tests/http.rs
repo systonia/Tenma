@@ -854,7 +854,7 @@ fn multipart_edge_cases() {
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         "{\"f\":\"X\"}\n{\"real\":\"a;name=evil.txt\",\"path\":\"x41.txt\",\"doc\":{\"a\":\"d.txt\"},\"x\":[\"x2\"]}\n\
-         Too many parts in the form frugal\nrejected\nrejected\nrejected\n\"s=v; Path=\\/; HttpOnly; SameSite=Lax\"\n"
+         Too many parts in the form frugal\nrejected\nrejected\nrejected\nrejected\n\"s=v; Path=\\/; HttpOnly; SameSite=Lax\"\n\"s=v; Path=\\/; Secure; HttpOnly; SameSite=None\"\n"
     );
 }
 
