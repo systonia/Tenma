@@ -55,6 +55,11 @@ function read($in): ?array
     while (true) {
         $line = fgets($in);
         if ($line === false) {
+            // Node hands over a socket, not a pipe: a read gives up after default_socket_timeout
+            // without the input having ended, when the editor sends nothing for a while
+            if (timedOut($in)) {
+                continue;
+            }
             return null;
         }
         $line = rtrim($line, "\r\n");
@@ -72,12 +77,21 @@ function read($in): ?array
     while (strlen($body) < $length) {
         $chunk = fread($in, $length - strlen($body));
         if ($chunk === false || $chunk === '') {
+            if (timedOut($in)) {
+                continue;
+            }
             return null;
         }
         $body .= $chunk;
     }
     $message = json_decode($body, true);
     return is_array($message) ? $message : [];
+}
+
+/** Whether the last read gave up after the timeout, the input still open. */
+function timedOut($stream): bool
+{
+    return !feof($stream) && (stream_get_meta_data($stream)['timed_out'] ?? false);
 }
 
 function encode(mixed $value): string
@@ -397,7 +411,10 @@ function work(string $root): void
     $answers = new Answers(providers($root));
     $in = fopen('php://stdin', 'rb');
     $out = fopen('php://stdout', 'wb');
-    while (($line = fgets($in)) !== false) {
+    while (($line = fgets($in)) !== false || timedOut($in)) {
+        if ($line === false) {
+            continue;
+        }
         $question = json_decode($line, true);
         $result = null;
         try {
