@@ -133,7 +133,7 @@ Waypoint itself no longer needs classic mode: the app is itself a handler, `Tenm
 
 ```
 tenma app.php                    # one worker: one thread, one shared state
-tenma --version                  # tenma 0.1.10 (PHP 8.5.9)
+tenma --version                  # tenma 0.1.11 (PHP 8.5.9)
 tenma --watch app.php            # reload when a file the script loaded changes, like node --watch
 tenma --inspect app.php          # debugger (DAP) on 127.0.0.1:9229, like node --inspect
 tenma --inspect-wait app.php     # wait until the debugger has set its breakpoints
