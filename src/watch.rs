@@ -117,15 +117,30 @@ pub fn configure() {
 /// The change behind the last reload of the script, for Tenma::reloadedBy().
 static RELOADED_BY: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
+thread_local! {
+    /// What this worker's current run of the script was reloaded by: a change, or nothing (the first
+    /// run, a restart after a fatal error or --max-requests).
+    static RUN_RELOADED_BY: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Called before the workers run the script again because `path` changed.
 pub fn reloaded_by(path: &Path) {
     *RELOADED_BY.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.to_path_buf());
 }
 
+/// A worker runs the script again: because of the last change, or (`changed` false) for another reason.
+pub fn rerun(changed: bool) {
+    let path = if changed { RELOADED_BY.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() } else { None };
+    RUN_RELOADED_BY.with_borrow_mut(|reloaded| *reloaded = path);
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_reloaded_by(buffer: *mut u8, capacity: usize) -> usize {
-    let reloaded = RELOADED_BY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(path) = reloaded.as_ref() else {
+    RUN_RELOADED_BY.with_borrow(|reloaded| copy_path(reloaded.as_deref(), buffer, capacity))
+}
+
+fn copy_path(reloaded: Option<&Path>, buffer: *mut u8, capacity: usize) -> usize {
+    let Some(path) = reloaded else {
         return usize::MAX;
     };
     let bytes = path.as_os_str().as_bytes();

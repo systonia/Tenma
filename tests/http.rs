@@ -1259,6 +1259,28 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
     let _ = std::fs::remove_dir_all(directory);
 }
 
+#[test]
+fn reloaded_by_is_the_change_only_for_the_run_it_caused() {
+    let port = 18_170;
+    let directory = scratch("reloaded-by");
+    let app = directory.join("app.php");
+    let script = |version: &str| format!("<?php\n$by = Tenma::reloadedBy();\nTenma::serve({port}, fn () => '{version} ' . ($by === null ? 'none' : basename($by)) . \"\\n\");\n");
+    std::fs::write(&app, script("one")).unwrap();
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--watch", "--workers", "1", "--max-requests", "20"]).arg(&app).spawn().unwrap());
+    assert!(get(port, "/").ends_with("one none\n"));
+    std::thread::sleep(Duration::from_millis(200));
+    std::fs::write(&app, script("two")).unwrap();
+    let response = eventually(port, "/", |response| response.contains("two"));
+    assert!(response.ends_with("two app.php\n"), "{response}");
+    // --max-requests ran the script again, no change did
+    for _ in 0..20 {
+        get(port, "/");
+    }
+    let response = eventually(port, "/", |response| response.contains("two none"));
+    assert!(response.ends_with("two none\n"), "{response}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 /// A project with two hooks, listed against their order: a command copies the CSS, PHP minifies
 /// the copy and counts its runs.
 fn hook_project(name: &str) -> std::path::PathBuf {

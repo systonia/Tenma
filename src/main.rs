@@ -625,7 +625,10 @@ fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options
                     }
                     while answering.try_join_next().is_some() {}
                 }
-                () = change.notified() => break Stop::Restart,
+                () = change.notified() => {
+                    watch::rerun(true);
+                    break Stop::Restart;
+                }
             }
         };
         // Connections accepted just before the change still get their answer: dropping the runtime
@@ -668,7 +671,10 @@ fn run_until_idle(connections: &mut UnboundedReceiver<Connection>, exits: bool, 
                     // A fatal error: without servers there is no restart, the script has failed
                     () = restart.notified() => break Ok(255),
                     () = ops::idle() => break Ok(0),
-                    () = change.notified() => break Err(Stop::Restart),
+                    () = change.notified() => {
+                        watch::rerun(true);
+                        break Err(Stop::Restart);
+                    }
                     connection = connections.recv() => match connection {
                         None => break Err(Stop::Closed),
                         // With --watch the ports stay open while an edited script serves nothing
@@ -740,8 +746,15 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
                 // next connection waiting too. That one belongs to the fresh interpreter: here it would
                 // land in the old one, broken after a fatal error, and the drain would reset it unread
                 biased;
-                () = restart.notified() => break Stop::Restart,
-                () = change.notified() => break Stop::Restart,
+                // Tenma::reloadedBy() tells the next run why it runs: not for a change here
+                () = restart.notified() => {
+                    watch::rerun(false);
+                    break Stop::Restart;
+                }
+                () = change.notified() => {
+                    watch::rerun(true);
+                    break Stop::Restart;
+                }
                 connection = connections.recv() => {
                     let Some((port, stream)) = connection else {
                         break Stop::Closed;
