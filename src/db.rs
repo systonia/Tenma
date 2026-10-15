@@ -131,9 +131,19 @@ fn text_params(params: &[Value]) -> Vec<TextParam> {
         .collect()
 }
 
+const POOL_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn connect(url: &str) -> Result<Lease, Failure> {
     let permits = PERMITS.with_borrow_mut(|permits| Arc::clone(permits.entry(url.to_owned()).or_insert_with(|| Arc::new(Semaphore::new(POOL_SIZE.load(Ordering::Relaxed))))));
-    let permit = permits.acquire_owned().await?;
+    // Waiting forever would hang the worker's database access, for example when every connection
+    // belongs to a transaction that calls the pool from inside it
+    let permit = tokio::time::timeout(POOL_WAIT, permits.acquire_owned()).await.map_err(|_| {
+        format!(
+            "no connection of the pool came free in {} s (--db-pool {}); a transaction that queries through the outer connection instead of its own waits for itself",
+            POOL_WAIT.as_secs(),
+            POOL_SIZE.load(Ordering::Relaxed)
+        )
+    })??;
     let idle = IDLE.with_borrow_mut(|idle| idle.get_mut(url).and_then(|clients| std::iter::from_fn(|| clients.pop()).find(|client| !client.is_closed())));
     let client = match idle {
         Some(client) => client,

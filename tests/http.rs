@@ -577,6 +577,12 @@ fn postgres_connections_come_back_clean() {
     assert!(get(port, "/cancel-tx").contains("cancelled"));
     let whoami = get(port, "/whoami");
     assert!(whoami.contains("\"name\": \"\""), "{whoami}");
+    // A transaction that waits for a second connection of its own pool: an error, not a hang
+    let (sender, nested) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(get(port, "/nested")));
+    let nested = nested.recv_timeout(Duration::from_secs(15)).expect("the pool waits forever");
+    assert!(nested.contains("no connection of the pool came free in 10 s (--db-pool 1)"), "{nested}");
+    assert!(get(port, "/whoami").starts_with("HTTP/1.1 200"));
     // Many requests at once share the one connection: the pool opens no second one while it is cleaned
     let backends: Vec<_> = (0..20).map(|_| std::thread::spawn(move || get(port, "/backend"))).collect();
     let pids: std::collections::HashSet<String> = backends.into_iter().map(|backend| backend.join().unwrap().rsplit("\r\n\r\n").next().unwrap().to_owned()).collect();

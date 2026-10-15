@@ -88,6 +88,15 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
                 return 'caught: ' . $error->getMessage();
             }
         })(),
+        // The outer $db inside a transaction, with a pool of one: it waits for the connection the
+        // transaction holds, until the pool gives up
+        '/nested' => (function () use ($db) {
+            try {
+                return $db->transaction(fn () => $db->query('SELECT 1'));
+            } catch (RuntimeException $error) {
+                return $error->getMessage();
+            }
+        })(),
         // Cancellation in the middle of a transaction: the rollback in the catch must still be allowed to run
         '/cancel-tx' => (function () use ($db) {
             $task = Tenma::async(fn () => $db->transaction(function (Postgres $tx) {
