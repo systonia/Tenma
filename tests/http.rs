@@ -1593,6 +1593,37 @@ fn inspect_shows_requests_as_threads_and_stops_at_exceptions() {
 }
 
 #[test]
+fn inspect_expands_a_global_after_new_variables_moved_the_symbol_table() {
+    let (port, debugger) = (18_152, 19_242);
+    // The system allocator scribbles over freed memory: a stale pointer shows instead of going unnoticed
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([&format!("--inspect-brk={debugger}"), "tests/fixtures/scripts/inspect_globals.php"])
+            .env("PORT", port.to_string())
+            .env("USE_ZEND_ALLOC", "0")
+            .env("MallocScribble", "1")
+            .spawn()
+            .unwrap(),
+    );
+    let mut dap = Dap::start(debugger);
+    dap.break_at("tests/fixtures/scripts/inspect_globals.php".as_ref(), &[5]);
+    dap.request("configurationDone", serde_json::json!({}));
+    dap.stopped();
+    dap.command("continue");
+    let stop = dap.stopped();
+    let (_, config) = stop.local("$config").unwrap();
+    assert_eq!(dap.variables(config)[0].0, "database");
+    // Enough new globals that the symbol table grows and moves its entries
+    let frame = dap.request("stackTrace", serde_json::json!({"threadId": stop.event["threadId"]}))["stackFrames"][0]["id"].clone();
+    dap.request("evaluate", serde_json::json!({"expression": "for ($i = 0; $i < 500; $i++) { ${'v' . $i} = $i; }", "frameId": frame, "context": "repl"}));
+    let children = dap.variables(config);
+    assert_eq!(children.first().map(|child| child.0.as_str()), Some("database"), "{children:?}");
+    assert_eq!(dap.variables(children[0].2)[0], ("host".to_owned(), "'localhost'".to_owned(), 0));
+    dap.command("continue");
+    assert!(get(port, "/").ends_with("ok\n"));
+}
+
+#[test]
 fn inspect_brk_waits_for_the_debugger_and_stops_at_the_first_statement() {
     let (port, debugger) = (18_124, 19_231);
     let _server = inspected(port, debugger, "--inspect-brk");

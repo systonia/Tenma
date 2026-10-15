@@ -981,22 +981,29 @@ static HashTable *properties_of(zend_object *object) {
 
 /**
  * An array or object the editor may expand while stopped; its reference to one is the position in
- * expandable[] plus 1. Where it lies: `parent` and `key` or `index`, or `value` for a variable (a
- * slot that stays put while stopped). Elements are looked up again on each use: evaluated code may
- * have changed or freed what was there. Changing elements copies shared arrays on the way, as PHP would.
+ * expandable[] plus 1. Where it lies: `parent` and `key` or `index`; `table` and `key` for a
+ * variable in a symbol table (its buckets move when evaluated code adds variables); or `value` for
+ * a local (a slot that stays put while stopped). Elements are looked up again on each use: evaluated
+ * code may have changed or freed what was there. Changing elements copies shared arrays on the way,
+ * as PHP would.
  */
 struct expandable {
     zval *value;
     uint32_t parent;
     zend_string *key;
     zend_ulong index;
+    HashTable *table;
 };
 
-/** Where a variable lies: in the array or object `parent` refers to, under `key` or `index`; NULL for a local. */
+/**
+ * Where a variable lies: in the array or object `parent` refers to, under `key` or `index`; in the
+ * symbol table `table` under `key`; NULL for a local.
+ */
 struct place {
     uint32_t parent;
     zend_string *key;
     zend_ulong index;
+    HashTable *table;
 };
 
 static _Thread_local struct expandable *expandable = NULL;
@@ -1011,7 +1018,7 @@ static uint32_t expandable_reference(zval *value, const struct place *place) {
         expandable = realloc(expandable, expandable_size * sizeof(*expandable));
     }
     struct expandable *entry = &expandable[expandable_count++];
-    *entry = (struct expandable) {value, place ? place->parent : 0, place && place->key ? zend_string_copy(place->key) : NULL, place ? place->index : 0};
+    *entry = (struct expandable) {value, place ? place->parent : 0, place && place->key ? zend_string_copy(place->key) : NULL, place ? place->index : 0, place ? place->table : NULL};
     return expandable_count;
 }
 
@@ -1025,6 +1032,14 @@ static zval *lookup(uint32_t reference, bool write) {
         return NULL;
     }
     struct expandable *entry = &expandable[reference - 1];
+    if (entry->table) {
+        zval *value = zend_hash_find(entry->table, entry->key);
+        if (value) {
+            ZVAL_DEINDIRECT(value);
+            ZVAL_DEREF(value);
+        }
+        return value;
+    }
     if (!entry->parent) {
         zval *value = entry->value;
         ZVAL_DEREF(value);
@@ -1142,7 +1157,8 @@ char *tenma_inspect_locals(uint32_t thread, uint32_t index, size_t *len) {
             zval *value;
             ZEND_HASH_FOREACH_STR_KEY_VAL(frame->symbol_table, name, value) {
                 if (name && !zend_is_auto_global(name)) {
-                    add_variable(&out, "$", ZSTR_VAL(name), ZSTR_LEN(name), value, NULL);
+                    struct place place = {0, name, 0, frame->symbol_table};
+                    add_variable(&out, "$", ZSTR_VAL(name), ZSTR_LEN(name), value, &place);
                 }
             } ZEND_HASH_FOREACH_END();
         } else {
