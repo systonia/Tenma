@@ -79,8 +79,11 @@ fn class_key(name: &str) -> String {
 }
 /// The editor pressed pause: stop at the next statement.
 static PAUSE: AtomicBool = AtomicBool::new(false);
-/// --inspect-brk: stop at the script's first statement.
+/// --inspect-brk, or the editor's stopOnEntry: stop at the script's first statement.
 static ENTRY: AtomicBool = AtomicBool::new(false);
+/// --inspect-wait, --inspect-brk: the script waits for configurationDone, and until then the editor
+/// may decide about ENTRY.
+static WAITING: AtomicBool = AtomicBool::new(false);
 /// The thread the worker stopped in: evaluating only works in its frames.
 static STOPPED_THREAD: AtomicU32 = AtomicU32::new(0);
 /// A worker is stopped and waits for commands. Only the server sets it back, when it resumes the
@@ -88,7 +91,7 @@ static STOPPED_THREAD: AtomicU32 = AtomicU32::new(0);
 static STOPPED: AtomicBool = AtomicBool::new(false);
 /// tenma is shutting down: nothing stops any more, workers must finish.
 static ENDING: AtomicBool = AtomicBool::new(false);
-/// --inspect-brk waits for this: the editor has set its breakpoints (configurationDone).
+/// --inspect-wait and --inspect-brk wait for this: the editor has set its breakpoints (configurationDone).
 static CONFIGURED: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// The server's commands to the stopped worker.
 static COMMANDS: LazyLock<(Mutex<mpsc::Sender<Command>>, Mutex<mpsc::Receiver<Command>>)> = LazyLock::new(|| {
@@ -192,12 +195,26 @@ pub fn thread() {
     unsafe { tenma_inspect_thread() }
 }
 
-/// Starts the DAP server. `wait` (--inspect-brk): returns once an editor has connected and set its
-/// breakpoints, and the script stops at its first statement.
-pub fn listen(address: SocketAddr, wait: bool) -> Result<(), String> {
+/// What --inspect-wait (`Some(false)`) and --inspect-brk (`Some(true)`) pass to `listen`.
+pub fn wait(option: &str) -> Option<bool> {
+    match option {
+        "--inspect-wait" => Some(false),
+        "--inspect-brk" => Some(true),
+        _ => None,
+    }
+}
+
+/// Starts the DAP server. With `wait`, returns once an editor has connected and set its
+/// breakpoints; the script then stops at its first statement if `wait` is `Some(true)`, unless the
+/// editor's stopOnEntry decides otherwise.
+pub fn listen(address: SocketAddr, wait: Option<bool>) -> Result<(), String> {
     let listener = TcpListener::bind(address).map_err(|error| format!("--inspect: {address} not available: {error}"))?;
     if !address.ip().is_loopback() {
         eprintln!("tenma: warning: the debugger on {address} is open to the network, anyone who reaches it can run code");
+    }
+    if let Some(entry) = wait {
+        ENTRY.store(entry, Ordering::Relaxed);
+        WAITING.store(true, Ordering::Relaxed);
     }
     eprintln!("tenma: debugger (DAP) listening on {address}");
     std::thread::spawn(move || {
@@ -206,13 +223,13 @@ pub fn listen(address: SocketAddr, wait: bool) -> Result<(), String> {
             session(stream);
         }
     });
-    if wait {
+    if wait.is_some() {
         eprintln!("tenma: waiting for the debugger");
         let mut configured = CONFIGURED.0.lock().unwrap();
         while !*configured {
             configured = CONFIGURED.1.wait(configured).unwrap();
         }
-        ENTRY.store(true, Ordering::Relaxed);
+        WAITING.store(false, Ordering::Relaxed);
     }
     Ok(())
 }
@@ -353,7 +370,15 @@ fn handle(request: &Value) -> bool {
             );
             event("initialized", json!({}));
         }
-        "launch" | "attach" => respond(request, json!({})),
+        "launch" | "attach" => {
+            // Only before the script starts: later, ENTRY would stop at some statement midway
+            if WAITING.load(Ordering::Relaxed)
+                && let Some(stop) = arguments["stopOnEntry"].as_bool()
+            {
+                ENTRY.store(stop, Ordering::Relaxed);
+            }
+            respond(request, json!({}));
+        }
         "configurationDone" => {
             respond(request, json!({}));
             *CONFIGURED.0.lock().unwrap() = true;
@@ -467,8 +492,8 @@ extern "C" fn tenma_rs_return(file: *const u8, file_len: usize, line: u32, frame
     arrive(bytes(file, file_len), line, fiber, false);
 }
 
-/// Stops at this line of `file` if the editor wants it: `entry` for --inspect-brk, on pause, after a
-/// step or at a breakpoint.
+/// Stops at this line of `file` if the editor wants it: `entry` for --inspect-brk or stopOnEntry,
+/// on pause, after a step or at a breakpoint.
 fn arrive(file: &[u8], line: u32, fiber: usize, entry: bool) {
     let reason = if entry {
         "entry"

@@ -42,7 +42,7 @@ use tokio::task::LocalSet;
 const STDLIB: &str = include_str!("../stdlib/tenma.php");
 /// Prints the public API as stubs; only evaluated for `tenma --stubs`.
 const STUBS: &str = include_str!("../stdlib/stubs.php");
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -85,8 +85,9 @@ struct Options {
     drain: Duration,
     /// --inspect: the address of the debugger (DAP).
     inspect: Option<std::net::SocketAddr>,
-    /// --inspect-brk: wait for the debugger and stop at the script's first statement.
-    inspect_brk: bool,
+    /// --inspect-wait (`Some(false)`) and --inspect-brk (`Some(true)`): wait for the debugger, and
+    /// whether the script then stops at its first statement unless the editor decides.
+    inspect_wait: Option<bool>,
 }
 
 /// Why a worker's event loop ends.
@@ -154,7 +155,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Some(address) = options.inspect
-        && let Err(message) = inspect::listen(address, options.inspect_brk)
+        && let Err(message) = inspect::listen(address, options.inspect_wait)
     {
         eprintln!("tenma: {message}");
         php::stop();
@@ -196,7 +197,7 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         watch: false,
         drain: DRAIN,
         inspect: None,
-        inspect_brk: false,
+        inspect_wait: None,
     };
     let mut argv = Vec::new();
     let mut pool = None;
@@ -207,14 +208,14 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
                 options.watch = true;
                 options.drain = WATCH_DRAIN;
             }
-            "--inspect" | "--inspect-brk" => {
+            "--inspect" | "--inspect-wait" | "--inspect-brk" => {
                 options.inspect = Some(inspect::DEFAULT);
-                options.inspect_brk = arg == "--inspect-brk";
+                options.inspect_wait = inspect::wait(&arg);
             }
             // As with node: --inspect=9230 or --inspect=host:port
-            inspect if inspect.starts_with("--inspect=") || inspect.starts_with("--inspect-brk=") => {
-                options.inspect_brk = inspect.starts_with("--inspect-brk=");
-                let address = &inspect[inspect.find('=').unwrap_or_default() + 1..];
+            inspect if matches!(inspect.split_once('='), Some(("--inspect" | "--inspect-wait" | "--inspect-brk", _))) => {
+                let (option, address) = inspect.split_once('=').unwrap_or_default();
+                options.inspect_wait = inspect::wait(option);
                 let parsed = match address.parse::<u16>() {
                     Ok(port) => Some(std::net::SocketAddr::new(inspect::DEFAULT.ip(), port)),
                     Err(_) => std::net::ToSocketAddrs::to_socket_addrs(address).ok().and_then(|mut addresses| addresses.next()),

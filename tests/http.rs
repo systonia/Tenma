@@ -1658,6 +1658,43 @@ fn inspect_brk_waits_for_the_debugger_and_stops_at_the_first_statement() {
 }
 
 #[test]
+fn inspect_wait_waits_for_the_breakpoints_and_stops_at_the_first_statement_only_on_request() {
+    let (port, debugger) = (18_160, 19_250);
+    // A top-level statement on a line of its own: on line 12 of the fixture, a breakpoint would move
+    // into the handler
+    let app = scratch("inspect-wait").join("app.php");
+    std::fs::write(&app, format!("<?php\n$started = true;\nTenma::serve({port}, fn($request) => 'ok');\n")).unwrap();
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg(format!("--inspect-wait={debugger}")).arg(&app).spawn().unwrap());
+    let mut dap = Dap::start(debugger);
+    // Set before configurationDone, so it applies to the first statement already
+    dap.break_at(&app, &[2]);
+    dap.request("configurationDone", serde_json::json!({}));
+    let stop = dap.stopped();
+    assert_eq!((stop.line, &stop.event["reason"]), (2, &serde_json::json!("breakpoint")));
+    dap.command("continue");
+    assert!(get(port, "/").ends_with("ok"));
+
+    let (port, debugger) = (18_161, 19_251);
+    let _server = inspected(port, debugger, "--inspect-wait");
+    let mut dap = Dap::start(debugger);
+    dap.request("attach", serde_json::json!({"stopOnEntry": true}));
+    dap.request("configurationDone", serde_json::json!({}));
+    assert_eq!(&dap.stopped().event["reason"], &serde_json::json!("entry"));
+    dap.command("continue");
+    assert!(get(port, "/").ends_with("Hello world slept"));
+}
+
+#[test]
+fn inspect_brk_runs_on_when_the_editor_says_stop_on_entry_false() {
+    let (port, debugger) = (18_162, 19_252);
+    let _server = inspected(port, debugger, "--inspect-brk");
+    let mut dap = Dap::start(debugger);
+    dap.request("attach", serde_json::json!({"stopOnEntry": false}));
+    dap.request("configurationDone", serde_json::json!({}));
+    assert!(get(port, "/").ends_with("Hello world slept"));
+}
+
+#[test]
 fn inspect_keeps_the_session_and_breakpoints_across_watch_reloads() {
     let (port, debugger) = (18_125, 19_232);
     let directory = scratch("inspect-watch");
