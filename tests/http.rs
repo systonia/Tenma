@@ -221,6 +221,30 @@ fn classic_with_input_uploads_and_exit() {
 }
 
 #[test]
+fn a_fatal_error_while_parsing_a_form_leaves_nothing_for_the_next_request() {
+    let port = 18_133;
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args(["-d", "memory_limit=16M", "-d", "max_input_vars=1000000", "tests/fixtures/classic_io.php"])
+            .env("PORT", port.to_string())
+            .spawn()
+            .unwrap(),
+    );
+
+    // So many fields that PHP's multipart parser runs out of memory halfway through
+    let boundary = "tenmaboundary";
+    let body: String = (0..120_000).map(|i| format!("--{boundary}\r\nContent-Disposition: form-data; name=\"f[]\"\r\n\r\nleftover{i}\r\n")).collect::<String>() + &format!("--{boundary}--\r\n");
+    let failed = request(
+        port,
+        &format!("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()),
+    );
+    assert!(failed.starts_with("HTTP/1.1 500"), "{}", &failed[..failed.len().min(200)]);
+    // The fresh interpreter's php://input is this request's body, not the old one's freed memory
+    let input = post(port, "/input", "raw body");
+    assert!(input.ends_with("\r\n\r\ninput: raw body"), "{input}");
+}
+
+#[test]
 fn sessions_per_visitor_without_leaks() {
     let port = 18_088;
     let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/session.php").env("PORT", port.to_string()).spawn().unwrap());

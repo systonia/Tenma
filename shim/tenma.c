@@ -646,7 +646,7 @@ static void release_signals(void) {
     }
 }
 
-/** The body PHP's multipart parser reads via read_post; only set during tenma_parse_multipart. */
+/** The body PHP's multipart parser reads via read_post; only set during tenma_parse_multipart (and reset by tenma_thread_start). */
 static _Thread_local const char *post_data = NULL;
 static _Thread_local size_t post_len = 0, post_pos = 0;
 
@@ -744,6 +744,10 @@ static void register_std_streams(void) {
  */
 int tenma_thread_start(void) {
     (void) ts_resource(0);
+    // A fatal error inside tenma_parse_multipart skips its reset: the body it points at belonged to
+    // the old interpreter, and php://input of the next request would read it
+    post_data = NULL;
+    post_len = post_pos = 0;
     SIGG(reset) = 0;
     SG(options) |= SAPI_OPTION_NO_CHDIR;
     if (php_request_startup() == FAILURE) {
