@@ -238,7 +238,7 @@ fn classic_with_input_uploads_and_exit() {
 
 #[test]
 fn a_fatal_error_while_parsing_a_form_leaves_nothing_for_the_next_request() {
-    let port = 18_133;
+    let port = 18_137;
     let _server = Server(
         Command::new(env!("CARGO_BIN_EXE_tenma"))
             .args(["-d", "memory_limit=16M", "-d", "max_input_vars=1000000", "tests/fixtures/classic_io.php"])
@@ -775,7 +775,7 @@ fn exit_status_is_not_stale() {
 
 #[test]
 fn forms_at_their_limits() {
-    let port = 18_134;
+    let port = 18_138;
     // 8 MB in one text field: the parser once needed ten times that, now it fits next to the body
     let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["-d", "memory_limit=48M", "tests/fixtures/request_response.php"]).env("PORT", port.to_string()).spawn().unwrap());
     let boundary = "tenmaboundary";
