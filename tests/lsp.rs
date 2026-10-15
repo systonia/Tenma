@@ -167,6 +167,14 @@ fn loop_variables_get_the_element_type_of_what_they_loop_over() {
     lsp.change(&template, "@foreach ($this->authors as $author) {{ $author->name }} @endforeach");
     let definition = lsp.at("textDocument/definition", &template, 0, 51);
     assert_eq!(definition["uri"], uri(&root.join("src/Author.php")), "{definition}");
+    // A loop variable itself, value or key, leads to the loop that introduces it
+    lsp.change(&template, "<p>\n@foreach ($this->tags as $i => $tag)\n  {{ $tag }} {{ $i }} {{ $nope }}\n@endforeach");
+    for column in [6, 17] {
+        let definition = lsp.at("textDocument/definition", &template, 2, column);
+        assert_eq!(definition["uri"], uri(&template), "{definition}");
+        assert_eq!(definition["range"]["start"]["line"], 1, "{definition}");
+    }
+    assert!(lsp.at("textDocument/definition", &template, 2, 25).is_null());
 }
 
 #[test]

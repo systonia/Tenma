@@ -551,7 +551,23 @@ final class Answers
             $file = (string) $member->getDeclaringClass()->getFileName();
             return ['file' => $file, 'line' => self::propertyLine($member)];
         }
-        return null;
+        return self::loopLine($file, $text, $offset);
+    }
+
+    /** For a plain `$name` at $offset: the last foreach above that introduces it, as value or key. */
+    private static function loopLine(string $file, string $text, int $offset): ?array
+    {
+        preg_match('/^\$?\w*/', substr($text, $offset), $rest);
+        $before = substr($text, 0, $offset);
+        if (preg_match('/\$(\w*)$/', $before . $rest[0], $m) !== 1 || $m[1] === '' || $m[1] === 'this') {
+            return null;
+        }
+        $at = $offset + strlen($rest[0]);
+        $name = preg_quote($m[1], '/');
+        if (preg_match_all('/\bas\s+(?:\$\w+\s*=>\s*)?&?\$' . $name . '\b|\bas\s+&?\$' . $name . '\s*=>/', substr($text, 0, $at), $found, PREG_OFFSET_CAPTURE) === 0) {
+            return null;
+        }
+        return ['file' => $file, 'line' => substr_count($text, "\n", 0, end($found[0])[1]) + 1];
     }
 
     private function hover(string $file, string $text, int $offset): ?string
