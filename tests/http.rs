@@ -1516,13 +1516,16 @@ fn inspect_without_an_editor_never_stops() {
         assert!(response.starts_with("HTTP/1.1 500"), "after Content-Length {length}: {response:?}");
     }
     // A web page can POST to the debugger port; the browser's request line ends the session
+    // also with a colon in the path, which makes the request line look like a header
     let message = r#"{"seq":1,"type":"request","command":"initialize","arguments":{"adapterID":"tenma"}}"#;
-    let mut stream = TcpStream::connect(("127.0.0.1", debugger)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    stream.write_all(format!("POST / HTTP/1.1\r\nHost: 127.0.0.1:{debugger}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{message}", message.len()).as_bytes()).unwrap();
-    let mut answer = String::new();
-    let _ = stream.read_to_string(&mut answer);
-    assert_eq!(answer, "");
+    for path in ["/", "/x:y"] {
+        let mut stream = TcpStream::connect(("127.0.0.1", debugger)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.write_all(format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{debugger}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{message}", message.len()).as_bytes()).unwrap();
+        let mut answer = String::new();
+        let _ = stream.read_to_string(&mut answer);
+        assert_eq!(answer, "", "POST {path}");
+    }
     Dap::start(debugger);
 }
 

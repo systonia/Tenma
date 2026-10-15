@@ -286,11 +286,13 @@ fn read_message(reader: &mut impl BufRead) -> Option<Value> {
         if line.is_empty() {
             break;
         }
-        // Every header line has a colon; an HTTP request line ("POST / HTTP/1.1") from a web page
-        // that found the port does not, and ends the session
+        // DAP knows two headers. Anything else (an HTTP request line, also "POST /x:y HTTP/1.1", or
+        // the Host and Origin a browser always sends) is a web page that found the port: the session ends
         let (name, value) = line.split_once(':')?;
         if name.eq_ignore_ascii_case("content-length") {
             length = value.trim().parse().ok();
+        } else if !name.eq_ignore_ascii_case("content-type") {
+            return None;
         }
     }
     // An editor's messages are small: a length beyond this is a broken or hostile client
