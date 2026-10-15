@@ -32,6 +32,16 @@ fn request(port: u16, raw: &str) -> String {
     response
 }
 
+/// A request that leaves the connection open, as browsers do; read until the server closes it or 3 s pass.
+fn keep_alive(port: u16, path: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).unwrap();
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    String::from_utf8_lossy(&response).into_owned()
+}
+
 #[test]
 fn serves_requests_and_survives_exceptions() {
     let port = 18_080;
@@ -153,7 +163,9 @@ fn fatal_error_restarts_only_the_worker() {
     let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/fatal.php").env("PORT", port.to_string()).spawn().unwrap());
 
     assert!(get(port, "/").ends_with("request 1\n"));
-    assert!(get(port, "/oom").starts_with("HTTP/1.1 500"));
+    // The broken interpreter takes no further request on this connection
+    let failed = keep_alive(port, "/oom");
+    assert!(failed.starts_with("HTTP/1.1 500") && failed.contains("connection: close"), "{failed}");
     // New interpreter, script ran again: the counter starts over
     assert!(get(port, "/").ends_with("request 1\n"));
     // After an op the 500 comes right away, not only after the drain
@@ -623,6 +635,9 @@ fn restarts_without_leaks_or_double_signals() {
     for _ in 0..30 {
         get(port, "/");
     }
+    // The last request of an interpreter closes its connection: the next one goes to the fresh one
+    let last = keep_alive(port, "/");
+    assert!(last.contains("connection: close") && last.ends_with("Hello GET /\n"), "{last}");
     std::thread::sleep(Duration::from_millis(300));
     let before = open_files(restarting.0.id());
     for _ in 0..30 {

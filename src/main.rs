@@ -774,7 +774,7 @@ async fn respond(
     if !mounts.is_empty()
         && let Some(response) = files::serve(&mounts, request.method(), request.uri(), request.headers()).await
     {
-        return Ok(response);
+        return Ok(close_if_restarting(response, options));
     }
     let (mut parts, body) = request.into_parts();
     // ponytail: body fully in memory up to the limit; streams when large uploads come
@@ -788,7 +788,7 @@ async fn respond(
         Err(_) => return Ok(plain(StatusCode::REQUEST_TIMEOUT, "Request Timeout\n")),
     };
     if BROKEN.get() {
-        return Ok(plain(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n"));
+        return Ok(close_if_restarting(plain(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n"), options));
     }
     let upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
     let uri = parts.uri.to_string();
@@ -829,7 +829,17 @@ async fn respond(
     for (name, value) in headers {
         builder = builder.header(name, value);
     }
-    Ok(builder.body(body).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Invalid response headers\n")))
+    Ok(close_if_restarting(builder.body(body).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Invalid response headers\n")), options))
+}
+
+/// After a fatal error or the last of --max-requests this interpreter takes no more requests: a
+/// client that kept the connection would send its next one into the drain (reset, or a 503 from
+/// the broken interpreter). Connection: close sends it to a new connection, served by the fresh one.
+fn close_if_restarting(mut response: Response<ResponseBody>, options: Options) -> Response<ResponseBody> {
+    if BROKEN.get() || options.max_requests.is_some_and(|max| HANDLED.get() >= max) {
+        response.headers_mut().insert(hyper::header::CONNECTION, hyper::header::HeaderValue::from_static("close"));
+    }
+    response
 }
 
 /// Responds with 101 and hands the connection to PHP after the upgrade.
