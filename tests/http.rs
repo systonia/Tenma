@@ -261,6 +261,22 @@ fn a_fatal_error_while_parsing_a_form_leaves_nothing_for_the_next_request() {
 }
 
 #[test]
+fn a_silent_connection_does_not_hold_a_restart() {
+    let port = 18_135;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--max-requests", "1", "tests/fixtures/hello.php"]).env("PORT", port.to_string()).spawn().unwrap());
+    get(port, "/");
+    // Like a browser's preconnect: open, but no request yet
+    let silent = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    // This request restarts the interpreter; the next one waits for the fresh one, not for the silent socket
+    get(port, "/");
+    let started = Instant::now();
+    assert!(get(port, "/world").ends_with("Hello GET /world\n"));
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    drop(silent);
+}
+
+#[test]
 fn sessions_per_visitor_without_leaks() {
     let port = 18_088;
     let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/session.php").env("PORT", port.to_string()).spawn().unwrap());
