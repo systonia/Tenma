@@ -663,6 +663,27 @@ fn postgres_connections_come_back_clean() {
 }
 
 #[test]
+fn php_input_kept_by_an_object_survives_the_request() {
+    let port = 18_153;
+    // The system allocator scribbles over freed memory: a stream freed under the object crashes tenma
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .arg("tests/fixtures/scripts/input_kept.php")
+            .env("PORT", port.to_string())
+            .env("USE_ZEND_ALLOC", "0")
+            .env("MallocScribble", "1")
+            .spawn()
+            .unwrap(),
+    );
+    let post = |body: &str| request(port, &format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()));
+    assert!(post("hello").ends_with("\r\n\r\nhello"));
+    for _ in 0..3 {
+        let response = post("next");
+        assert!(response.ends_with("still here\n"), "{response:?}");
+    }
+}
+
+#[test]
 fn classic_without_client_influence() {
     let port = 18_096;
     let _server = Server(

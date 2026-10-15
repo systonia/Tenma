@@ -1941,7 +1941,10 @@ static void close_input_streams(void) {
     zend_resource *resource;
     ZEND_HASH_FOREACH_PTR(&EG(regular_list), resource) {
         php_stream *stream = resource->ptr;
-        if (resource->type == php_file_le_stream() && stream && stream->ops && stream->ops->label && strcmp(stream->ops->label, "Input") == 0) {
+        // NO_FCLOSE: a C owner holds the stream by pointer without a reference (SplFileObject, a libxml
+        // reader) and closes it itself; closing it here would leave that owner with freed memory
+        if (resource->type == php_file_le_stream() && stream && stream->ops && stream->ops->label && strcmp(stream->ops->label, "Input") == 0
+            && !(stream->flags & PHP_STREAM_FLAG_NO_FCLOSE)) {
             streams[count++] = stream;
         }
     } ZEND_HASH_FOREACH_END();
