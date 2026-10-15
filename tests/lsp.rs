@@ -182,7 +182,7 @@ fn what_the_running_app_publishes_shows_next_to_the_providers_problems() {
     let root = project("published");
     let template = root.join("page.tpl.php");
     let mut lsp = Lsp::start(&root);
-    let before = lsp.open(&template, "<?= $this->nope ?>");
+    let before = lsp.open(&template, "<?= $this->nope ?> TODO");
     let published = root.join(".tenma/diagnostics");
     std::fs::create_dir_all(&published).unwrap();
     // As Tenma::diagnostics() writes it under --watch
@@ -192,7 +192,14 @@ fn what_the_running_app_publishes_shows_next_to_the_providers_problems() {
     assert_eq!(diagnostics.as_array().unwrap().len(), before.as_array().unwrap().len() + 1, "{diagnostics}");
     let mine = diagnostics.as_array().unwrap().iter().find(|d| d["source"] == "my-app").unwrap();
     assert_eq!((mine["message"].as_str(), mine["severity"].as_u64(), mine["range"]["start"]["character"].as_u64()), (Some("slow render"), Some(2), Some(4)));
+    // The same problem from a provider and from the app shows once
+    let own = &before[0];
+    let twice = json!([{ "file": template.to_str().unwrap(), "line": own["range"]["start"]["line"].as_u64().unwrap() + 1, "message": own["message"] }]);
+    std::fs::write(published.join("app.checks.json"), twice.to_string()).unwrap();
+    assert_eq!(lsp.diagnostics().as_array().unwrap().len(), before.as_array().unwrap().len() + 1);
+    std::fs::remove_file(published.join("app.checks.json")).unwrap();
     // Taken back: only the providers' problems are left
+    assert_eq!(lsp.diagnostics().as_array().unwrap().len(), before.as_array().unwrap().len() + 1);
     std::fs::remove_file(published.join("app.my-app.json")).unwrap();
     assert_eq!(lsp.diagnostics(), before);
 }

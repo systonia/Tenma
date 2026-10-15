@@ -232,6 +232,12 @@ final class Server
             foreach ($files[$uri] ?? [] as $problem) {
                 $text = $this->documents[$uri] ?? ($file !== null && is_file($file) ? (string) file_get_contents($file) : '');
                 $line = max(0, (int) ($problem['line'] ?? 1) - 1);
+                // An app that checks what a provider checks too: once is enough, the provider's follows the typing
+                foreach ($this->checked[$uri] ?? [] as $own) {
+                    if ($own['range']['start']['line'] === $line && $own['message'] === (string) ($problem['message'] ?? '')) {
+                        continue 2;
+                    }
+                }
                 $diagnostics[] = [
                     'range' => ['start' => ['line' => $line, 'character' => max(0, (int) ($problem['column'] ?? 1) - 1)], 'end' => ['line' => $line, 'character' => lineLength($text, $line)]],
                     'severity' => match ($problem['severity'] ?? 'error') { 'warning' => 2, 'info' => 3, default => 1 },
