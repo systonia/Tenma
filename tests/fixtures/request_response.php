@@ -26,6 +26,15 @@ Tenma::serve((int) getenv('PORT'), function (Request $request): Response {
                 ->cookie('theme', 'dark', expires: 2000000000, secure: true, sameSite: 'Strict')
                 ->header('x-two', 'one')
                 ->header('x-two', 'two', append: true);
+        case '/header-rejected':
+            try {
+                return (new Response())->header('content-disposition', "attachment; filename=\"a\x1fb\"");
+            } catch (ValueError $error) {
+                return new Response($error->getMessage());
+            }
+        case '/header-in-array':
+            // Past header(): the array is checked when the response goes out
+            return new Response('never sent', headers: ['x-name' => $request->query['value'] ?? '']);
         case '/html':
             return Response::html('<h1>Hello</h1>', 201);
         default:

@@ -1617,10 +1617,7 @@ final class Response
     /** Sets a header; with $append another value is added instead of replacing the existing one. */
     public function header(string $name, string $value, bool $append = false): self
     {
-        // Line breaks and null bytes would start a header of their own (response splitting)
-        if (!preg_match('/\A[!#$%&\'*+.^_`|~0-9A-Za-z-]+\z/', $name) || preg_match('/[\r\n\0]/', $value)) {
-            throw new \ValueError("Invalid header: $name");
-        }
+        checkHeader($name, $value);
         $key = strtolower($name);
         $this->headers[$key] = $append && isset($this->headers[$key]) ? [...(array) $this->headers[$key], $value] : $value;
         return $this;
@@ -1795,6 +1792,17 @@ final class WebSocket
 }
 
 /**
+ * The rules hyper checks only after the handler: a token as the name, no control character but tab
+ * in the value. Line breaks would also start a header of their own (response splitting).
+ */
+function checkHeader(string $name, string $value): void
+{
+    if (!preg_match('/\A[!#$%&\'*+.^_`|~0-9A-Za-z-]+\z/', $name) || preg_match('/[\x00-\x08\x0a-\x1f\x7f]/', $value)) {
+        throw new \ValueError("Invalid header: $name");
+    }
+}
+
+/**
  * @param array<string, string|list<string>> $headers
  * @return list<string>
  */
@@ -1803,6 +1811,7 @@ function headerLines(array $headers): array
     $lines = [];
     foreach ($headers as $name => $values) {
         foreach ((array) $values as $value) {
+            checkHeader((string) $name, (string) $value);
             $lines[] = "$name: $value";
         }
     }

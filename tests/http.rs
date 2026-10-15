@@ -835,6 +835,13 @@ fn request_and_response_in_fiber_mode() {
     assert!(set.contains("set-cookie: sid=a%20b%3Bc; Path=/app; HttpOnly; SameSite=Lax"), "{set}");
     assert!(set.contains("set-cookie: theme=dark; Expires=Wed, 18 May 2033 03:33:20 GMT; Max-Age=") && set.contains("; Path=/; Secure; HttpOnly; SameSite=Strict"), "{set}");
     assert!(set.contains("x-two: one") && set.contains("x-two: two"));
+    // A control character in a header fails where it is set, or as a 500 instead of a lost header
+    assert!(get(port, "/header-rejected").ends_with("Invalid header: content-disposition"));
+    for value in ["a%1Fb", "a%00b"] {
+        let response = get(port, &format!("/header-in-array?value={value}"));
+        assert!(response.starts_with("HTTP/1.1 500") && !response.contains("never sent"), "{response}");
+    }
+    assert!(get(port, "/header-in-array?value=a%09b").contains("x-name: a\tb"));
     let html = get(port, "/html");
     assert!(html.starts_with("HTTP/1.1 201") && html.contains("content-type: text/html; charset=utf-8") && html.ends_with("<h1>Hello</h1>"));
 }
