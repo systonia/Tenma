@@ -41,8 +41,9 @@ API at a glance:
   - `stream(fn (Stream $out))` and `events(fn (EventStream $events))` for streaming and server-sent events.
   - `websocket(fn (WebSocket $socket))` for WebSockets: `receive()` returns null once the client is gone, `send()` writes. A write to a closed connection throws `ConnectionClosed`.
 - `Tenma\Hook` in `tenma.dev.php`: build steps for `tenma --watch`, such as Tailwind or caches.
+- `Tenma\Lsp\Provider`: what a package adds to `tenma lsp`, the language server that runs next to the editor's PHP server. It names the class `$this` is bound to in a non-class file (tenma then completes `$this->` by reflection) and adds completions, definitions and diagnostics. A package names it in `composer.json` under `extra.tenma.lsp`.
 
-CLI: `tenma app.php`, `--watch`, `--inspect` (a DAP debugger on 127.0.0.1:9229), `--workers N|auto`, `--max-body 10m`, `--max-requests N`, `--db-pool N`, `--request-timeout 30`, `--max-connections 1024`, `-d name=value`, `-c php.ini`, `--stubs`, and `tenma build`.
+CLI: `tenma app.php`, `--watch`, `--inspect` (a DAP debugger on 127.0.0.1:9229), `--workers N|auto`, `--max-body 10m`, `--max-requests N`, `--db-pool N`, `--request-timeout 30`, `--max-connections 1024`, `-d name=value`, `-c php.ini`, `--stubs`, `tenma build` and `tenma lsp`.
 
 ## Docs
 

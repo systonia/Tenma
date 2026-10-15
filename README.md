@@ -139,6 +139,7 @@ tenma --inspect app.php          # debugger (DAP) on 127.0.0.1:9229, like node -
 tenma --inspect-wait app.php     # wait until the debugger has set its breakpoints
 tenma --inspect-brk app.php      # wait for the debugger, stop at the script's first line
 tenma build                      # run the hooks of tenma.dev.php once (CI, Dockerfile)
+tenma lsp                        # language server for editors, on stdin and stdout
 tenma --workers 4 app.php        # four workers, each with its own PHP interpreter and its own state
 tenma --workers auto app.php     # one worker per core
 tenma --max-body 50m app.php     # largest request body, default 10m, 413 above that
@@ -222,6 +223,25 @@ composer require --dev tenma/stubs
 
 PhpStorm and Intelephense pick them up from `vendor/`; for PHPStan the package brings an `extension.neon` (automatic with `phpstan/extension-installer`). The stubs are never autoloaded, so nothing changes at runtime. `tenma --stubs` prints them for the binary at hand.
 
+### Language server
+
+`tenma lsp` is a language server (LSP on stdin and stdout) that runs **next to** the editor's PHP server (Intelephense, PHP Tools, PhpStorm), not instead of it: the editor merges the answers. It answers what that server cannot know. Packages add their part through a `Tenma\Lsp\Provider`, named in their `composer.json`:
+
+```json
+"extra": { "tenma": { "lsp": "Waypoint\\Live\\Editor" } }
+```
+
+A provider can bind `$this` in a file that is no class (a template) to a class: tenma then completes `$this->` and `$this->prop->` (private members too, the file runs bound to the object), shows type and doc comment on hover and leads F12 to the declaration, all by reflection. The provider adds its own completions, definitions and diagnostics; these get the editor's text, saved or not. Providers come from the project's `composer.json` and from every installed package (`vendor/composer/installed.json`).
+
+Two processes: the server keeps the open documents, a worker (`tenma lsp --worker DIR`) loads the project's `vendor/autoload.php` and the providers. PHP cannot load a changed class again, so saving a `.php` file ends the worker and the next question starts a new one; a class shows its new members once it is saved. A provider that throws is logged on stderr and left out; one that takes longer than 5 seconds ends the worker. Loading the autoloader runs the project's code: start `tenma lsp` only in projects you trust.
+
+VS Code and VSCodium start it through [Tenma-VSCode](https://github.com/systonia/Tenma-VSCode), in trusted workspaces. Other editors run `tenma lsp` as a language server for PHP files, e.g. Neovim:
+
+```lua
+vim.lsp.config('tenma', { cmd = { 'tenma', 'lsp' }, filetypes = { 'php' }, root_markers = { 'composer.json' } })
+vim.lsp.enable('tenma')
+```
+
 ## Architecture
 
 | Path | Contents |
@@ -240,9 +260,11 @@ PhpStorm and Intelephense pick them up from `vendor/`; for PHPStan the package b
 | `shim/tenma.c` | C layer: embed PHP, `tenma_listen()` for PHP, call handlers, convert PHP values to C values, catch fatal errors with `zend_try` |
 | `stdlib/tenma.php` | Standard library in PHP, embedded in the binary: `Tenma::serve()`, `Tenma::serveClassic()`, `Request`, `Response` |
 | `stdlib/stubs.php` | `tenma --stubs`: prints the public API as stubs by reflection, for IDEs and PHPStan |
+| `stdlib/lsp.php` | `tenma lsp`: the language server and its worker, in PHP; the providers' interface `Tenma\Lsp\Provider` is in `stdlib/tenma.php` |
 | `php-build/build.sh` | Builds PHP 8.5 from source as `libphp.a` (embed SAPI, ZTS), linked statically. Extensions: PDO with MySQL, Postgres and SQLite, mysqli, pgsql, sqlite3, openssl, curl, sodium, intl, bcmath, gmp, gd, zip, mbstring, session, sockets, exif, XML, fileinfo, filter. The libraries for these come from the macOS SDK and Homebrew (list in the script) and are linked dynamically. |
 | `demo/waypoint/` | Waypoint app (framework [Waypoint](https://github.com/systonia/Waypoint)) with a waypoint API; runs under tenma in fiber mode and unchanged under `php -S` |
 | `tests/http.rs` | Starts the binary and sends real requests |
+| `tests/lsp.rs` | Speaks LSP to `tenma lsp` on the project in `tests/fixtures/lsp` |
 
 Flow: the main thread starts PHP (modules); each worker thread gets its own interpreter (ZTS, `tenma_thread_start`) and loads the standard library, then the script. The first worker starts alone; if the script registers no server, it was an ordinary script and tenma exits. Otherwise the remaining workers start, and the main thread opens the ports, accepts connections and distributes them round-robin across the workers. A connection stays with its worker. As with the CLI, `$_SERVER['SCRIPT_FILENAME']` points to the script. `Tenma::serve()` only registers a handler via `tenma_listen()`. Once the script has finished, Rust opens the ports. Each request calls the PHP handler synchronously on the loop thread. Asynchronously: the handler runs in a fiber. When it calls an op (`\tenma_op_sleep`, `\tenma_op_fetch`), Rust starts a task and returns an op ID, and the fiber suspends with `Fiber::suspend()`. When the task is done, Rust calls `Tenma\Internal\complete()`, which resumes the fiber with the result. Finished handlers respond via `\tenma_respond($rid, …)`, and Rust passes the response to the waiting HTTP request. Classic mode has no fibers, because superglobals, headers and output buffers exist only once; there, requests run one after another and asynchronous functions throw.
 

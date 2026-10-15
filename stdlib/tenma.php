@@ -946,6 +946,30 @@ namespace Tenma {
     }
 }
 
+namespace Tenma\Lsp {
+    /**
+     * What a package adds to `tenma lsp`, the language server that runs next to the editor's own
+     * PHP server. A package names its provider in composer.json, `"extra": {"tenma": {"lsp":
+     * "Vendor\\Editor"}}`; tenma creates it with the project's directory, in a process that loads
+     * the project's autoloader. Files are absolute paths, offsets and texts are bytes: `$text` is
+     * the editor's content, saved or not.
+     */
+    interface Provider
+    {
+        /** The class `$this` is bound to in $file (a template, say), or null: tenma then completes `$this->`. */
+        public function thisClass(string $file): ?string;
+
+        /** @return list<array{label: string, kind?: 'method'|'property'|'class'|'value'|'keyword', detail?: string, insert?: string}> */
+        public function completions(string $file, string $text, int $offset): array;
+
+        /** @return array{file: string, line: int}|null Where the name at $offset is declared */
+        public function definition(string $file, string $text, int $offset): ?array;
+
+        /** @return list<array{line: int, message: string, severity?: 'error'|'warning'|'info'}> Lines count from 1 */
+        public function diagnostics(string $file, string $text): array;
+    }
+}
+
 namespace Tenma\Internal {
     /**
      * Runs tenma.dev.php (src/dev.rs): checks the hooks it returns and orders them, then runs each

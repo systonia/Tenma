@@ -1057,7 +1057,7 @@ fn stubs_describe_the_public_api_only() {
     assert!(output.status.success(), "{output:?}");
     let stubs = String::from_utf8_lossy(&output.stdout);
     assert!(stubs.starts_with("<?php\n"), "{stubs}");
-    for expected in ["final class Tenma", "public static function serve(int $port, callable $handler", "public static function async(callable $work): \\Tenma\\Task {}", "namespace Tenma\\Http {", "final class Request", "final class AsyncLocal", "public static function readFile(string $path): string {}"] {
+    for expected in ["final class Tenma", "public static function serve(int $port, callable $handler", "public static function async(callable $work): \\Tenma\\Task {}", "namespace Tenma\\Http {", "final class Request", "final class AsyncLocal", "public static function readFile(string $path): string {}", "namespace Tenma\\Lsp {", "interface Provider", "public function thisClass(string $file): ?string;"] {
         assert!(stubs.contains(expected), "missing {expected}");
     }
     for hidden in ["Tenma\\Internal", "@internal", "class Multipart", "function call("] {

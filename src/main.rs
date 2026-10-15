@@ -42,7 +42,9 @@ use tokio::task::LocalSet;
 const STDLIB: &str = include_str!("../stdlib/tenma.php");
 /// Prints the public API as stubs; only evaluated for `tenma --stubs`.
 const STUBS: &str = include_str!("../stdlib/stubs.php");
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma --version";
+/// The language server; only evaluated for `tenma lsp`.
+const LSP: &str = include_str!("../stdlib/lsp.php");
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -130,6 +132,7 @@ pub fn broken() -> bool {
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("--stubs") => return stubs(),
+        Some("lsp") => return lsp(),
         Some("--version" | "-v") => {
             println!("tenma {} (PHP {})", env!("CARGO_PKG_VERSION"), env!("TENMA_PHP_VERSION"));
             return ExitCode::SUCCESS;
@@ -177,6 +180,31 @@ fn stubs() -> ExitCode {
     });
     php::stop();
     match printed {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("tenma: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `tenma lsp`: the language server of stdlib/lsp.php on stdin and stdout. `tenma lsp --worker DIR` is
+/// its own child process, the one that loads the project.
+fn lsp() -> ExitCode {
+    let quote = |text: &str| format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"));
+    let binary = std::env::current_exe().map_or_else(|_| "tenma".to_owned(), |path| path.to_string_lossy().into_owned());
+    let args: Vec<String> = std::env::args().skip(2).map(|arg| quote(&arg)).collect();
+    let setup = format!("namespace Tenma\\Internal\\Lsp; const VERSION = '{}';", env!("CARGO_PKG_VERSION"));
+    let call = format!("\\Tenma\\Internal\\Lsp\\main({}, [{}]);", quote(&binary), args.join(", "));
+    // stdout carries the protocol: PHP's warnings go to stderr, which editors show in their log
+    let ran = php::define_ini("display_errors=stderr").and_then(|()| php::start()).and_then(|()| {
+        php::eval(STDLIB.trim_start_matches("<?php"), "tenma:stdlib")
+            .and_then(|()| php::eval(&setup, "tenma:version"))
+            .and_then(|()| php::eval(LSP.trim_start_matches("<?php"), "tenma:lsp"))
+            .and_then(|()| php::eval(&call, "tenma:lsp-main"))
+    });
+    php::stop();
+    match ran {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("tenma: {message}");

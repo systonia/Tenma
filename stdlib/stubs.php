@@ -78,7 +78,7 @@ function method(\ReflectionMethod $method): string
     $parameters = array_map(fn ($parameter) => parameter($parameter, $promoted), $method->getParameters());
     $signature = implode(' ', $modifiers) . ' function ' . $method->getName() . '(' . implode(', ', $parameters) . ')';
     $return = type($method->getReturnType());
-    return doc($method, '        ') . '        ' . $signature . ($return !== '' ? ": $return" : '') . " {}\n";
+    return doc($method, '        ') . '        ' . $signature . ($return !== '' ? ": $return" : '') . ($method->isAbstract() ? ";\n" : " {}\n");
 }
 
 function render(\ReflectionClass $class): string
@@ -129,7 +129,7 @@ function render(\ReflectionClass $class): string
 }
 
 $byNamespace = [];
-foreach (get_declared_classes() as $name) {
+foreach ([...get_declared_classes(), ...get_declared_interfaces()] as $name) {
     $class = new \ReflectionClass($name);
     $public = $name === 'Tenma' || (str_starts_with($name, 'Tenma\\') && !str_starts_with($name, 'Tenma\\Internal\\'));
     if ($class->isInternal() || !$public || internal($class)) {
