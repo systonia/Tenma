@@ -266,9 +266,10 @@ fn read_message(reader: &mut impl BufRead) -> Option<Value> {
         if line.is_empty() {
             break;
         }
-        if let Some((name, value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
+        // Every header line has a colon; an HTTP request line ("POST / HTTP/1.1") from a web page
+        // that found the port does not, and ends the session
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("content-length") {
             length = value.trim().parse().ok();
         }
     }
