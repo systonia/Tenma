@@ -92,6 +92,8 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
         })(),
         '/whoami' => $db->first("SELECT current_setting('application_name') AS name"),
         '/backend' => $db->first('SELECT pg_backend_pid() AS pid'),
+        // More digits than a float holds: a string, as PDO returns numeric; the rest stays a number
+        '/numeric' => $db->first('SELECT 123456789012345678.90::numeric AS big, 9.99::numeric AS small'),
         // Parameters of the app's own types: the driver looks each one up the first time it meets it
         '/types' => $db->script("DROP TYPE IF EXISTS {$table}_mood, {$table}_size; CREATE TYPE {$table}_mood AS ENUM ('happy'); CREATE TYPE {$table}_size AS ENUM ('big')"),
         '/mood' => $db->first("SELECT \$1::{$table}_mood::text AS value", ['happy']),

@@ -196,7 +196,73 @@ async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result
     // MATERIALIZED: the rows come in the order the query returns them (ORDER BY)
     let wrapped = format!("WITH tenma_query AS MATERIALIZED ({sql}\n) SELECT coalesce(json_agg(tenma_query), '[]')::text FROM tenma_query");
     let row = client.query_one(&wrapped, &refs).await?;
-    Ok(row.get(0))
+    Ok(exact_numbers(row.get(0)))
+}
+
+/// PHP decodes a JSON number with a fraction or exponent as float. A `numeric` value a float cannot
+/// hold exactly (123456789012345678.90) goes to PHP as a string instead, as PDO returns it; one it
+/// can hold (9.99, a float8) stays a number. Integers stay: JSON_BIGINT_AS_STRING covers them.
+fn exact_numbers(json: String) -> String {
+    let bytes = json.as_bytes();
+    let mut out = String::with_capacity(json.len());
+    let (mut start, mut i, mut in_string) = (0, 0, false);
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if in_string {
+            match byte {
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            i += 1;
+        } else if byte == b'"' {
+            in_string = true;
+            i += 1;
+        } else if byte == b'-' || byte.is_ascii_digit() {
+            let end = i + bytes[i..].iter().position(|b| !matches!(b, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')).unwrap_or(bytes.len() - i);
+            let number = &json[i..end];
+            if number.contains(['.', 'e', 'E']) && !number.parse::<f64>().is_ok_and(|float| decimal(number) == decimal(&float.to_string())) {
+                out.push_str(&json[start..i]);
+                out.push('"');
+                out.push_str(number);
+                out.push('"');
+                start = end;
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&json[start..]);
+    out
+}
+
+/// A decimal number as sign, significant digits and power of ten: 1.10, 1.1 and 11e-1 are equal.
+fn decimal(number: &str) -> (bool, String, i64) {
+    let (negative, number) = number.strip_prefix('-').map_or((false, number), |rest| (true, rest));
+    let (mantissa, exponent) = number.split_once(['e', 'E']).map_or((number, 0), |(mantissa, exponent)| (mantissa, exponent.parse().unwrap_or(0)));
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let trimmed = digits.trim_start_matches('0').trim_end_matches('0');
+    if trimmed.is_empty() {
+        return (false, String::new(), 0);
+    }
+    let trailing = (digits.len() - digits.trim_end_matches('0').len()) as i64;
+    (negative, trimmed.to_owned(), exponent - fraction.len() as i64 + trailing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exact_numbers;
+
+    #[test]
+    fn numbers_a_float_cannot_hold_become_strings() {
+        assert_eq!(
+            exact_numbers(r#"[{"a": 9.99, "b": 123456789012345678.90, "c": 42, "d": "1.234567890123456789", "e": 0.30000000000000004, "f": 1.10, "g": 1e+20, "h": -0.0000000000000000000123456789012345678901}]"#.into()),
+            r#"[{"a": 9.99, "b": "123456789012345678.90", "c": 42, "d": "1.234567890123456789", "e": 0.30000000000000004, "f": 1.10, "g": 1e+20, "h": "-0.0000000000000000000123456789012345678901"}]"#
+        );
+        assert_eq!(exact_numbers(r#"[{"s": "say \"1.00000000000000000001\""}]"#.into()), r#"[{"s": "say \"1.00000000000000000001\""}]"#);
+    }
 }
 
 async fn postgres(mode: String, target: String, sql: String, params: Vec<Value>) -> Result<String, Failure> {

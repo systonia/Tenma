@@ -373,6 +373,8 @@ fn postgres_and_redis_async() {
 
     let inserted = get(port, "/insert?name=first");
     assert!(inserted.contains(r#""name": "first""#) && inserted.contains(r#""amount": 42"#) && inserted.contains(r#""price": 9.99"#), "{inserted}");
+    let numeric = get(port, "/numeric");
+    assert!(numeric.contains(r#""big": "123456789012345678.90""#) && numeric.contains(r#""small": 9.99"#), "{numeric}");
     assert!(inserted.contains(r#""tags": ["#) && inserted.contains(r#""created": ""#), "{inserted}");
     assert!(get(port, "/list").contains(r#""name": "first""#));
     assert!(get(port, "/rollback").contains(r#""n": 0"#));
