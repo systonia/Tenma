@@ -139,16 +139,16 @@ extern "C" fn tenma_rs_reloaded_by(buffer: *mut u8, capacity: usize) -> usize {
     RUN_RELOADED_BY.with_borrow(|reloaded| copy_path(reloaded.as_deref(), buffer, capacity))
 }
 
+/// The path's length; copied only if it fits, otherwise the caller asks again with that much room.
 fn copy_path(reloaded: Option<&Path>, buffer: *mut u8, capacity: usize) -> usize {
     let Some(path) = reloaded else {
         return usize::MAX;
     };
     let bytes = path.as_os_str().as_bytes();
-    if bytes.len() > capacity {
-        return usize::MAX;
+    if bytes.len() <= capacity {
+        // SAFETY: the shim passes a buffer of `capacity` bytes
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
     }
-    // SAFETY: the shim passes a buffer of `capacity` bytes
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
     bytes.len()
 }
 

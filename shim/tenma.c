@@ -85,7 +85,7 @@ extern uint64_t tenma_rs_fs(const char *op, size_t op_len, const char *path, siz
 extern void tenma_rs_exit(int status);
 /** tenma --watch: a file PHP loaded, see tenma_report_included. */
 extern void tenma_rs_included(const char *path, size_t len);
-/** tenma --watch: copies the path of the change behind the last reload into buffer, its length; SIZE_MAX for none. */
+/** tenma --watch: the length of the path of the change behind this run, copied into buffer if it fits; SIZE_MAX for none. */
 extern size_t tenma_rs_reloaded_by(char *buffer, size_t capacity);
 /** tenma --inspect: a statement is about to run, see inspect_statement. */
 extern void tenma_rs_statement(const char *file, size_t file_len, uint32_t line, uintptr_t frame, uintptr_t fiber);
@@ -1433,10 +1433,20 @@ PHP_FUNCTION(tenma_reloaded_by) {
     ZEND_PARSE_PARAMETERS_NONE();
     char buffer[4096];
     size_t len = tenma_rs_reloaded_by(buffer, sizeof buffer);
-    if (len > sizeof buffer) {
+    if (len == SIZE_MAX) {
         RETURN_NULL();
     }
-    RETURN_STRINGL(buffer, len);
+    if (len <= sizeof buffer) {
+        RETURN_STRINGL(buffer, len);
+    }
+    // A longer path: once more with room for it
+    zend_string *path = zend_string_alloc(len, 0);
+    if (tenma_rs_reloaded_by(ZSTR_VAL(path), len) != len) {
+        zend_string_release(path);
+        RETURN_NULL();
+    }
+    ZSTR_VAL(path)[len] = '\0';
+    RETURN_NEW_STR(path);
 }
 
 PHP_FUNCTION(tenma_debugger) {
