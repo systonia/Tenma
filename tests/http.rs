@@ -1098,7 +1098,8 @@ fn watch_reloads_on_changes() {
     // No server for a while, but an interval keeps the script running: 503 from every worker, and
     // every worker serves again after the next change
     std::fs::write(&app, "<?php\nTenma::setInterval(fn () => null, 1);\n").unwrap();
-    let response = eventually(port, "/", |response| response.starts_with("HTTP/1.1 503"));
+    // Waits for the new script: a worker still reloading from the syntax error answers 503 too
+    let response = eventually(port, "/", |response| response.contains("serves no requests"));
     assert!(response.contains("serves no requests"), "{response}");
     for _ in 0..4 {
         assert!(get(port, "/").starts_with("HTTP/1.1 503"));
