@@ -477,7 +477,7 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
                 if listeners.is_empty() {
                     // If the script ended with exit() or die(), tenma starts nothing it had scheduled
                     // With --watch, exit() in a hook ends tenma through dev::EXIT
-                    let ended = if php::script_exited() { Ok(status) } else { run_until_idle(&mut connections, !(dev && options.watch)) };
+                    let ended = if php::script_exited() { Ok(status) } else { run_until_idle(&mut connections, !(dev && options.watch), options) };
                     match ended {
                         // exit() in a hook: tenma is ending
                         Ok(_) if dev && dev::exit_status().is_some() => Stop::Closed,
@@ -560,18 +560,9 @@ fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options
                     let Some((_, stream)) = connection else {
                         break Stop::Closed;
                     };
-                    let Ok(stream) = TcpStream::from_std(stream) else {
-                        continue;
-                    };
-                    let service = service_fn(|_| async { Ok::<_, Infallible>(plain(StatusCode::SERVICE_UNAVAILABLE, "The script failed to load, see the console. Waiting for changes.\n")) });
-                    // No keep-alive: each connection gets its 503 and ends
-                    answering.spawn(
-                        http1::Builder::new()
-                            .timer(hyper_util::rt::TokioTimer::new())
-                            .header_read_timeout(options.request_timeout)
-                            .keep_alive(false)
-                            .serve_connection(TokioIo::new(stream), service),
-                    );
+                    if let Some(refused) = refuse(stream, options, "The script failed to load, see the console. Waiting for changes.\n") {
+                        answering.spawn(refused);
+                    }
                     while answering.try_join_next().is_some() {}
                 }
                 () = change.notified() => break Stop::Restart,
@@ -584,10 +575,23 @@ fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options
     })
 }
 
+/// Answers a connection no script serves with 503, without keep-alive: it gets its answer and ends.
+fn refuse(stream: std::net::TcpStream, options: Options, message: &'static str) -> Option<impl std::future::Future<Output = Result<(), hyper::Error>> + Send + 'static> {
+    let stream = TcpStream::from_std(stream).ok()?;
+    let service = service_fn(move |_| async move { Ok::<_, Infallible>(plain(StatusCode::SERVICE_UNAVAILABLE, message)) });
+    Some(
+        http1::Builder::new()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(options.request_timeout)
+            .keep_alive(false)
+            .serve_connection(TokioIo::new(stream), service),
+    )
+}
+
 /// A script without servers: like Node, the event loop runs while timers or other ops are pending.
 /// Ends with the status of exit() in timers or background work, 255 after a fatal error. With
 /// --watch, a change (Restart) or the end of tenma (Closed) stops it early.
-fn run_until_idle(connections: &mut UnboundedReceiver<Connection>, exits: bool) -> Result<u8, Stop> {
+fn run_until_idle(connections: &mut UnboundedReceiver<Connection>, exits: bool, options: Options) -> Result<u8, Stop> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
     let restart = RESTART.with(Rc::clone);
     let change = CHANGE.with_borrow(Arc::clone);
@@ -596,16 +600,25 @@ fn run_until_idle(connections: &mut UnboundedReceiver<Connection>, exits: bool) 
             if php::started().is_err() {
                 return Ok(255);
             }
-            tokio::select! {
-                // In order: if exit() also ends the last op, the status of exit() counts
-                biased;
-                () = php::EXIT.notified(), if exits => Ok(php::exit_status().unwrap_or(0)),
-                // A fatal error: without servers there is no restart, the script has failed
-                () = restart.notified() => Ok(255),
-                () = ops::idle() => Ok(0),
-                () = change.notified() => Err(Stop::Restart),
-                // Without servers no connection comes: only the main thread closing the channel
-                _ = connections.recv() => Err(Stop::Closed),
+            loop {
+                tokio::select! {
+                    // In order: if exit() also ends the last op, the status of exit() counts
+                    biased;
+                    () = php::EXIT.notified(), if exits => break Ok(php::exit_status().unwrap_or(0)),
+                    // A fatal error: without servers there is no restart, the script has failed
+                    () = restart.notified() => break Ok(255),
+                    () = ops::idle() => break Ok(0),
+                    () = change.notified() => break Err(Stop::Restart),
+                    connection = connections.recv() => match connection {
+                        None => break Err(Stop::Closed),
+                        // With --watch the ports stay open while an edited script serves nothing
+                        Some((_, stream)) => {
+                            if let Some(refused) = refuse(stream, options, "The script serves no requests right now, see the console.\n") {
+                                tokio::task::spawn_local(refused);
+                            }
+                        }
+                    },
+                }
             }
         })
     });

@@ -969,6 +969,20 @@ fn watch_reloads_on_changes() {
     std::fs::write(&app, script("three")).unwrap();
     let response = eventually(port, "/", |response| response.ends_with("three\n"));
     assert!(response.ends_with("\r\n\r\nthree\n"), "{response}");
+
+    // No server for a while, but an interval keeps the script running: 503 from every worker, and
+    // every worker serves again after the next change
+    std::fs::write(&app, "<?php\nTenma::setInterval(fn () => null, 1);\n").unwrap();
+    let response = eventually(port, "/", |response| response.starts_with("HTTP/1.1 503"));
+    assert!(response.contains("serves no requests"), "{response}");
+    for _ in 0..4 {
+        assert!(get(port, "/").starts_with("HTTP/1.1 503"));
+    }
+    std::fs::write(&app, script("four")).unwrap();
+    eventually(port, "/", |response| response.ends_with("four\n"));
+    for _ in 0..4 {
+        assert!(get(port, "/").ends_with("\r\n\r\nfour\n"));
+    }
     let _ = std::fs::remove_dir_all(directory);
 }
 
