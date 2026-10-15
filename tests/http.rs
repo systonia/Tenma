@@ -568,6 +568,8 @@ fn postgres_connections_come_back_clean() {
     get(port, "/redis-kill");
     let pings: Vec<bool> = (0..3).map(|_| get(port, "/redis-ping").contains("PONG")).collect();
     assert!(pings.ends_with(&[true]), "{pings:?}");
+    let refused = get(port, "/redis-refused");
+    assert!(refused.ends_with("[\n    \"refused\",\n    \"refused\",\n    \"refused\",\n    \"refused\",\n    \"refused\",\n    null\n]\n"), "{refused}");
     let wrongtype = get(port, "/redis-wrongtype");
     assert!(wrongtype.contains(r#""failed": true"#) && wrongtype.contains(r#""same": true"#), "{wrongtype}");
 

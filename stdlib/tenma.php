@@ -1348,9 +1348,26 @@ namespace Tenma\Db {
             return new self($url);
         }
 
+        /**
+         * Commands that would change the connection for every fiber of the worker (MULTI, SELECT,
+         * SUBSCRIBE) or hold it for all of them (BLPOP and the other blocking ones).
+         */
+        private const SHARED_CONNECTION = [
+            'MULTI', 'EXEC', 'DISCARD', 'WATCH', 'UNWATCH', 'SELECT', 'SWAPDB', 'AUTH', 'HELLO', 'RESET', 'QUIT', 'MONITOR',
+            'SUBSCRIBE', 'PSUBSCRIBE', 'SSUBSCRIBE', 'UNSUBSCRIBE', 'PUNSUBSCRIBE', 'SUNSUBSCRIBE', 'WAIT', 'WAITAOF',
+            'BLPOP', 'BRPOP', 'BLMOVE', 'BRPOPLPUSH', 'BLMPOP', 'BZPOPMIN', 'BZPOPMAX', 'BZMPOP',
+        ];
+
         /** Any Redis command: $redis->command('INCR', 'counter'). */
         public function command(string $name, string|int|float ...$args): mixed
         {
+            $upper = strtoupper($name);
+            if (in_array($upper, self::SHARED_CONNECTION, true)
+                || ($upper === 'CLIENT' && strtoupper((string) ($args[0] ?? '')) === 'REPLY')
+                || (in_array($upper, ['XREAD', 'XREADGROUP'], true) && in_array('BLOCK', array_map(fn ($arg) => strtoupper((string) $arg), $args), true))) {
+                throw new \LogicException("Redis $upper does not work on the connection all fibers of the worker share: "
+                    . 'EVAL a script for atomic steps, the database in the URL (redis://host/2), Tenma::subscribe() for messages, polling instead of blocking');
+            }
             \Tenma\Internal\requireFiber();
             $json = \Tenma\Internal\await(\tenma_op_db('redis', $this->url, '', json_encode([$name, ...$args], JSON_THROW_ON_ERROR)));
             return json_decode($json, true, flags: JSON_THROW_ON_ERROR);

@@ -60,6 +60,14 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
         // Kills its own Redis connection, like a Redis restart would
         '/redis-kill' => $redis->command('CLIENT', 'KILL', 'ID', (string) $redis->command('CLIENT', 'ID')),
         '/redis-ping' => $redis->command('PING'),
+        // Would change or block the connection every fiber of the worker shares
+        '/redis-refused' => array_map(function (array $command) use ($redis) {
+            try {
+                return $redis->command(...$command);
+            } catch (LogicException) {
+                return 'refused';
+            }
+        }, [['multi'], ['SELECT', 2], ['BLPOP', 'k', 1], ['XREAD', 'block', 10, 'STREAMS', 's', '$'], ['CLIENT', 'REPLY', 'OFF'], ['XREAD', 'COUNT', 1, 'STREAMS', "$table:none", '0']]),
         // An error from Redis itself, not from the connection: the connection stays
         '/redis-wrongtype' => (function () use ($redis, $table) {
             $before = $redis->command('CLIENT', 'ID');
