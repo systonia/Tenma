@@ -3,7 +3,8 @@
 #   docker run -p 8080:8080 -v "$PWD:/app" tenma /app/index.php
 # The binary alone (for a Debian 13 host with the same libraries): docker cp $(docker create tenma):/usr/local/bin/tenma .
 # Built against another release for its .deb: docker build --target build --build-arg BASE=ubuntu:24.04 .
-ARG BASE=rust:1-trixie
+# The toolchain pinned, so the same commit builds the same binary; raise it with intent
+ARG BASE=rust:1.99.0-trixie
 FROM $BASE AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl ca-certificates perl \
@@ -17,7 +18,7 @@ WORKDIR /src
 COPY php-build/build.sh php-build/
 RUN php-build/build.sh
 COPY . .
-RUN cargo build --release
+RUN cargo build --release --locked
 # The Debian packages of the shared libraries tenma links, for the runtime image
 RUN ldd target/release/tenma | awk '/=> \// { print $3 }' | xargs realpath \
     | while read -r lib; do dpkg -S "$lib" 2>/dev/null || dpkg -S "${lib#/usr}"; done \
