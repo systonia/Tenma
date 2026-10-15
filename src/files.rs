@@ -235,6 +235,13 @@ pub async fn serve(mounts: &[Mount], method: &Method, uri: &hyper::Uri, headers:
     headers.insert(header::ETAG, HeaderValue::from_str(&etag).ok()?);
     headers.insert(header::LAST_MODIFIED, HeaderValue::from_str(&last_modified).ok()?);
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    // The type stays the one the extension says: an upload can't pass itself off as a script
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    // An SVG can carry scripts; opened directly (an upload under a mount) it runs none on this origin.
+    // As <img> it is unaffected. HTML files stay as they are: a static site needs their scripts
+    if mime.essence_str() == "image/svg+xml" {
+        headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+    }
     Some(response)
 }
 

@@ -823,6 +823,10 @@ fn static_files() {
 
     let css = get(port, "/style.css");
     assert!(css.starts_with("HTTP/1.1 200") && css.contains("content-type: text/css; charset=utf-8") && css.ends_with("color: red; }\n"), "{css}");
+    assert!(css.contains("x-content-type-options: nosniff"), "{css}");
+    // An SVG someone uploaded runs no script on the app's origin when opened directly
+    let svg = get(port, "/upload.svg");
+    assert!(svg.contains("content-type: image/svg+xml") && svg.contains("content-security-policy: sandbox"), "{svg}");
     assert!(get(port, "/").ends_with("<h1>Start</h1>\n"));
     assert!(get(port, "/missing.css").ends_with("php: /missing.css\n"));
 
