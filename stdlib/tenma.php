@@ -992,6 +992,8 @@ namespace Tenma\Internal {
     function dev(string $file, bool $watch): void
     {
         Dev::$directory = dirname($file);
+        // What the hooks publish stays when the script reloads, and the other way round
+        Diagnostics::$group = 'dev';
         $list = require $file;
         try {
             Dev::load($list);
@@ -1006,6 +1008,77 @@ namespace Tenma\Internal {
 
     final class DevError extends \RuntimeException
     {
+    }
+
+    /** Tenma::diagnostics(): who publishes, and the project's directory for `tenma lsp`. */
+    final class Diagnostics
+    {
+        /** The script's workers ('app') or the hooks of tenma.dev.php ('dev'): --watch clears each on its reload */
+        public static string $group = 'app';
+
+        /** The nearest directory with a composer.json above $directory, or $directory itself. */
+        public static function project(string $directory): string
+        {
+            for ($at = $directory; !is_file("$at/composer.json"); $at = dirname($at)) {
+                if (dirname($at) === $at) {
+                    return $directory;
+                }
+            }
+            return $at;
+        }
+
+        /** Where the lists of a project are: one JSON file per group and source, read by `tenma lsp`. */
+        public static function directory(string $project): string
+        {
+            return "$project/.tenma/diagnostics";
+        }
+    }
+
+    /** @param list<mixed> $list */
+    function diagnostics(string $source, array $list): void
+    {
+        if (preg_match('/^[\w.:-]+$/', $source) !== 1) {
+            throw new \InvalidArgumentException("Tenma::diagnostics(): '$source' is no source name: letters, digits, . : - and _");
+        }
+        $problems = [];
+        foreach ($list as $i => $problem) {
+            if (!is_array($problem) || !is_string($problem['file'] ?? null) || !is_int($problem['line'] ?? null) || !is_string($problem['message'] ?? null)) {
+                throw new \InvalidArgumentException("Tenma::diagnostics(): entry $i needs file, line and message");
+            }
+            $problems[] = [
+                'file' => $problem['file'],
+                'line' => max(1, $problem['line']),
+                'column' => max(1, is_int($problem['column'] ?? null) ? $problem['column'] : 1),
+                'severity' => in_array($problem['severity'] ?? null, ['warning', 'info'], true) ? $problem['severity'] : 'error',
+                'message' => $problem['message'],
+            ];
+        }
+        // The setting --watch makes (shim/tenma.c): without it there is no editor to tell
+        if (get_cfg_var('tenma.watch') !== '1') {
+            return;
+        }
+        $script = (string) ($_SERVER['SCRIPT_FILENAME'] ?? getcwd());
+        $directory = Diagnostics::directory(Diagnostics::project(dirname(realpath($script) ?: $script)));
+        if (!is_dir($directory)) {
+            @mkdir($directory, 0777, true);
+            // Nothing of it belongs in the repository
+            @file_put_contents(dirname($directory) . '/.gitignore', "*\n");
+        }
+        $file = "$directory/" . Diagnostics::$group . '.' . $source . '.json';
+        // ponytail: blocking file access, only under --watch and only when something reports
+        $before = is_file($file) ? json_decode((string) file_get_contents($file), true) : [];
+        $known = array_map(static fn (mixed $p) => is_array($p) ? json_encode($p) : '', is_array($before) ? $before : []);
+        // Every worker publishes the same: only what is new in the file goes to stderr, once
+        foreach ($problems as $problem) {
+            if (!in_array(json_encode($problem), $known, true)) {
+                file_put_contents('php://stderr', "{$problem['file']}:{$problem['line']}:{$problem['column']}: {$problem['severity']}: {$problem['message']}\n");
+            }
+        }
+        // Whole or not at all for the reader: written next to it, then renamed over it
+        $temporary = "$file." . getmypid() . '.' . bin2hex(random_bytes(4));
+        if (@file_put_contents($temporary, json_encode($problems, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)) !== false) {
+            @rename($temporary, $file);
+        }
     }
 
     final class Dev
@@ -2234,6 +2307,19 @@ namespace {
         public static function debugger(): void
         {
             \tenma_debugger();
+        }
+
+        /**
+         * Replaces the problems $source reports: the editor shows them at their line (through `tenma lsp`), and new
+         * ones go to stderr as `path:line:column: error: message`, the form problem matchers and quickfix read. An
+         * empty list clears them. Only under --watch, which also clears the script's lists when it reloads it;
+         * otherwise it does nothing. $source names the reporter: 'waypoint-live', 'my-app:checks'.
+         *
+         * @param list<array{file: string, line: int, message: string, severity?: 'error'|'warning'|'info', column?: int}> $list
+         */
+        public static function diagnostics(string $source, array $list): void
+        {
+            \Tenma\Internal\diagnostics($source, $list);
         }
 
         /**

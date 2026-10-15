@@ -32,7 +32,7 @@ API at a glance:
   - Tasks: `async(fn)`, `all(...fns)`, `detach(fn)`.
   - Waiting and timers: `sleep(seconds)`, `setTimeout(fn, seconds)`, `setInterval(fn, seconds)`. Both timer functions return a `Timer` with `cancel()`.
   - Messages between workers: `publish(channel, message)` reaches every `subscribe(channel, fn (string $message))` in every worker, the sender's included. Messages are strings; `subscribe()` returns a `Subscription` with `cancel()` and ends with the request it was made in. With `tenma --pubsub redis://host`, messages go through Redis and reach every process.
-  - HTTP and debugging: `fetch(url, method, headers, body, timeout)` returns a `FetchResponse` with `status`, `body`, `header()` and `json()`. `debugger()` works like `debugger;` in JavaScript.
+  - HTTP and debugging: `fetch(url, method, headers, body, timeout)` returns a `FetchResponse` with `status`, `body`, `header()` and `json()`. `debugger()` works like `debugger;` in JavaScript. `diagnostics(source, list)` reports problems (`file`, `line`, `message`, optional `severity`, `column`) to the editor through `tenma lsp`, only under `--watch`; a call replaces the source's list.
 - `Tenma\Db\Postgres`: `connect(url)`, `query()`, `first()`, `execute()`, `transaction(fn)`, with `$1`-style parameters. Connections are pooled per worker.
 - `Tenma\Db\Redis`: `connect(url)`, `command(name, ...args)`, `get()`, `set(key, value, seconds)`.
 - `Tenma\Fs`: `readFile`, `writeFile`, `appendFile`, `exists`, `stat`, `readDir`, `mkdir`, `rename`, `copy`, `remove`, `removeDir`.

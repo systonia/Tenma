@@ -38,7 +38,18 @@ function main(string $binary, array $args): void
     $in = fopen('php://stdin', 'rb');
     $server = new Server($binary, fopen('php://stdout', 'wb'));
     try {
-        while (($message = read($in)) !== null) {
+        while (true) {
+            $ready = [$in];
+            $none = null;
+            // Between messages, once a second: what the running app published (Tenma::diagnostics)
+            if (@stream_select($ready, $none, $none, 1) === 0) {
+                $server->tick();
+                continue;
+            }
+            $message = read($in);
+            if ($message === null) {
+                break;
+            }
             if (!$server->handle($message)) {
                 return;
             }
@@ -163,9 +174,73 @@ final class Server
     /** @var array<string, ?string> directory => the project it belongs to */
     private array $projects = [];
 
+    /** @var array<string, list<array>> uri => the providers' diagnostics of an open document */
+    private array $checked = [];
+
+    /** @var array<string, array<string, list<array>>> project => uri => what the running app published there */
+    private array $published = [];
+
+    /** @var array<string, string> project => its lists as they were last read: names, sizes and times */
+    private array $lists = [];
+
     /** @param resource $out */
     public function __construct(private readonly string $binary, private $out)
     {
+    }
+
+    /**
+     * Reads again the lists Tenma::diagnostics() keeps in the projects of the open documents, if they changed,
+     * and publishes the files whose problems changed.
+     */
+    public function tick(): void
+    {
+        foreach (array_unique(array_filter($this->projects)) as $project) {
+            $directory = \Tenma\Internal\Diagnostics::directory($project);
+            $files = glob("$directory/*.json") ?: [];
+            $state = implode('|', array_map(static fn (string $f) => $f . ':' . @filesize($f) . ':' . @filemtime($f), $files));
+            if (($this->lists[$project] ?? '') === $state) {
+                continue;
+            }
+            $this->lists[$project] = $state;
+            $before = $this->published[$project] ?? [];
+            $now = [];
+            foreach ($files as $file) {
+                // app.waypoint-live.json: published by the script, as 'waypoint-live'
+                $source = (string) preg_replace('/^(app|dev)\.|\.json$/', '', basename($file));
+                $list = json_decode((string) @file_get_contents($file), true);
+                foreach (is_array($list) ? $list : [] as $problem) {
+                    if (is_array($problem) && is_string($problem['file'] ?? null)) {
+                        $now[uri($problem['file'])][] = ['source' => $source] + $problem;
+                    }
+                }
+            }
+            $this->published[$project] = $now;
+            foreach (array_keys($before + $now) as $uri) {
+                if (($before[$uri] ?? null) !== ($now[$uri] ?? null)) {
+                    $this->publish($uri);
+                }
+            }
+        }
+    }
+
+    /** The providers' diagnostics of a document and what the app published for its file, together. */
+    private function publish(string $uri): void
+    {
+        $diagnostics = $this->checked[$uri] ?? [];
+        $file = path($uri);
+        foreach ($this->published as $files) {
+            foreach ($files[$uri] ?? [] as $problem) {
+                $text = $this->documents[$uri] ?? ($file !== null && is_file($file) ? (string) file_get_contents($file) : '');
+                $line = max(0, (int) ($problem['line'] ?? 1) - 1);
+                $diagnostics[] = [
+                    'range' => ['start' => ['line' => $line, 'character' => max(0, (int) ($problem['column'] ?? 1) - 1)], 'end' => ['line' => $line, 'character' => lineLength($text, $line)]],
+                    'severity' => match ($problem['severity'] ?? 'error') { 'warning' => 2, 'info' => 3, default => 1 },
+                    'source' => (string) $problem['source'],
+                    'message' => (string) ($problem['message'] ?? ''),
+                ];
+            }
+        }
+        $this->send(['jsonrpc' => '2.0', 'method' => 'textDocument/publishDiagnostics', 'params' => ['uri' => $uri, 'diagnostics' => $diagnostics]]);
     }
 
     /** False once the client says exit. */
@@ -287,8 +362,9 @@ final class Server
 
     private function close(string $uri): null
     {
-        unset($this->documents[$uri]);
-        $this->send(['jsonrpc' => '2.0', 'method' => 'textDocument/publishDiagnostics', 'params' => ['uri' => $uri, 'diagnostics' => []]]);
+        unset($this->documents[$uri], $this->checked[$uri]);
+        // What the app published stays until the app takes it back
+        $this->publish($uri);
         return null;
     }
 
@@ -309,7 +385,8 @@ final class Server
                 'message' => (string) ($problem['message'] ?? ''),
             ];
         }
-        $this->send(['jsonrpc' => '2.0', 'method' => 'textDocument/publishDiagnostics', 'params' => ['uri' => $uri, 'diagnostics' => $diagnostics]]);
+        $this->checked[$uri] = $diagnostics;
+        $this->publish($uri);
     }
 
     /** @return array{string, string, int}|null file, text, byte offset of the position */

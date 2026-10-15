@@ -333,8 +333,17 @@ fn run(argv: &[String], options: Options) -> u8 {
     } else {
         None
     };
+    let script = std::path::PathBuf::from(&argv[0]);
+    let dev_file = changes.as_ref().and(dev::find(&argv[0]));
+    // What the last run published is stale: the script and the hooks publish again what is still wrong
+    if changes.is_some() {
+        watch::clear_diagnostics(&script, "app");
+    }
+    if let Some(path) = &dev_file {
+        watch::clear_diagnostics(path, "dev");
+    }
     // tenma.dev.php first: the first request should find what its hooks write
-    let dev_worker = changes.as_ref().and(dev::find(&argv[0])).map(|path| {
+    let dev_worker = dev_file.clone().map(|path| {
         let settled = dev::settled_receiver();
         let (worker, ready) = spawn_worker(&[path.to_string_lossy().into_owned()], options, Some(BTreeSet::new()), true);
         if ready.is_ok() && settled.recv_timeout(HOOKS_FIRST_RUN) == Err(mpsc::RecvTimeoutError::Timeout) {
@@ -395,10 +404,14 @@ fn run(argv: &[String], options: Options) -> u8 {
                 Some(batch) = next_change(&mut changes) => {
                     if let (Some(path), Some(change)) = (batch.dev, &dev_changed) {
                         eprintln!("tenma: {} changed, reloading the hooks", shown(&path));
+                        if let Some(file) = &dev_file {
+                            watch::clear_diagnostics(file, "dev");
+                        }
                         change.notify_one();
                     }
                     if let Some(path) = batch.app {
                         eprintln!("tenma: {} changed, reloading", shown(&path));
+                        watch::clear_diagnostics(&script, "app");
                         for change in &changed {
                             change.notify_one();
                         }

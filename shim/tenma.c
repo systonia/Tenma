@@ -688,6 +688,8 @@ static void tenma_ini_defaults(HashTable *configuration_hash) {
     if (watch_mode) {
         // Opcache checks timestamps only every 2 s by default and would load the old code right after saving
         INI_DEFAULT("opcache.revalidate_freq", "0");
+        // Not a PHP setting: get_cfg_var('tenma.watch') tells the stdlib (Tenma::diagnostics) that it runs under --watch
+        INI_DEFAULT("tenma.watch", "1");
     }
     if (inspect_mode) {
         // The JIT runs code without the statement opcodes the debugger stops at

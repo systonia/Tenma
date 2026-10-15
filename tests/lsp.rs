@@ -178,6 +178,26 @@ fn loop_variables_get_the_element_type_of_what_they_loop_over() {
 }
 
 #[test]
+fn what_the_running_app_publishes_shows_next_to_the_providers_problems() {
+    let root = project("published");
+    let template = root.join("page.tpl.php");
+    let mut lsp = Lsp::start(&root);
+    let before = lsp.open(&template, "<?= $this->nope ?>");
+    let published = root.join(".tenma/diagnostics");
+    std::fs::create_dir_all(&published).unwrap();
+    // As Tenma::diagnostics() writes it under --watch
+    let list = json!([{ "file": template.to_str().unwrap(), "line": 1, "column": 5, "severity": "warning", "message": "slow render" }]);
+    std::fs::write(published.join("app.my-app.json"), list.to_string()).unwrap();
+    let diagnostics = lsp.diagnostics();
+    assert_eq!(diagnostics.as_array().unwrap().len(), before.as_array().unwrap().len() + 1, "{diagnostics}");
+    let mine = diagnostics.as_array().unwrap().iter().find(|d| d["source"] == "my-app").unwrap();
+    assert_eq!((mine["message"].as_str(), mine["severity"].as_u64(), mine["range"]["start"]["character"].as_u64()), (Some("slow render"), Some(2), Some(4)));
+    // Taken back: only the providers' problems are left
+    std::fs::remove_file(published.join("app.my-app.json")).unwrap();
+    assert_eq!(lsp.diagnostics(), before);
+}
+
+#[test]
 fn semantic_tokens_come_from_providers_relative_and_in_utf16() {
     let root = project("tokens");
     let template = root.join("page.tpl.php");

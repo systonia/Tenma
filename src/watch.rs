@@ -114,6 +114,24 @@ pub fn configure() {
     unsafe { tenma_set_watch() }
 }
 
+/// Removes the Tenma::diagnostics() lists that `group` ("app": the script, "dev": tenma.dev.php) published in the
+/// project of `file`: when that group reloads, a fixed problem goes without its reporter clearing it, and what is
+/// still wrong is published again. The stdlib finds the project the same way (Diagnostics::project).
+pub fn clear_diagnostics(file: &Path, group: &str) {
+    let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    let directory = file.parent().unwrap_or(Path::new("."));
+    let project = directory.ancestors().find(|at| at.join("composer.json").is_file()).unwrap_or(directory);
+    let Ok(entries) = std::fs::read_dir(project.join(".tenma/diagnostics")) else {
+        return;
+    };
+    let prefix = format!("{group}.");
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Starts the watcher thread. The receiver gets the changes of each settled batch.
 pub fn start() -> Result<UnboundedReceiver<Changes>, String> {
     let (sender, messages) = mpsc::channel();
