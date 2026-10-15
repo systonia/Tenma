@@ -277,6 +277,15 @@ fn a_silent_connection_does_not_hold_a_restart() {
 }
 
 #[test]
+fn a_throwing_destructor_at_recycle_ends_only_the_interpreter() {
+    let port = 18_136;
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--max-requests", "1", "tests/fixtures/scripts/destructor_on_recycle.php"]).env("PORT", port.to_string()).spawn().unwrap());
+    for _ in 0..3 {
+        assert!(get(port, "/").ends_with("\r\n\r\nok\n"));
+    }
+}
+
+#[test]
 fn sessions_per_visitor_without_leaks() {
     let port = 18_088;
     let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/session.php").env("PORT", port.to_string()).spawn().unwrap());

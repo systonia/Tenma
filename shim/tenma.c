@@ -766,9 +766,13 @@ void tenma_thread_stop(void) {
     memset(&classic_output, 0, sizeof(classic_output));
     ini_snapshot = NULL;
     outer_shutdown_functions = NULL;
-    for (uint32_t i = 0; i < handler_count; i++) {
-        zval_ptr_dtor(&handlers[i]);
-    }
+    // The handlers may own the app (Tenma::serve(8080, new App())): its destructor is user code, and a
+    // bailout there without zend_try would exit the whole process instead of ending this interpreter
+    zend_try {
+        for (uint32_t i = 0; i < handler_count; i++) {
+            zval_ptr_dtor(&handlers[i]);
+        }
+    } zend_end_try();
     handler_count = 0;
     php_request_shutdown(NULL);
     if (output_states) {
@@ -2202,8 +2206,16 @@ static int finish_classic(uint64_t rid, enum outcome handled) {
     int answered = responded_rid == rid;
     classic_open = 0;
     smart_str_free(&classic_output);
-    close_input_streams();
-    restore_ini();
+    // User code runs here too: stream filters when php://input closes, an error handler for the warning
+    // when memory_limit can't go back below what is in use. A bailout needs an address to return to
+    zend_try {
+        close_input_streams();
+        restore_ini();
+    } zend_catch {
+        if (after_bailout() == CALL_FATAL) {
+            fatal = 1;
+        }
+    } zend_end_try();
     if (finished == CALL_FATAL) {
         return -1;
     }
