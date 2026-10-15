@@ -151,20 +151,27 @@ async fn connect(url: &str) -> Result<Lease, Failure> {
     Ok(Lease { client, _permit: permit })
 }
 
-/// Returns the connection, but cleaned first: DISCARD ALL forgets what the request left behind
-/// (SET ROLE, set_config for row-level security, temporary tables, prepared statements). In an
-/// open transaction DISCARD ALL fails; then the connection is discarded, which aborts the
-/// transaction. Runs in the background, the response does not wait; the pool permit is held until then.
+/// What DISCARD ALL does, except DEALLOCATE ALL: that would also drop the statements tokio-postgres
+/// prepared once per connection for looking up the app's own types (enums, domains), and the next
+/// new type on this connection would fail with "prepared statement does not exist". ROLLBACK first
+/// ends a transaction the request left open; outside one it only warns.
+// ponytail: a statement made with SQL PREPARE stays on the connection; DEALLOCATE by name if apps use them
+const CLEANUP: &str = "ROLLBACK; CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; \
+                       SELECT pg_advisory_unlock_all(); DISCARD PLANS; DISCARD TEMP; DISCARD SEQUENCES";
+
+/// Returns the connection, but cleaned first (CLEANUP): what the request left behind (an open
+/// transaction, SET ROLE, set_config for row-level security, temporary tables, advisory locks) is
+/// gone. Runs in the background, the response does not wait; the pool permit is held until then.
 fn release(url: &str, lease: Lease) {
     if lease.client.is_closed() {
         return;
     }
     let url = url.to_owned();
     // Both moved by name: an async block captures only the fields it uses, and a permit left
-    // behind would free its place while DISCARD ALL still runs, so the pool opens a connection more
+    // behind would free its place while the cleanup still runs, so the pool opens a connection more
     let Lease { client, _permit: permit } = lease;
     tokio::task::spawn_local(async move {
-        if client.batch_execute("DISCARD ALL").await.is_ok() {
+        if client.batch_execute(CLEANUP).await.is_ok() {
             IDLE.with_borrow_mut(|idle| idle.entry(url).or_default().push(client));
         }
         drop(permit);

@@ -536,6 +536,13 @@ fn postgres_connections_come_back_clean() {
     let backends: Vec<_> = (0..20).map(|_| std::thread::spawn(move || get(port, "/backend"))).collect();
     let pids: std::collections::HashSet<String> = backends.into_iter().map(|backend| backend.join().unwrap().rsplit("\r\n\r\n").next().unwrap().to_owned()).collect();
     assert_eq!(pids.len(), 1, "{pids:?}");
+    // A type the connection met in an earlier request, then one it meets now: the cleanup between
+    // them must keep what the driver prepared for looking types up
+    assert!(get(port, "/types").starts_with("HTTP/1.1 200"));
+    assert!(get(port, "/mood").contains(r#""value": "happy""#));
+    let size = get(port, "/size");
+    assert!(size.contains(r#""value": "big""#), "{size}");
+    get(port, "/types-drop");
 }
 
 #[test]

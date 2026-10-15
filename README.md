@@ -58,7 +58,7 @@ Tenma::serve(8080, function ($request) use ($db, $cache) {
 });
 ```
 
-Postgres behaves like PDO: parameters are sent as text and the server determines the type (`'42'` fits an int column, dates as strings). Postgres itself converts results with `json_agg`, so timestamps, `numeric`, `uuid` and `jsonb` arrive without a type table of our own. At most `--db-pool` connections per worker and URL; anyone beyond that waits. By default about 20 in all: 20 divided by the workers, at least 2 and at most 10 each (10 for one worker, 2 each for ten), well below Postgres' `max_connections` of 100. After every query, `DISCARD ALL` cleans up the connection before it goes back into the pool: `SET ROLE`, `set_config`, temporary tables or a dangling `BEGIN` are never seen by another request (the connection is discarded in that case). State across several queries therefore only exists inside `transaction()`. This costs about 30 % throughput for very small queries. Classic code (`serveClassic`) stays with PDO, which blocks as it does under FPM.
+Postgres behaves like PDO: parameters are sent as text and the server determines the type (`'42'` fits an int column, dates as strings). Postgres itself converts results with `json_agg`, so timestamps, `numeric`, `uuid` and `jsonb` arrive without a type table of our own. At most `--db-pool` connections per worker and URL; anyone beyond that waits. By default about 20 in all: 20 divided by the workers, at least 2 and at most 10 each (10 for one worker, 2 each for ten), well below Postgres' `max_connections` of 100. After every query, the connection is cleaned up before it goes back into the pool, with what `DISCARD ALL` does except dropping prepared statements (the driver keeps its own type lookups there) and with a `ROLLBACK` first: `SET ROLE`, `set_config`, temporary tables, advisory locks or a dangling `BEGIN` are never seen by another request. State across several queries therefore only exists inside `transaction()`. This costs about 30 % throughput for very small queries. Classic code (`serveClassic`) stays with PDO, which blocks as it does under FPM.
 
 `Request` and `Response` in fiber mode: `$request->cookies()`, `cookie()`, `form()` (urlencoded and multipart, same semantics as `$_POST`), `files()` with `UploadedFile` (`name`, `type`, `size()`, `contents()`, `moveTo()`), plus `query`, `header()`, `json()`. Responses with `Response::json()`, `html()`, `redirect()`, chainable with `->header()` (multiple values with `append: true`) and `->cookie()` (defaults to `HttpOnly`, `SameSite=Lax`).
 
@@ -270,7 +270,7 @@ docker run --rm -e USER=root $(docker build -q --target build .) cargo test --re
 
 A tag `v*` builds the binaries for macOS arm64 and Linux x64 and arm64 as a GitHub release, and the image as `ghcr.io/systonia/tenma` (`.github/workflows/build.yml`). The Linux binaries link Debian 13's libraries: on another distribution, use the image.
 
-Databases on one worker: one Postgres query per request about 25,000 requests per second (35,000 without the `DISCARD ALL` cleanup), at 200 concurrent requests with 10 connections; four Redis commands per request about 42,000.
+Databases on one worker: one Postgres query per request about 25,000 requests per second (35,000 without the cleanup), at 200 concurrent requests with 10 connections; four Redis commands per request about 42,000.
 
 Streaming: 500 concurrent streams of 0.6 s each on one worker, about 780 per second, 58 MB. WebSocket echo: 46,000 round trips per second over one connection, about 118,000 over four.
 
