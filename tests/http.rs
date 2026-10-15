@@ -315,6 +315,7 @@ fn built_in_extensions_work() {
 
 #[test]
 fn streaming_sse_und_websockets() {
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
     use tokio_tungstenite::tungstenite::{Message, connect};
 
     let port = 18_089;
@@ -349,6 +350,18 @@ fn streaming_sse_und_websockets() {
     // exit() in the stream: the client gets what was already written, and the connection ends
     let exited = get(port, "/exit-stream");
     assert!(exited.contains("before exit"), "{exited}");
+
+    // A stream or WebSocket that an error cuts off: the stream lacks its last chunk, the socket closes with 1011
+    for path in ["/throw-stream", "/fatal-stream"] {
+        let cut = get(port, path);
+        assert!(cut.contains("first part") && !cut.ends_with("0\r\n\r\n"), "{path}: {cut:?}");
+    }
+    for path in ["/ws-throw", "/ws-fatal"] {
+        let (mut socket, _) = connect(format!("ws://127.0.0.1:{port}{path}")).unwrap();
+        assert_eq!(socket.read().unwrap(), Message::text("hi"));
+        let close = socket.read();
+        assert!(matches!(&close, Ok(Message::Close(Some(frame))) if frame.code == CloseCode::Error), "{path}: {close:?}");
+    }
 
     let (mut socket, _) = connect(format!("ws://127.0.0.1:{port}/ws")).unwrap();
     for word in ["hello", "world"] {

@@ -110,7 +110,7 @@ extern "C" fn tenma_rs_respond(rid: u64, raw: *mut RawResponse) {
 pub enum Reply {
     Full(Response),
     /// Head right away, the body follows piece by piece from the channel (Response::stream, Response::events).
-    Stream { status: u16, headers: Vec<(Vec<u8>, Vec<u8>)>, body: tokio::sync::mpsc::Receiver<bytes::Bytes> },
+    Stream { status: u16, headers: Vec<(Vec<u8>, Vec<u8>)>, body: crate::streams::ChannelBody },
     /// The connection becomes a WebSocket (Response::websocket).
     Upgrade(crate::streams::Pipes),
 }

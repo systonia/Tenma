@@ -290,8 +290,8 @@ namespace Tenma\Internal {
         }
         error_log('exit() in a Tenma::serve() handler only ends the request');
         \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
-        \tenma_stream_end($rid);
-        \tenma_ws_close($rid);
+        \tenma_stream_end($rid, false);
+        \tenma_ws_close($rid, false);
         \tenma_db_abandon($rid);
         cancelRequest($rid, new \Tenma\Cancelled('exit() ended the request'));
         Current::$request = null;
@@ -1834,7 +1834,7 @@ final class WebSocket
 
     public function close(): void
     {
-        \tenma_ws_close($this->rid);
+        \tenma_ws_close($this->rid, true);
     }
 }
 
@@ -1925,14 +1925,17 @@ function runStream(int $rid, StreamedResponse $response): void
     if (!\tenma_stream_start($rid, $response->status, headerLines($response->headers))) {
         return;
     }
+    // Only a writer that returns ends the stream normally; otherwise the client sees it cut off
+    $finished = false;
     try {
         ($response->writer)(new Stream($rid));
+        $finished = true;
     } catch (ConnectionClosed | \Tenma\Cancelled) {
         // The client left or the request was cancelled; not an error for the server
     } catch (\Throwable $error) {
         error_log('Uncaught ' . $error);
     } finally {
-        \tenma_stream_end($rid);
+        \tenma_stream_end($rid, $finished);
     }
 }
 
@@ -1946,14 +1949,17 @@ function runWebSocket(int $rid, Request $request, WebSocketResponse $response): 
         return;
     }
     $socket = new WebSocket($rid);
+    // An error in the handler closes with 1011 instead of a normal close
+    $finished = false;
     try {
         ($response->handler)($socket);
+        $finished = true;
     } catch (ConnectionClosed | \Tenma\Cancelled) {
         // The client left or the request was cancelled; not an error for the server
     } catch (\Throwable $error) {
         error_log('Uncaught ' . $error);
     } finally {
-        $socket->close();
+        \tenma_ws_close($rid, $finished);
     }
 }
 

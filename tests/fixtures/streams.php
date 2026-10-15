@@ -35,6 +35,21 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
                 $out->write("before exit\n");
                 exit;
             });
+        case '/throw-stream':
+        case '/fatal-stream':
+            // Cut off midway: the client must be able to tell, not get a complete-looking response
+            return Response::stream(function (Stream $out) use ($request) {
+                $out->write("first part\n");
+                Tenma::sleep(0.01);
+                $request->path === '/fatal-stream' ? str_repeat('x', 512 * 1024 * 1024) : throw new RuntimeException('export failed');
+            });
+        case '/ws-throw':
+        case '/ws-fatal':
+            return Response::websocket(function (WebSocket $socket) use ($request) {
+                $socket->send('hi');
+                Tenma::sleep(0.01);
+                $request->path === '/ws-fatal' ? str_repeat('x', 512 * 1024 * 1024) : throw new RuntimeException('handler failed');
+            });
         case '/closed':
             return $closed ? 'closed' : 'open';
         case '/ws-ignore':

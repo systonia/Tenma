@@ -270,5 +270,5 @@ fn stream(file: File, start: u64, length: u64) -> ChannelBody {
             }
         }
     });
-    ChannelBody(receiver)
+    ChannelBody::sized(receiver)
 }

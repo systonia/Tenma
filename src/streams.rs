@@ -3,10 +3,11 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::ffi::c_int;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -31,15 +32,42 @@ const SOCKET_BACKLOG: usize = 256;
 /// Largest WebSocket message in bytes, like --max-body.
 pub static MAX_MESSAGE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(10 << 20);
 
-/// Body of a streaming response: what PHP writes, as soon as it is there. Ends when PHP closes the channel.
-pub struct ChannelBody(pub mpsc::Receiver<Bytes>);
+/// Body of a streaming response: what PHP writes, as soon as it is there. Ends when the channel
+/// closes; unless the writer finished, with an error, so hyper aborts the connection instead of
+/// sending the last chunk and the client sees that the response was cut off.
+pub struct ChannelBody {
+    chunks: mpsc::Receiver<Bytes>,
+    finished: Arc<AtomicBool>,
+    /// Cut off and polled once more: hyper has flushed what came before, now the error may follow.
+    flushed: bool,
+}
+
+impl ChannelBody {
+    /// A body whose end is checked by its Content-Length, as for files.
+    pub fn sized(chunks: mpsc::Receiver<Bytes>) -> Self {
+        Self { chunks, finished: Arc::new(AtomicBool::new(true)), flushed: false }
+    }
+}
 
 impl Body for ChannelBody {
     type Data = Bytes;
-    type Error = Infallible;
+    type Error = std::io::Error;
 
-    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
-        self.0.poll_recv(cx).map(|chunk| chunk.map(|bytes| Ok(Frame::data(bytes))))
+    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+        match self.chunks.poll_recv(cx) {
+            Poll::Ready(Some(bytes)) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+            Poll::Ready(None) if self.finished.load(Ordering::Relaxed) => Poll::Ready(None),
+            // hyper drops what it has not flushed when the body fails: first a round in which it
+            // flushes (it does after every write attempt), then the error.
+            // ponytail: if the client's socket is full right then, the rest of the buffer is lost too
+            Poll::Ready(None) if !self.flushed => {
+                self.flushed = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Ready(None) => Poll::Ready(Some(Err(std::io::Error::other("the stream was cut off")))),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -57,33 +85,41 @@ struct Socket {
 }
 
 thread_local! {
-    static STREAMS: RefCell<HashMap<u64, mpsc::Sender<Bytes>>> = RefCell::new(HashMap::new());
+    /// A stream's channel, and whether its writer finished.
+    static STREAMS: RefCell<HashMap<u64, (mpsc::Sender<Bytes>, Arc<AtomicBool>)>> = RefCell::new(HashMap::new());
     static SOCKETS: RefCell<HashMap<u64, Socket>> = RefCell::new(HashMap::new());
 }
 
-/// Forgets all streams and sockets of the interpreter, e.g. when a worker restarts.
+/// Forgets all streams and sockets of the interpreter when it restarts after a fatal error: what they
+/// sent so far is all, so their clients see them cut off.
 pub fn clear() {
     STREAMS.with_borrow_mut(HashMap::clear);
-    SOCKETS.with_borrow_mut(HashMap::clear);
+    SOCKETS.with_borrow_mut(|sockets| sockets.drain().for_each(|(_, socket)| fail(&socket)));
+}
+
+/// Closes a WebSocket with 1011: the server broke off.
+fn fail(socket: &Socket) {
+    let _ = socket.outgoing.try_send(Message::Close(Some(CloseFrame { code: CloseCode::Error, reason: "Internal error".into() })));
 }
 
 
 /// Sends the head of the response; the body follows with tenma_rs_stream_write. 0 if the request is not waiting.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_stream_start(rid: u64, status: u16, headers: *const u8, headers_len: usize) -> c_int {
-    let (sender, body) = mpsc::channel(STREAM_BUFFER);
+    let (sender, chunks) = mpsc::channel(STREAM_BUFFER);
+    let finished = Arc::new(AtomicBool::new(false));
     let headers = php::parse_header_lines(bytes(headers, headers_len));
-    if !php::reply(rid, Reply::Stream { status, headers, body }) {
+    if !php::reply(rid, Reply::Stream { status, headers, body: ChannelBody { chunks, finished: Arc::clone(&finished), flushed: false } }) {
         return 0;
     }
-    STREAMS.with_borrow_mut(|streams| streams.insert(rid, sender));
+    STREAMS.with_borrow_mut(|streams| streams.insert(rid, (sender, finished)));
     1
 }
 
 /// 0: written. Above 0: buffer full, an op the fiber must wait on. -1: client is gone.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_stream_write(rid: u64, chunk: *const u8, len: usize) -> i64 {
-    let Some(sender) = STREAMS.with_borrow(|streams| streams.get(&rid).cloned()) else {
+    let Some(sender) = STREAMS.with_borrow(|streams| streams.get(&rid).map(|(sender, _)| sender.clone())) else {
         return -1;
     };
     match sender.try_send(Bytes::copy_from_slice(bytes(chunk, len))) {
@@ -104,9 +140,12 @@ extern "C" fn tenma_rs_stream_write(rid: u64, chunk: *const u8, len: usize) -> i
     }
 }
 
+/// $finished: the writer returned; otherwise (an error, exit()) the client sees the stream cut off.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_stream_end(rid: u64) {
-    STREAMS.with_borrow_mut(|streams| streams.remove(&rid));
+extern "C" fn tenma_rs_stream_end(rid: u64, finished: c_int) {
+    if let Some((_, flag)) = STREAMS.with_borrow_mut(|streams| streams.remove(&rid)) {
+        flag.store(finished != 0, Ordering::Relaxed);
+    }
 }
 
 /// Accepts the WebSocket: the request responds with 101, after that the messages belong to PHP.
@@ -162,9 +201,14 @@ impl Drop for Lent {
     }
 }
 
+/// $finished: a normal close; otherwise (an error in the handler, exit()) the client gets 1011.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_ws_close(rid: u64) {
-    SOCKETS.with_borrow_mut(|sockets| sockets.remove(&rid));
+extern "C" fn tenma_rs_ws_close(rid: u64, finished: c_int) {
+    if let Some(socket) = SOCKETS.with_borrow_mut(|sockets| sockets.remove(&rid))
+        && finished == 0
+    {
+        fail(&socket);
+    }
 }
 
 /// After the 101 response: pass messages between client and PHP until one side closes.

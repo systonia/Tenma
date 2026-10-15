@@ -822,7 +822,7 @@ async fn respond(
     watch::report();
     let (status, headers, body) = match reply {
         php::Reply::Full(response) => (response.status, response.headers, Either::Left(Full::new(Bytes::from(response.body)))),
-        php::Reply::Stream { status, headers, body } => (status, headers, Either::Right(streams::ChannelBody(body))),
+        php::Reply::Stream { status, headers, body } => (status, headers, Either::Right(body)),
         php::Reply::Upgrade(pipes) => return Ok(accept_websocket(&parts.headers, upgrade, pipes)),
     };
     let mut builder = Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));

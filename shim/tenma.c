@@ -68,11 +68,11 @@ extern uint64_t tenma_rs_sleep(zend_long milliseconds);
 /** Streaming responses and WebSockets, see src/streams.rs. */
 extern int tenma_rs_stream_start(uint64_t rid, uint16_t status, const char *headers, size_t headers_len);
 extern int64_t tenma_rs_stream_write(uint64_t rid, const char *chunk, size_t len);
-extern void tenma_rs_stream_end(uint64_t rid);
+extern void tenma_rs_stream_end(uint64_t rid, int finished);
 extern int tenma_rs_ws_accept(uint64_t rid);
 extern int tenma_rs_ws_send(uint64_t rid, const char *text, size_t len);
 extern uint64_t tenma_rs_ws_receive(uint64_t rid);
-extern void tenma_rs_ws_close(uint64_t rid);
+extern void tenma_rs_ws_close(uint64_t rid, int finished);
 /** Databases, see src/db.rs. */
 extern void tenma_rs_db_abandon(uint64_t rid);
 extern void tenma_rs_op_cancel(uint64_t op);
@@ -272,6 +272,11 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_rid_void, 0, 1, IS_VOID, 0
     ZEND_ARG_TYPE_INFO(0, rid, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_rid_finished, 0, 2, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, rid, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, finished, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_rid_bool, 0, 1, _IS_BOOL, 0)
     ZEND_ARG_TYPE_INFO(0, rid, IS_LONG, 0)
 ZEND_END_ARG_INFO()
@@ -356,11 +361,11 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE(tenma_forget_session, arginfo_tenma_forget_session)
     ZEND_FE(tenma_stream_start, arginfo_tenma_stream_start)
     ZEND_FE(tenma_stream_write, arginfo_tenma_rid_string_long)
-    ZEND_FE(tenma_stream_end, arginfo_tenma_rid_void)
+    ZEND_FE(tenma_stream_end, arginfo_tenma_rid_finished)
     ZEND_FE(tenma_ws_accept, arginfo_tenma_rid_bool)
     ZEND_FE(tenma_ws_send, arginfo_tenma_rid_string_bool)
     ZEND_FE(tenma_ws_receive, arginfo_tenma_rid_long)
-    ZEND_FE(tenma_ws_close, arginfo_tenma_rid_void)
+    ZEND_FE(tenma_ws_close, arginfo_tenma_rid_finished)
     ZEND_FE(tenma_op_db, arginfo_tenma_op_db)
     ZEND_FE(tenma_db_abandon, arginfo_tenma_rid_void)
     ZEND_FE(tenma_parse_cookies, arginfo_tenma_parse_cookies)
@@ -1785,10 +1790,12 @@ PHP_FUNCTION(tenma_stream_write) {
 
 PHP_FUNCTION(tenma_stream_end) {
     zend_long rid;
-    ZEND_PARSE_PARAMETERS_START(1, 1)
+    bool finished;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
         Z_PARAM_LONG(rid)
+        Z_PARAM_BOOL(finished)
     ZEND_PARSE_PARAMETERS_END();
-    tenma_rs_stream_end((uint64_t) rid);
+    tenma_rs_stream_end((uint64_t) rid, finished);
 }
 
 /** tenma_ws_accept(int $rid): bool. Responds with 101; from then on the connection is a WebSocket. */
@@ -1821,10 +1828,12 @@ PHP_FUNCTION(tenma_ws_receive) {
 
 PHP_FUNCTION(tenma_ws_close) {
     zend_long rid;
-    ZEND_PARSE_PARAMETERS_START(1, 1)
+    bool finished;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
         Z_PARAM_LONG(rid)
+        Z_PARAM_BOOL(finished)
     ZEND_PARSE_PARAMETERS_END();
-    tenma_rs_ws_close((uint64_t) rid);
+    tenma_rs_ws_close((uint64_t) rid, finished);
 }
 
 /** tenma_op_db(string $op, string $target, string $sql, string $paramsJson): int. Starts a database op. */
