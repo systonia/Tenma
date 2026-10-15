@@ -1139,6 +1139,33 @@ fn watch_reloads_a_file_saved_while_the_request_that_loaded_it_ran() {
 }
 
 #[test]
+fn watch_follows_a_directory_that_was_replaced() {
+    let port = 18_151;
+    let directory = scratch("watch-replaced");
+    let app = directory.join("app.php");
+    let lib = directory.join("lib");
+    let write_lib = |version: &str| std::fs::write(lib.join("a.php"), format!("<?php function a() {{ return \"a {version}\\n\"; }}")).unwrap();
+    std::fs::write(&app, format!("<?php\nrequire __DIR__ . '/lib/a.php';\nTenma::serve({port}, fn () => a());\n")).unwrap();
+    std::fs::create_dir(&lib).unwrap();
+    write_lib("one");
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("--watch").arg(&app).spawn().unwrap());
+    assert!(get(port, "/").ends_with("a one\n"));
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Deleted and created again, as git checkout or composer install do: inotify loses the watch
+    std::fs::remove_dir_all(&lib).unwrap();
+    std::fs::create_dir(&lib).unwrap();
+    write_lib("two");
+    let response = eventually(port, "/", |response| response.ends_with("a two\n"));
+    assert!(response.ends_with("a two\n"), "{response}");
+    std::thread::sleep(Duration::from_millis(200));
+    write_lib("three");
+    let response = eventually(port, "/", |response| response.ends_with("a three\n"));
+    assert!(response.ends_with("a three\n"), "{response}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn watch_reruns_scripts_without_servers() {
     use std::io::BufRead;
     let directory = scratch("watch-script");

@@ -145,6 +145,8 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
     // Loaded files and who loaded them
     let mut loaded: HashMap<PathBuf, u8> = HashMap::new();
     let mut directories = HashSet::new();
+    // Directories that could not be watched (inotify's max_user_watches): reported once each
+    let mut failed = HashSet::new();
     let mut roots: Vec<(PathBuf, bool)> = Vec::new();
     let mut ignore = Ignore::default();
     let mut candidates = HashSet::new();
@@ -157,17 +159,18 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
         };
         match message {
             Ok(Message::Loaded(path, group, since)) => {
+                // On every report, not only the first: workers report all their files again after a
+                // reload, so a directory whose watch was lost or failed is watched again then
+                if let Some(directory) = path.parent()
+                    && !covered(directory, &roots)
+                {
+                    watch_directory(&mut watcher, &mut directories, &mut failed, directory);
+                }
                 let groups = loaded.entry(path.clone()).or_insert(0);
                 if *groups & group != 0 {
                     continue;
                 }
                 *groups |= group;
-                if let Some(directory) = path.parent()
-                    && !covered(directory, &roots)
-                    && directories.insert(directory.to_path_buf())
-                {
-                    let _ = watcher.watch(directory, notify::RecursiveMode::NonRecursive);
-                }
                 if let std::collections::hash_map::Entry::Vacant(entry) = files.entry(path.clone()) {
                     // Reported only after the request that loaded it: saved since then, the worker may
                     // run the old content, and the fingerprint now would already be the new one
@@ -186,10 +189,8 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                 ignore = Ignore::read(&file, project);
                 if loaded.insert(file.clone(), DEV).is_none() {
                     files.insert(file.clone(), fingerprint(&file));
-                    if let Some(directory) = file.parent()
-                        && directories.insert(directory.to_path_buf())
-                    {
-                        let _ = watcher.watch(directory, notify::RecursiveMode::NonRecursive);
+                    if let Some(directory) = file.parent() {
+                        watch_directory(&mut watcher, &mut directories, &mut failed, directory);
                     }
                 }
                 for root in new {
@@ -206,6 +207,15 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                 }
             }
             Ok(Message::Event(Ok(event))) => {
+                // A watched directory deleted or moved away (git checkout, composer install): inotify
+                // drops or keeps following its watch, so it is watched anew at the next report
+                if matches!(event.kind, notify::EventKind::Remove(_) | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
+                    for path in &event.paths {
+                        if directories.remove(path) {
+                            let _ = watcher.unwatch(path);
+                        }
+                    }
+                }
                 for path in event.paths {
                     if let Some(path) = relevant(&loaded, &roots, &ignore, path) {
                         candidates.insert(path);
@@ -245,6 +255,24 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// Watches a directory of loaded files unless it already is; a failure is reported once.
+fn watch_directory(watcher: &mut notify::RecommendedWatcher, directories: &mut HashSet<PathBuf>, failed: &mut HashSet<PathBuf>, directory: &Path) {
+    if directories.contains(directory) {
+        return;
+    }
+    match watcher.watch(directory, notify::RecursiveMode::NonRecursive) {
+        Ok(()) => {
+            directories.insert(directory.to_path_buf());
+        }
+        // Gone meanwhile (a checkout in progress): the next report tries again
+        Err(error) => {
+            if directory.exists() && failed.insert(directory.to_path_buf()) {
+                eprintln!("tenma: --watch cannot watch {}, its files do not reload: {error}", directory.display());
+            }
         }
     }
 }
