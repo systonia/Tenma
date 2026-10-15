@@ -206,6 +206,10 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                     roots.push(root);
                 }
             }
+            Ok(Message::Event(Ok(event))) if event.need_rescan() => {
+                candidates.extend(files.keys().cloned());
+                wait_for_more(&mut settle);
+            }
             Ok(Message::Event(Ok(event))) => {
                 // A watched directory deleted or moved away (git checkout, composer install): inotify
                 // drops or keeps following its watch, so it is watched anew at the next report
@@ -223,7 +227,13 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                     }
                 }
             }
-            Ok(Message::Event(Err(_))) => {}
+            // Events were lost (inotify's queue overflowed, FSEvents says MustScanSubDirs, or an
+            // error): every known file is compared again
+            Ok(Message::Event(Err(error))) => {
+                eprintln!("tenma: --watch: {error}, checking all files");
+                candidates.extend(files.keys().cloned());
+                wait_for_more(&mut settle);
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 settle = None;
                 // Compared only now that the writing has settled: no reload for a half-written file
@@ -373,6 +383,33 @@ mod tests {
         assert!(own.ignored(Path::new("/p/a/b.log")) && own.ignored(Path::new("/p/storage/cache/x")));
         assert!(!own.ignored(Path::new("/p/vendor/a.php")) && !own.ignored(Path::new("/p/src/storage/cache/x")));
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_rescan_compares_every_file() {
+        let file = std::env::temp_dir().join(format!("tenma-rescan-{}.php", std::process::id()));
+        std::fs::write(&file, "<?php // one").unwrap();
+        // A watcher that drops its own events: only the rescan below can find the change
+        let watcher = notify::recommended_watcher(|_| {}).unwrap();
+        let (sender, messages) = mpsc::channel();
+        let (changes, mut receiver) = unbounded_channel();
+        let (hooks, _hook_receiver) = unbounded_channel();
+        std::thread::spawn(move || watch(watcher, &messages, &changes, &hooks));
+        sender.send(Message::Loaded(file.clone(), APP, SystemTime::now() + Duration::from_secs(3600))).unwrap();
+        // The watcher thread takes its fingerprint first
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::write(&file, "<?php // two").unwrap();
+        sender.send(Message::Event(Ok(notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan)))).unwrap();
+        let started = Instant::now();
+        let changed = loop {
+            match receiver.try_recv() {
+                Ok(changed) => break changed.app,
+                Err(_) if started.elapsed() < Duration::from_secs(3) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => break None,
+            }
+        };
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(changed, Some(file));
     }
 }
 
