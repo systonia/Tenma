@@ -340,8 +340,11 @@ async fn redis_command(url: String, args: Vec<Value>) -> Result<String, Failure>
     let value: redis::Value = match command.query_async(&mut connection).await {
         Ok(value) => value,
         Err(error) => {
-            // After a Redis restart the connection would otherwise stay dead forever: reconnect next time
-            REDIS.with_borrow_mut(|connections| connections.remove(&url));
+            // After a Redis restart the connection would otherwise stay dead forever: reconnect next time.
+            // An error Redis itself answers (WRONGTYPE, a script error) leaves the connection as it is
+            if error.is_unrecoverable_error() || error.is_io_error() || error.is_timeout() {
+                REDIS.with_borrow_mut(|connections| connections.remove(&url));
+            }
             return Err(error.into());
         }
     };

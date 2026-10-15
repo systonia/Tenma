@@ -60,6 +60,18 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
         // Kills its own Redis connection, like a Redis restart would
         '/redis-kill' => $redis->command('CLIENT', 'KILL', 'ID', (string) $redis->command('CLIENT', 'ID')),
         '/redis-ping' => $redis->command('PING'),
+        // An error from Redis itself, not from the connection: the connection stays
+        '/redis-wrongtype' => (function () use ($redis, $table) {
+            $before = $redis->command('CLIENT', 'ID');
+            $redis->set("$table:string", 'x', 60);
+            try {
+                $redis->command('LPUSH', "$table:string", 'y');
+            } catch (RuntimeException $error) {
+                $failed = str_contains($error->getMessage(), 'WRONGTYPE');
+            }
+            $redis->command('DEL', "$table:string");
+            return ['failed' => $failed ?? false, 'same' => $before === $redis->command('CLIENT', 'ID')];
+        })(),
         // A comment at the end and the order from ORDER BY
         '/comment' => array_column($db->query('SELECT n FROM generate_series(1, 5) n ORDER BY n DESC -- newest first'), 'n'),
         // all() in a transaction: the error cancels the running query, the rollback succeeds

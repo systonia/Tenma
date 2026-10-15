@@ -543,6 +543,8 @@ fn postgres_connections_come_back_clean() {
     get(port, "/redis-kill");
     let pings: Vec<bool> = (0..3).map(|_| get(port, "/redis-ping").contains("PONG")).collect();
     assert!(pings.ends_with(&[true]), "{pings:?}");
+    let wrongtype = get(port, "/redis-wrongtype");
+    assert!(wrongtype.contains(r#""failed": true"#) && wrongtype.contains(r#""same": true"#), "{wrongtype}");
 
     assert!(get(port, "/taint").starts_with("HTTP/1.1 200"));
     // With only one connection in the pool everything would hang if exit() did not release it
