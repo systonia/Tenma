@@ -131,7 +131,7 @@ fn fibers_wait_without_blocking_the_server() {
     // A normal response ends what the request started; only detach() outlives it
     assert!(get(port, "/leave-behind").ends_with("started\n"));
     let left = get(port, "/left");
-    assert!(left.ends_with("{\"interval\":0,\"message\":0,\"task\":0,\"detached\":1}\n"), "{left}");
+    assert!(left.ends_with("{\"interval\":0,\"message\":0,\"task\":0,\"detached\":1,\"retried\":0,\"late\":0}\n"), "{left}");
     assert!(get(port, "/buffer-left-open").ends_with("level 1\n"));
     assert!(get(port, "/level").ends_with("level 0\n"));
     assert!(get(port, "/").ends_with("hello\n"));

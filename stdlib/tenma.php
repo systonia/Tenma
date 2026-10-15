@@ -57,6 +57,8 @@ namespace Tenma\Internal {
         public static array $taskOfFiber = [];
         /** @var array<int, array<int, \Tenma\Task|\Tenma\Timer|\Tenma\Subscription>> Request → running tasks, timers and subscriptions, by object ID */
         public static array $ofRequest = [];
+        /** @var array<int, \Throwable> Request → the error its work ended with, while some of that work still runs */
+        public static array $ended = [];
         /** @var array<int, mixed> Values of Tenma\AsyncLocal outside any task (script, start of a request) */
         public static array $rootContext = [];
     }
@@ -160,13 +162,38 @@ namespace Tenma\Internal {
         return true;
     }
 
-    /** Cancels everything that belongs to a request: its tasks throw $error wherever they are waiting. */
-    function cancelRequest(int $request, \Throwable $error): void
+    /**
+     * Ends everything that belongs to a request: its tasks throw $error wherever they are waiting,
+     * once, even if they were cancelled before. What its remaining work starts afterwards ends right away.
+     */
+    function cancelRequest(int $request, \Throwable $error, ?\Tenma\Task $except = null): void
     {
-        foreach (Scheduler::$ofRequest[$request] ?? [] as $entry) {
-            $entry instanceof \Tenma\Task ? $entry->cancel($error) : $entry->cancel();
+        if (empty(Scheduler::$ofRequest[$request])) {
+            return;
         }
-        unset(Scheduler::$ofRequest[$request]);
+        Scheduler::$ended[$request] ??= $error;
+        foreach (Scheduler::$ofRequest[$request] as $entry) {
+            if ($entry !== $except) {
+                $entry instanceof \Tenma\Task ? $entry->endWithRequest($error) : $entry->cancel();
+            }
+        }
+    }
+
+    /** Registers a task, timer or subscription of a request; if the request has ended, it ends right away. */
+    function own(int $request, \Tenma\Task|\Tenma\Timer|\Tenma\Subscription $entry): void
+    {
+        Scheduler::$ofRequest[$request][spl_object_id($entry)] = $entry;
+        if (isset(Scheduler::$ended[$request])) {
+            $entry instanceof \Tenma\Task ? $entry->endWithRequest(Scheduler::$ended[$request]) : $entry->cancel();
+        }
+    }
+
+    function disown(int $request, \Tenma\Task|\Tenma\Timer|\Tenma\Subscription $entry): void
+    {
+        unset(Scheduler::$ofRequest[$request][spl_object_id($entry)]);
+        if (empty(Scheduler::$ofRequest[$request])) {
+            unset(Scheduler::$ofRequest[$request], Scheduler::$ended[$request]);
+        }
     }
 
     /**
@@ -175,13 +202,7 @@ namespace Tenma\Internal {
      */
     function connectionEnded(int $request): void
     {
-        $current = currentTask();
-        $error = new \Tenma\Cancelled('The connection ended');
-        foreach (Scheduler::$ofRequest[$request] ?? [] as $entry) {
-            if ($entry !== $current) {
-                $entry instanceof \Tenma\Task ? $entry->cancel($error) : $entry->cancel();
-            }
-        }
+        cancelRequest($request, new \Tenma\Cancelled('The connection ended'), currentTask());
     }
 
     /**
@@ -310,6 +331,7 @@ namespace Tenma {
         /** A cancellation not yet delivered: the task's next wait throws it. */
         private ?\Throwable $cancelled = null;
         private bool $cancelRequested = false;
+        private bool $requestEnded = false;
         private ?\Fiber $fiber = null;
         /** @var array<int, \Closure(self): void> */
         private array $listeners = [];
@@ -365,10 +387,10 @@ namespace Tenma {
                 $task->settle($result, null);
             });
             Internal\Scheduler::$tasks[spl_object_id($this)] = $this;
-            if ($request !== null) {
-                Internal\Scheduler::$ofRequest[$request][spl_object_id($this)] = $this;
-            }
             Internal\Scheduler::$taskOfFiber[spl_object_id($this->fiber)] = $this;
+            if ($request !== null) {
+                Internal\own($request, $this);
+            }
             // The caller's request, not the task's: after Tenma::detach() that would be null
             $caller = Internal\Current::$request;
             $this->fiber->start();
@@ -386,10 +408,7 @@ namespace Tenma {
             $this->error = $error;
             unset(Internal\Scheduler::$tasks[spl_object_id($this)]);
             if ($this->request !== null) {
-                unset(Internal\Scheduler::$ofRequest[$this->request][spl_object_id($this)]);
-                if (empty(Internal\Scheduler::$ofRequest[$this->request])) {
-                    unset(Internal\Scheduler::$ofRequest[$this->request]);
-                }
+                Internal\disown($this->request, $this);
             }
             if ($this->fiber !== null) {
                 unset(Internal\Scheduler::$taskOfFiber[spl_object_id($this->fiber)]);
@@ -449,7 +468,24 @@ namespace Tenma {
                 return;
             }
             $this->cancelRequested = true;
-            $error ??= new Cancelled('Task cancelled');
+            $this->deliver($error ?? new Cancelled('Task cancelled'));
+        }
+
+        /**
+         * @internal Its request ended (client gone, exit(), response out): delivered once more even after
+         * a cancel(), which the task may have caught to retry; only one per request, so cleanup can wait.
+         */
+        public function endWithRequest(\Throwable $error): void
+        {
+            if ($this->done || $this->requestEnded) {
+                return;
+            }
+            $this->requestEnded = $this->cancelRequested = true;
+            $this->deliver($error);
+        }
+
+        private function deliver(\Throwable $error): void
+        {
             if ($this->fiber !== null && $this->fiber->isTerminated()) {
                 // The Fiber ended without settle(), for example through exit(): whoever waits for it must not wait forever
                 $this->settle(null, $error);
@@ -587,17 +623,14 @@ namespace Tenma {
             $this->request = Internal\Current::$request;
             $this->context = Internal\context();
             if ($this->request !== null) {
-                Internal\Scheduler::$ofRequest[$this->request][spl_object_id($this)] = $this;
+                Internal\own($this->request, $this);
             }
         }
 
         private function forget(): void
         {
             if ($this->request !== null) {
-                unset(Internal\Scheduler::$ofRequest[$this->request][spl_object_id($this)]);
-                if (empty(Internal\Scheduler::$ofRequest[$this->request])) {
-                    unset(Internal\Scheduler::$ofRequest[$this->request]);
-                }
+                Internal\disown($this->request, $this);
             }
         }
 
@@ -680,7 +713,7 @@ namespace Tenma {
             $this->request = Internal\Current::$request;
             $this->context = Internal\context();
             if ($this->request !== null) {
-                Internal\Scheduler::$ofRequest[$this->request][spl_object_id($this)] = $this;
+                Internal\own($this->request, $this);
             }
         }
 
@@ -716,10 +749,7 @@ namespace Tenma {
             }
             $this->cancelled = true;
             if ($this->request !== null) {
-                unset(Internal\Scheduler::$ofRequest[$this->request][spl_object_id($this)]);
-                if (empty(Internal\Scheduler::$ofRequest[$this->request])) {
-                    unset(Internal\Scheduler::$ofRequest[$this->request]);
-                }
+                Internal\disown($this->request, $this);
             }
             if ($this->op !== 0) {
                 unset(Internal\Waiting::$subscriptions[$this->op]);

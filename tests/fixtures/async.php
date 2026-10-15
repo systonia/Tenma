@@ -7,7 +7,7 @@ $port = (int) getenv('PORT');
 // An interval that runs in the background next to the requests
 $ticks = 0;
 // What requests left behind: their tasks, timers and subscriptions must end with the response
-$left = ['interval' => 0, 'message' => 0, 'task' => 0, 'detached' => 0];
+$left = ['interval' => 0, 'message' => 0, 'task' => 0, 'detached' => 0, 'retried' => 0, 'late' => 0];
 Tenma::setInterval(function () use (&$ticks) {
     $ticks++;
 }, 0.05);
@@ -31,6 +31,22 @@ Tenma::serve($port, function (Request $request) use ($port, &$ticks, &$left): st
         case '/ticks':
             return "ticks $ticks\n";
         case '/leave-behind':
+            // Cancelled once, it catches that and carries on: the end of the request still reaches it
+            $retry = Tenma::async(function () use (&$left) {
+                try {
+                    Tenma::sleep(1);
+                } catch (Tenma\Cancelled) {
+                }
+                try {
+                    Tenma::sleep(0.05);
+                    $left['retried']++;
+                } catch (Tenma\Cancelled) {
+                    // Started in its cleanup after the request ended: ends at its first wait
+                    Tenma::async(function () use (&$left) { Tenma::sleep(0.05); $left['late']++; });
+                }
+            });
+            $retry->cancel();
+            Tenma::sleep(0.01);
             Tenma::setInterval(function () use (&$left) { $left['interval']++; }, 0.01);
             Tenma::subscribe('left', function () use (&$left) { $left['message']++; });
             Tenma::async(function () use (&$left) { Tenma::sleep(0.05); $left['task']++; });
