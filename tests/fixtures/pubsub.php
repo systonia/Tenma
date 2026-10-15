@@ -14,6 +14,17 @@ Tenma::serve((int) getenv('PORT'), function (Tenma\Http\Request $request) use (&
         Tenma::publish('news', $request->query['message']);
         return "published\n";
     }
+    if ($request->path === '/kill-publisher') {
+        // The connection the Redis bridge publishes on: its next PUBLISH fails
+        $redis = Tenma\Db\Redis::connect('redis://127.0.0.1:6379');
+        foreach (explode("\n", trim($redis->command('CLIENT', 'LIST', 'TYPE', 'normal'))) as $line) {
+            parse_str(str_replace(' ', '&', $line), $client);
+            if ($client['cmd'] === 'publish' && (int) $client['age'] < 30) {
+                $redis->command('CLIENT', 'KILL', 'ID', $client['id']);
+            }
+        }
+        return "killed\n";
+    }
     // Made in a request: ends with it, so later messages find no callback of it
     if ($request->path === '/wait') {
         $message = null;

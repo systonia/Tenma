@@ -180,8 +180,10 @@ pub fn use_redis(url: &str) -> Result<(), String> {
 async fn bridge(client: redis::Client, mut commands: UnboundedReceiver<Command>) {
     // Reported once per outage, not on every attempt
     let mut down = false;
+    // A publish that failed on a broken connection: the next connection sends it first
+    let mut unsent = None;
     loop {
-        if let Err(error) = connected(&client, &mut commands, &mut down).await
+        if let Err(error) = connected(&client, &mut commands, &mut down, &mut unsent).await
             && !down
         {
             eprintln!("tenma: pubsub: {error}, reconnecting");
@@ -191,13 +193,21 @@ async fn bridge(client: redis::Client, mut commands: UnboundedReceiver<Command>)
     }
 }
 
-async fn connected(client: &redis::Client, commands: &mut UnboundedReceiver<Command>, down: &mut bool) -> redis::RedisResult<()> {
+async fn connected(
+    client: &redis::Client,
+    commands: &mut UnboundedReceiver<Command>,
+    down: &mut bool,
+    unsent: &mut Option<(Vec<u8>, Vec<u8>)>,
+) -> redis::RedisResult<()> {
     let mut publisher = client.get_multiplexed_async_connection().await?;
     let (mut sink, mut stream) = client.get_async_pubsub().await?.split();
     // The channels workers listen on now, also those subscribed while Redis was gone
     let listening: Vec<Vec<u8>> = channels().keys().cloned().collect();
     for channel in listening {
         sink.subscribe(channel).await?;
+    }
+    if let Some((channel, message)) = unsent.take() {
+        publish_to(&mut publisher, channel, message, unsent).await?;
     }
     if std::mem::take(down) {
         eprintln!("tenma: pubsub: connected to Redis again");
@@ -213,10 +223,25 @@ async fn connected(client: &redis::Client, commands: &mut UnboundedReceiver<Comm
                 }
             }
             Some(command) = commands.recv() => match command {
-                Command::Publish(channel, message) => redis::cmd("PUBLISH").arg(channel).arg(message).exec_async(&mut publisher).await?,
+                Command::Publish(channel, message) => publish_to(&mut publisher, channel, message, unsent).await?,
                 Command::Subscribe(channel) => sink.subscribe(channel).await?,
                 Command::Unsubscribe(channel) => sink.unsubscribe(channel).await?,
             },
         }
     }
+}
+
+/// PUBLISH; if it fails, the message waits in $unsent for the next connection.
+// ponytail: at least once: if Redis got it but the answer was lost, it goes out twice
+async fn publish_to(
+    publisher: &mut redis::aio::MultiplexedConnection,
+    channel: Vec<u8>,
+    message: Vec<u8>,
+    unsent: &mut Option<(Vec<u8>, Vec<u8>)>,
+) -> redis::RedisResult<()> {
+    let result = redis::cmd("PUBLISH").arg(&channel).arg(&message).exec_async(publisher).await;
+    if result.is_err() {
+        *unsent = Some((channel, message));
+    }
+    result
 }

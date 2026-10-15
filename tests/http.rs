@@ -1730,4 +1730,13 @@ fn publish_through_redis_reaches_other_processes() {
             assert!(heard.ends_with("\r\n\r\na\n"), "{heard}");
         }
     }
+
+    // A publish that meets a broken connection goes out after the reconnect
+    assert!(get(ports[0], "/kill-publisher").ends_with("killed\n"));
+    assert!(get(ports[0], "/publish?message=b").ends_with("published\n"));
+    std::thread::sleep(Duration::from_millis(1500));
+    for port in ports {
+        let heard = get(port, "/");
+        assert!(heard.ends_with("\r\n\r\na,b\n"), "{heard}");
+    }
 }
