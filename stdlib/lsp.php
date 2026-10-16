@@ -37,13 +37,17 @@ function main(string $binary, array $args): void
     }
     $in = fopen('php://stdin', 'rb');
     $server = new Server($binary, fopen('php://stdout', 'wb'));
+    $ticked = 0.0;
     try {
         while (true) {
+            // Once a second, also while the editor keeps sending: what the running app published (Tenma::diagnostics)
+            if (microtime(true) - $ticked >= 1) {
+                $server->tick();
+                $ticked = microtime(true);
+            }
             $ready = [$in];
             $none = null;
-            // Between messages, once a second: what the running app published (Tenma::diagnostics)
             if (@stream_select($ready, $none, $none, 1) === 0) {
-                $server->tick();
                 continue;
             }
             $message = read($in);

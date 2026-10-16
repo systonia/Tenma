@@ -215,6 +215,36 @@ fn what_the_running_app_publishes_shows_next_to_the_providers_problems() {
 }
 
 #[test]
+fn published_problems_arrive_while_the_editor_keeps_asking() {
+    let root = project("busy");
+    let template = root.join("page.tpl.php");
+    let mut lsp = Lsp::start(&root);
+    lsp.open(&template, "<?= $this->title ?>");
+    let published = root.join(".tenma/diagnostics");
+    std::fs::create_dir_all(&published).unwrap();
+    let list = json!([{ "file": template.to_str().unwrap(), "line": 1, "message": "slow render" }]);
+    std::fs::write(published.join("app.my-app.json"), list.to_string()).unwrap();
+    // A request every 0.3 s, as while typing: the input is never quiet for a whole second
+    let started = std::time::Instant::now();
+    'asking: loop {
+        assert!(started.elapsed() < std::time::Duration::from_secs(4), "nothing published while the editor asks");
+        lsp.next += 1;
+        let id = lsp.next;
+        lsp.send(json!({ "jsonrpc": "2.0", "id": id, "method": "textDocument/hover", "params": { "textDocument": { "uri": uri(&template) }, "position": { "line": 0, "character": 0 } } }));
+        loop {
+            let message = lsp.receive();
+            if message["method"] == "textDocument/publishDiagnostics" && message["params"]["diagnostics"].to_string().contains("slow render") {
+                break 'asking;
+            }
+            if message["id"] == id {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+#[test]
 fn semantic_tokens_come_from_providers_relative_and_in_utf16() {
     let root = project("tokens");
     let template = root.join("page.tpl.php");
