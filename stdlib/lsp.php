@@ -628,7 +628,7 @@ final class Answers
         $items = $this->collect(static fn (Provider $p) => $p->completions($file, $text, $offset));
         $before = substr($text, 0, $offset);
         if (preg_match('/\$(\w+)((?:->\w+)*)->\w*$/', $before, $m) === 1) {
-            $root = $this->variable($file, $before, $m[1]);
+            $root = $this->variable($file, $text, $before, $m[1]);
             $target = $root === null ? null : $this->follow($root, $m[2]);
             if ($target !== null) {
                 array_push($items, ...self::members($target, $target->getName() === $this->thisClass($file)));
@@ -653,15 +653,15 @@ final class Answers
             $owner = self::propertyOwner($member);
             return ['file' => (string) $owner->getFileName(), 'line' => self::propertyLine($owner, $member->getName())];
         }
-        // In a class file the editor's PHP server knows the variable; a template's @foreach it does not
-        return $this->thisClass($file) === null ? null : self::loopLine($file, $text, $offset);
+        // In a class file the editor's PHP server knows the variable; a template's @foreach or assignment it does not
+        return $this->thisClass($file) === null ? null : self::introduction($file, $text, $offset);
     }
 
     /**
-     * For a plain `$name` at $offset: the last foreach above that introduces it, as value or key, not one in a
-     * comment or string.
+     * For a plain `$name` at $offset: the last foreach (as value or key) or assignment above that introduces it,
+     * not one in a comment or string.
      */
-    private static function loopLine(string $file, string $text, int $offset): ?array
+    private static function introduction(string $file, string $text, int $offset): ?array
     {
         preg_match('/^\$?\w*/', substr($text, $offset), $rest);
         $before = substr($text, 0, $offset);
@@ -670,16 +670,22 @@ final class Answers
         }
         $at = $offset + strlen($rest[0]);
         $name = preg_quote($m[1], '/');
-        // Comments and strings of the PHP parts blanked out, offsets kept; a template's own syntax is inline HTML
-        $code = '';
-        foreach (token_get_all(substr($text, 0, $at)) as $token) {
-            $hidden = is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT, T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE], true);
-            $code .= $hidden ? (string) preg_replace('/[^\n]/', ' ', $token[1]) : (is_array($token) ? $token[1] : $token);
-        }
-        if (preg_match_all('/\bas\s+(?:\$\w+\s*=>\s*)?&?\$' . $name . '\b|\bas\s+&?\$' . $name . '\s*=>/', $code, $found, PREG_OFFSET_CAPTURE) === 0) {
+        $pattern = '/\bas\s+(?:\$\w+\s*=>\s*)?&?\$' . $name . '\b|\bas\s+&?\$' . $name . '\s*=>|\$' . $name . '\b\s*=(?![=>])/';
+        if (preg_match_all($pattern, self::code(substr($text, 0, $at)), $found, PREG_OFFSET_CAPTURE) === 0) {
             return null;
         }
         return ['file' => $file, 'line' => substr_count($text, "\n", 0, end($found[0])[1]) + 1];
+    }
+
+    /** Comments and strings of the PHP parts blanked out, offsets kept; a template's own syntax is inline HTML. */
+    private static function code(string $text): string
+    {
+        $code = '';
+        foreach (token_get_all($text) as $token) {
+            $hidden = is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT, T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE], true);
+            $code .= $hidden ? (string) preg_replace('/[^\n]/', ' ', $token[1]) : (is_array($token) ? $token[1] : $token);
+        }
+        return $code;
     }
 
     private function hover(string $file, string $text, int $offset): ?string
@@ -700,7 +706,7 @@ final class Answers
         if (preg_match('/\$(\w+)((?:->\w+)*)->(\w*)$/', $before . $rest[0], $m) !== 1 || $m[3] === '') {
             return null;
         }
-        $root = $this->variable($file, $before, $m[1]);
+        $root = $this->variable($file, $text, $before, $m[1]);
         $target = $root === null ? null : $this->follow($root, $m[2]);
         return match (true) {
             $target === null => null,
@@ -722,35 +728,58 @@ final class Answers
     }
 
     /**
-     * The class of `$name` in the text before the cursor: `$this` is the class a provider binds, a variable
-     * of a foreach over `$this->items` (or another such variable) has the element type of `items`, from its
-     * PHPDoc (`list<Item>`, `array<int, Item>`, `Item[]`).
+     * The class of `$name` in the text before the cursor. `$this` is the class a provider binds. In a file a
+     * provider binds, another variable gets its type from the last foreach or assignment above that introduces
+     * it: a foreach over `$this->items` (or another such variable) gives the element type of `items`, from its
+     * PHPDoc (`list<Item>`, `array<int, Item>`, `Item[]`); `$name = $this->item;`, `$name = $this->item();` and
+     * `$name = new Item(...);` give the declared type.
      */
-    private function variable(string $file, string $before, string $name, int $depth = 0): ?\ReflectionClass
+    private function variable(string $file, string $text, string $before, string $name, int $depth = 0): ?\ReflectionClass
     {
         if ($name === 'this') {
             $class = $this->thisClass($file);
             return $class === null ? null : new \ReflectionClass($class);
         }
-        $loops = '/foreach\s*\(\s*\$(\w+)((?:->\w+(?:\(\))?)*)->(\w+)(?:\(\))?\s+as\s+(?:\$\w+\s*=>\s*)?&?\$' . preg_quote($name, '/') . '\s*\)/';
-        if ($depth > 3 || preg_match_all($loops, $before, $found, PREG_SET_ORDER) === 0) {
+        if ($depth > 3 || $this->thisClass($file) === null) {
             return null;
         }
-        [, $base, $chain, $iterable] = end($found);
-        $root = $base === $name ? null : $this->variable($file, $before, $base, $depth + 1);
-        $owner = $root === null ? null : $this->follow($root, $chain);
-        $member = match (true) {
-            $owner === null => null,
-            $owner->hasProperty($iterable) => $owner->getProperty($iterable),
-            $owner->hasMethod($iterable) => $owner->getMethod($iterable),
-            default => null,
-        };
-        $element = $member === null ? null : self::elementClass($member);
-        return $element === null ? null : new \ReflectionClass($element);
+        $chain = '\$(\w+)((?:->\w+(?:\([^()]*\))?)*)';
+        $n = preg_quote($name, '/');
+        $pattern = '/foreach\s*\(\s*' . $chain . '\s+as\s+(?:\$\w+\s*=>\s*)?&?\$' . $n . '\s*\)'
+            . '|\$' . $n . '\b\s*=(?![=>])\s*(?:new\s+(\\\\?[\w\\\\]+)\s*(?:\([^()]*\))?\s*(?:;|\?>)|' . $chain . '\s*(?:;|\?>))?/';
+        $code = self::code($before);
+        if (preg_match_all($pattern, $code, $found, PREG_SET_ORDER | PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL) === 0) {
+            return null;
+        }
+        $last = end($found);
+        $above = substr($code, 0, $last[0][1]);
+        if ($last[1][0] !== null) {
+            // A foreach: the element type of the last member in the chain
+            if (preg_match('/^(.*)->(\w+)(?:\([^()]*\))?$/', $last[2][0], $split) !== 1) {
+                return null;
+            }
+            $root = $this->variable($file, $text, $above, $last[1][0], $depth + 1);
+            $owner = $root === null ? null : $this->follow($root, $split[1]);
+            $member = match (true) {
+                $owner === null => null,
+                $owner->hasProperty($split[2]) => $owner->getProperty($split[2]),
+                $owner->hasMethod($split[2]) => $owner->getMethod($split[2]),
+                default => null,
+            };
+            $element = $member === null ? null : $this->elementClass($member);
+            return $element === null ? null : new \ReflectionClass($element);
+        }
+        if ($last[3][0] !== null) {
+            $class = $this->resolve($last[3][0], $file, $text);
+            return $class === null ? null : new \ReflectionClass($class);
+        }
+        // An assignment of something else (a string, a sum) leaves no class
+        $root = $last[4][0] === null ? null : $this->variable($file, $text, $above, $last[4][0], $depth + 1);
+        return $root === null ? null : $this->follow($root, (string) $last[5][0]);
     }
 
     /** The class of the elements a property or method holds, from `@var` or `@return`. */
-    private static function elementClass(\ReflectionProperty|\ReflectionMethod $member): ?string
+    private function elementClass(\ReflectionProperty|\ReflectionMethod $member): ?string
     {
         $tag = $member instanceof \ReflectionProperty ? '@var' : '@return';
         if (preg_match('/' . $tag . '\s+((?:[^\s<>{}]|<(?:[^<>]|<[^<>]*>)*>|\{[^}]*\})+)/', (string) $member->getDocComment(), $m) !== 1) {
@@ -762,7 +791,8 @@ final class Answers
                 preg_match('/^[\w\\\\-]+<(.*)>$/', $type, $generic) === 1 => trim((string) preg_replace('/^(?:[^,<]|<[^>]*>)*,/', '', $generic[1])),
                 default => null,
             };
-            $class = $element === null ? null : self::className($element, $member->getDeclaringClass());
+            $file = (string) $member->getDeclaringClass()->getFileName();
+            $class = $element === null ? null : $this->resolve($element, $file, (string) @file_get_contents($file));
             if ($class !== null) {
                 return $class;
             }
@@ -770,42 +800,57 @@ final class Answers
         return null;
     }
 
-    /** A name in a doc comment of $context, resolved like PHP does: `use` statements, then the namespace. */
-    private static function className(string $name, \ReflectionClass $context): ?string
+    /** A class name written in $file, resolved like PHP does: `use` statements, then the namespace. */
+    private function resolve(string $name, string $file, string $text): ?string
     {
         if (str_starts_with($name, '\\')) {
             $class = substr($name, 1);
         } else {
             [$first] = explode('\\', $name, 2);
-            $imported = self::imports((string) $context->getFileName())[strtolower($first)] ?? null;
-            $namespace = $context->getNamespaceName();
+            $imports = $this->imports($file, $text);
+            $imported = $imports[strtolower($first)] ?? null;
+            $namespace = $imports[''] ?? '';
             $class = $imported !== null ? $imported . substr($name, strlen($first)) : ($namespace !== '' ? "$namespace\\$name" : $name);
         }
         return class_exists($class) || interface_exists($class) ? $class : null;
     }
 
-    /** @var array<string, array<string, string>> file => alias in lower case => class */
-    private static array $imports = [];
-
-    /** @return array<string, string> The `use` statements of a file, by lower-case alias */
-    private static function imports(string $file): array
+    /** @return array<string, string> The `use` statements of a file by lower-case alias, its namespace under '' */
+    private function imports(string $file, string $text): array
     {
-        if (isset(self::$imports[$file])) {
-            return self::$imports[$file];
+        return self::own($text);
+    }
+
+    /** @var array<string, array<string, string>> hash of a text => its imports */
+    private static array $own = [];
+
+    /** @return array<string, string> The `use` statements of a text by lower-case alias, its namespace under '' */
+    private static function own(string $text): array
+    {
+        $key = md5($text);
+        if (isset(self::$own[$key])) {
+            return self::$own[$key];
+        }
+        // Every keystroke is a new text
+        if (count(self::$own) > 100) {
+            self::$own = [];
         }
         $imports = [];
         // ponytail: one namespace per file and no function or const imports, as PSR-4 files are
         // The code up to the first declaration, without comments: "class" in a comment is no declaration
         $code = '';
-        foreach (token_get_all((string) @file_get_contents($file)) as $token) {
+        foreach (token_get_all($text) as $token) {
             if (is_array($token) && in_array($token[0], [T_CLASS, T_INTERFACE, T_TRAIT, T_ENUM], true)) {
                 break;
             }
             $code .= is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true) ? ' ' : (is_array($token) ? $token[1] : $token);
         }
+        if (preg_match('/\bnamespace\s+([\w\\\\]+)\s*[;{]/', $code, $namespace) === 1) {
+            $imports[''] = trim($namespace[1], '\\');
+        }
         preg_match_all('/\buse\s+([\w\\\\]+)(?:\s*\{([^}]*)\}|\s+as\s+(\w+))?\s*;/', $code, $uses, PREG_SET_ORDER);
         foreach ($uses as $use) {
-            $prefix = rtrim($use[1], '\\');
+            $prefix = trim($use[1], '\\');
             foreach (isset($use[2]) && $use[2] !== '' ? explode(',', $use[2]) : [''] as $part) {
                 $part = trim($part);
                 [$name, $alias] = preg_match('/^([\w\\\\]+)\s+as\s+(\w+)$/', $part, $as) === 1 ? [$as[1], $as[2]] : [$part, null];
@@ -813,22 +858,22 @@ final class Answers
                 $imports[strtolower($alias ?? ($use[3] ?? '') ?: substr((string) strrchr('\\' . $class, '\\'), 1))] = $class;
             }
         }
-        return self::$imports[$file] = $imports;
+        return self::$own[$key] = $imports;
     }
 
     /** The class at the end of `->a->b` (or `->a()`): the declared types of properties and of methods' returns. */
     private function follow(\ReflectionClass $target, string $chain): ?\ReflectionClass
     {
-        foreach (array_filter(explode('->', str_replace('()', '', $chain))) as $name) {
+        foreach (array_filter(explode('->', (string) preg_replace('/\([^()]*\)/', '', $chain))) as $name) {
             $type = match (true) {
                 $target->hasProperty($name) => $target->getProperty($name)->getType(),
                 $target->hasMethod($name) => $target->getMethod($name)->getReturnType(),
                 default => null,
             };
-            if (!$type instanceof \ReflectionNamedType || $type->isBuiltin() || !class_exists($type->getName())) {
+            if (!$type instanceof \ReflectionNamedType || ($type->getName() !== 'self' && $type->getName() !== 'static' && ($type->isBuiltin() || !class_exists($type->getName())))) {
                 return null;
             }
-            $target = new \ReflectionClass($type->getName());
+            $target = in_array($type->getName(), ['self', 'static'], true) ? $target : new \ReflectionClass($type->getName());
         }
         return $target;
     }

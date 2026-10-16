@@ -342,3 +342,40 @@ fn unknown_requests_get_an_error_and_exit_ends_the_server() {
     lsp.notify("exit", Value::Null);
     assert!(lsp.child.wait().unwrap().success());
 }
+
+#[test]
+fn assigned_variables_get_the_type_of_what_is_assigned() {
+    let root = project("assignments");
+    let template = root.join("page.tpl.php");
+    let mut lsp = Lsp::start(&root);
+    let text = [
+        "<?php $writer = $this->author;",
+        "$made = $this->make();",
+        "$fresh = new \\Fixture\\Author(); // $fresh = 'x';",
+        "?>",
+        "{{ $writer-> }}",
+        "{{ $made-> }}",
+        "@code $fresh = 'a;b'; $fresh = $this->author; @endcode {{ $fresh-> }}",
+        "<?php $writer = 'now a string'; ?>{{ $writer-> }}",
+    ]
+    .join("\n");
+    lsp.open(&template, &text);
+    // A property, a method's return type (self), new; a comment and a string are no assignment
+    assert_eq!(lsp.labels(&template, 4, 12), ["name"]);
+    assert_eq!(lsp.labels(&template, 5, 10), ["title", "author", "authors", "pens", "tags", "increment", "secret", "team"]);
+    assert_eq!(lsp.labels(&template, 6, 66), ["name"]);
+    // The last assignment counts: a string has no members
+    assert!(lsp.labels(&template, 7, 46).is_empty());
+    // Hover and definition of a member, and F12 on the variable leads to the last assignment above
+    lsp.change(&template, "<?php $writer = 'x';\n$writer = $this->author; ?>\n{{ $writer->name }}");
+    let hover = lsp.at("textDocument/hover", &template, 2, 13);
+    assert_eq!(hover["contents"]["value"], "```php\npublic string $name\n```", "{hover}");
+    let property = lsp.at("textDocument/definition", &template, 2, 13);
+    assert_eq!(property["uri"], uri(&root.join("src/Author.php")), "{property}");
+    let definition = lsp.at("textDocument/definition", &template, 2, 5);
+    assert_eq!(definition["uri"], uri(&template), "{definition}");
+    assert_eq!(definition["range"]["start"]["line"], 1, "{definition}");
+    // Not an assignment in a comment, nor a comparison
+    lsp.change(&template, "<?php // $x = 1\nif ($x == 2) {} ?>\n{{ $x }}");
+    assert!(lsp.at("textDocument/definition", &template, 2, 4).is_null());
+}

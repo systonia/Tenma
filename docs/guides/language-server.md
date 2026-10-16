@@ -118,6 +118,7 @@ When a provider names the class of a template, Tenma does the rest by reflection
 - completes `$this->` and `$this->prop->`, private members included (the template runs bound to the object),
 - shows type and doc comment on hover and jumps to the declaration with F12,
 - gives the variable of `foreach ($this->items as $item)` (also `@foreach`) the element type from the PHPDoc of `items` (`list<Item>`, `array<int, Item>` or `Item[]`), resolved through the class's `use` statements.
+- gives a variable assigned in the file the type of what is assigned: `$order = $this->order();` the method's return type, `$order = $this->order;` the property's type, `$order = new Order(...);` the class. The last assignment or foreach above the cursor counts, not one in a comment or string; F12 on the variable leads to it. This works in plain `<?php $order = …; ?>` blocks as well as in a template syntax's own blocks.
 
 ## Semantic tokens
 
