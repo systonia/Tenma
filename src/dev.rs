@@ -180,12 +180,17 @@ async fn run(command: Command) -> OpResult {
 
 async fn prefixed(pipe: Option<impl AsyncRead + Unpin>, name: String, error: bool) {
     let Some(pipe) = pipe else { return };
-    let mut lines = BufReader::new(pipe).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    // Bytes, not lines(): that fails on output that is no UTF-8, and the closed pipe kills the hook
+    let mut pipe = BufReader::new(pipe);
+    let mut buffer = Vec::new();
+    while pipe.read_until(b'\n', &mut buffer).await.is_ok_and(|read| read > 0) {
+        let line = String::from_utf8_lossy(&buffer);
+        let line = line.trim_end_matches(['\n', '\r']);
         if error {
             eprintln!("[{name}] {line}");
         } else {
             println!("[{name}] {line}");
         }
+        buffer.clear();
     }
 }

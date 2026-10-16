@@ -1326,6 +1326,12 @@ fn build_runs_hooks_in_order_and_fails_on_cycles() {
     let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["build", "fails.php"]).current_dir(&directory).output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("tenma: hook false failed: exited with status 1"), "{output:?}");
+
+    // Output that is no UTF-8 is printed as well as it goes, and the hook runs on
+    std::fs::write(directory.join("latin1.php"), "<?php return [new Tenma\\Hook(inputs: [], run: ['sh', '-c', 'printf \"caf\\\\351\\\\n\"; sleep 0.3; echo after'], name: 'latin1')];").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["build", "latin1.php"]).current_dir(&directory).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "[latin1] caf\u{fffd}\n[latin1] after\n");
     let _ = std::fs::remove_dir_all(directory);
 }
 
