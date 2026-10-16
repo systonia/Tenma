@@ -25,7 +25,7 @@ fn json(value: serde_json::Value) -> OpResult {
     OpResult::Text(value.to_string().into_bytes())
 }
 
-/// Like PHP copy() and Node copyFile(): copying a file onto itself would otherwise empty it.
+/// Like PHP copy(): copying a file onto itself would otherwise empty it.
 fn same_file(from: &PathBuf, to: &PathBuf) -> bool {
     match (std::fs::metadata(from), std::fs::metadata(to)) {
         (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),

@@ -3,7 +3,7 @@
 // It builds on the raw functions of the C layer (tenma_listen, tenma_respond, tenma_op_*)
 // and gives them a PHP API.
 //
-// Asynchronous like Node, just without an await keyword: every request runs in its own Fiber.
+// Asynchronous without an await keyword: every request runs in its own Fiber.
 // When the code starts an op (sleep, fetch), the Fiber pauses, the event loop serves other
 // requests, and once the op is done, execution continues at the same spot. To the code this
 // looks synchronous.
@@ -279,7 +279,7 @@ namespace Tenma\Internal {
      * Called by Tenma after exit() or die() in a Fiber. Inside a request only the request ends:
      * it gets 500, its streams, sockets and transactions are closed, its remaining tasks are
      * cancelled (exit() skips finally blocks). Outside a request (timer, background,
-     * script) Tenma exits, like PHP and Node.
+     * script) Tenma exits, like PHP.
      */
     function exited(): void
     {
@@ -318,7 +318,7 @@ namespace Tenma {
     }
 
     /**
-     * Work that runs in its own Fiber while the caller carries on; like a Promise in Node.
+     * Work that runs in its own Fiber while the caller carries on; await() fetches its result.
      * Created with async() or all(). Belongs to the request it was created in.
      */
     final class Task
@@ -517,7 +517,7 @@ namespace Tenma {
             return $this->done;
         }
 
-        /** Like Node with an unhandled promise rejection: if nobody ever calls await(), the error is not silently lost. */
+        /** If nobody ever calls await(), the error is not silently lost. */
         public function __destruct()
         {
             if ($this->error !== null && !$this->observed && !$this->error instanceof Cancelled) {
@@ -770,7 +770,7 @@ namespace Tenma {
     }
 
     /**
-     * A value that travels along with asynchronous work, like AsyncLocalStorage in Node: for example the
+     * A value that travels along with asynchronous work, for example the
      * request ID for log lines. Every task (async(), all(), detach(), timer) gets a copy of its creator's
      * values at start; set() in the task changes only its own copy and that of its later children. A request
      * starts with the values from the script.
@@ -867,7 +867,7 @@ namespace Tenma {
             return self::call('readDir', $path);
         }
 
-        /** Like mkdir() in PHP and Node: without $recursive, an error if the directory already exists. */
+        /** Like mkdir() in PHP: without $recursive, an error if the directory already exists. */
         public static function mkdir(string $path, bool $recursive = false): void
         {
             self::call('mkdir', $path, flag: $recursive);
@@ -914,7 +914,7 @@ namespace Tenma {
 namespace Tenma {
     /**
      * A build step for `tenma --watch` and `tenma build`, returned in a list from tenma.dev.php
-     * next to the script, like the plugins of a Vite config. Runs once at startup and again
+     * next to the script. Runs once at startup and again
      * whenever a file matching $inputs changes. $run is PHP code or a command: a list of program
      * and arguments (an array is always a command) that Tenma starts as a process of its own,
      * without a shell, in the directory of tenma.dev.php.
@@ -2199,7 +2199,7 @@ function startClassic(array $server, Request $request, int $rid): void
         'REMOTE_PORT' => (string) $request->remotePort,
         'SERVER_ADDR' => $request->serverAddress,
         'SERVER_PORT' => (string) $request->serverPort,
-        // Like nginx: the configured name (--server-name), never the Host header the client controls
+        // The configured name (--server-name), never the Host header the client controls
         'SERVER_NAME' => $server['SERVER_NAME'] ?? 'localhost',
         // As under FPM with a front controller: the script sits in the site's root directory
         'DOCUMENT_ROOT' => dirname($server['SCRIPT_FILENAME']),
@@ -2209,7 +2209,7 @@ function startClassic(array $server, Request $request, int $rid): void
         'REQUEST_TIME_FLOAT' => microtime(true),
     ];
     foreach ($request->headers as $name => $value) {
-        // Like nginx: headers with an underscore are dropped, otherwise x_forwarded_for would overwrite X-Forwarded-For
+        // Headers with an underscore are dropped, otherwise x_forwarded_for would overwrite X-Forwarded-For
         if (str_contains($name, '_')) {
             continue;
         }
@@ -2271,7 +2271,7 @@ function finishClassic(bool $fatal): void
 
 namespace {
     /**
-     * Tenma's API: an HTTP server and asynchronous work in Fibers, Node-style. Classes live under Tenma\
+     * Tenma's API: an HTTP server and asynchronous work in Fibers. Classes live under Tenma\
      * (Tenma\Http\Request, Tenma\Task, Tenma\AsyncLocal, Tenma\Fs, Tenma\Db\Postgres).
      */
     final class Tenma
@@ -2318,8 +2318,8 @@ namespace {
         }
 
         /**
-         * Runs everything concurrently and returns the results with the same keys, like
-         * Promise.all in Node: Tenma::all(user: fn () => …, weather: fn () => …). If one fails, all() cancels
+         * Runs everything concurrently and returns the results with the same keys:
+         * Tenma::all(user: fn () => …, weather: fn () => …). If one fails, all() cancels
          * the others, waits until they have cleaned up, and then throws the first error: nothing is left
          * behind in the background that still uses connections, transactions or the stream.
          *
@@ -2342,8 +2342,8 @@ namespace {
         }
 
         /**
-         * Stops here when an editor is connected to tenma --inspect, like `debugger;` in JavaScript
-         * or xdebug_break(). Does nothing otherwise.
+         * Stops here when an editor is connected to tenma --inspect.
+         * Does nothing otherwise.
          */
         public static function debugger(): void
         {
@@ -2382,7 +2382,7 @@ namespace {
         }
 
         /**
-         * Calls $callback once after $seconds seconds, in its own Fiber, like setTimeout in Node. Works
+         * Calls $callback once after $seconds seconds, in its own Fiber. Works
          * at script startup and in asynchronous code. A script without a server runs until all timers have
          * fired. With several workers, each worker schedules its own timers, also after every restart.
          */

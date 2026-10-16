@@ -1,4 +1,4 @@
-//! Tenma: PHP with Node's execution model. Each worker is a thread with its own PHP interpreter
+//! Tenma: PHP as a long-running process. Each worker is a thread with its own PHP interpreter
 //! and its own event loop; the script runs once per worker, then the registered servers handle
 //! requests until Ctrl+C. The main thread accepts connections and hands them to the workers
 //! round-robin.
@@ -240,7 +240,7 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
                 options.inspect = Some(inspect::DEFAULT);
                 options.inspect_wait = inspect::wait(&arg);
             }
-            // As with node: --inspect=9230 or --inspect=host:port
+            // --inspect=9230 or --inspect=host:port
             inspect if matches!(inspect.split_once('='), Some(("--inspect" | "--inspect-wait" | "--inspect-brk", _))) => {
                 let (option, address) = inspect.split_once('=').unwrap_or_default();
                 options.inspect_wait = inspect::wait(option);
@@ -655,7 +655,7 @@ fn refuse(stream: std::net::TcpStream, options: Options, message: &'static str) 
     )
 }
 
-/// A script without servers: like Node, the event loop runs while timers or other ops are pending.
+/// A script without servers: the event loop runs while timers or other ops are pending.
 /// Ends with the status of exit() in timers or background work, 255 after a fatal error. With
 /// --watch, a change (Restart) or the end of tenma (Closed) stops it early.
 fn run_until_idle(connections: &mut UnboundedReceiver<Connection>, exits: bool, options: Options) -> Result<u8, Stop> {

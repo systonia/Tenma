@@ -6,7 +6,7 @@ version=$1 tarball=$2 binary=$3
 sha256=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
 cat <<RUBY
 class Tenma < Formula
-  desc "PHP with Node's execution model: one process, one event loop"
+  desc "PHP as a long-running process: the script runs once, then one event loop serves every request"
   homepage "https://tenma.dev"
   url "https://github.com/systonia/Tenma/releases/download/v$version/$(basename "$tarball")"
   version "$version"

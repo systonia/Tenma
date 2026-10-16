@@ -114,7 +114,7 @@ static _Thread_local int classic_open = 0;
 static _Thread_local HashTable *outer_shutdown_functions = NULL;
 /**
  * The output of the running classic request. Tenma collects it where PHP writes (ub_write),
- * not in an ob_start() buffer: frameworks like Symfony, Laravel or WordPress flush all output
+ * not in an ob_start() buffer: frameworks that flush all output
  * buffers when sending, and the response would otherwise have ended up on the console.
  */
 static _Thread_local smart_str classic_output = {0};
@@ -407,7 +407,7 @@ void tenma_define_ini(const char *entry) {
     php_ini_builder_define(&ini_builder, entry);
 }
 
-/** Like server_name in nginx: $_SERVER['SERVER_NAME'] in classic mode, never from the Host header. */
+/** $_SERVER['SERVER_NAME'] in classic mode, never from the Host header. */
 static char *server_name = "localhost";
 
 void tenma_set_server_name(const char *name) {
@@ -1421,7 +1421,7 @@ char *tenma_inspect_set_child(uint32_t reference, const char *name, size_t name_
     return malloc_copy(&out, len);
 }
 
-/** Tenma::debugger(): stops here if a debugger is connected, like `debugger;` in JavaScript. */
+/** Tenma::debugger(): stops here if a debugger is connected. */
 extern void tenma_rs_debugger(uintptr_t fiber);
 
 PHP_FUNCTION(tenma_reloaded_by) {

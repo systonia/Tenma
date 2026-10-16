@@ -5,7 +5,7 @@
 //! the script's code; at a breakpoint or after a step the worker thread stops there and blocks
 //! until the editor continues. While stopped, it answers what needs PHP (threads, stacks,
 //! variables) itself, the server passes those requests on. A stopped worker stops everything it
-//! runs, other requests and timers included, like Node.
+//! runs, other requests and timers included.
 //!
 //! DAP threads are fibers: every request, timer and `Tenma::async()` task is one, with the stack
 //! it waits in.
@@ -123,7 +123,7 @@ struct Breakpoint {
 }
 
 impl Breakpoint {
-    /// Moves it to the next statement in the innermost function around its line, as Node does:
+    /// Moves it to the next statement in the innermost function around its line:
     /// a statement spanning lines counts at the line PHP gives it, a method's head or a comment
     /// has none.
     fn resolve(&mut self, code: Option<&Code>) {
@@ -484,7 +484,7 @@ extern "C" fn tenma_rs_statement(file: *const u8, file_len: usize, line: u32, fr
 }
 
 /// A function returns, at its closing brace on `line`: a breakpoint there stops, and a step stops
-/// there before it leaves the function, as in Node.
+/// there before it leaves the function.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_return(file: *const u8, file_len: usize, line: u32, frame: usize, fiber: usize) {
     // Ran off its end: the statement PHP puts at the closing brace has just been there
@@ -518,7 +518,7 @@ fn stop_here(body: Value, fiber: usize) {
     STEPPING.set(step.map(|step| (step, fiber, unsafe { tenma_inspect_depth() })));
 }
 
-/// `Tenma::debugger()`: stops if an editor is connected, like `debugger;` in JavaScript.
+/// `Tenma::debugger()`: stops if an editor is connected.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_debugger(fiber: usize) {
     if ENDING.load(Ordering::Relaxed) || CLIENT.lock().unwrap().is_none() {

@@ -57,7 +57,7 @@ Tenma::serve($port, function (Request $request) use ($port, &$ticks, &$left): st
             Tenma::sleep(0.1);
             return json_encode($left) . "\n";
         case '/all':
-            // Three waits of 0.3 s each at the same time, named results like Promise.all
+            // Three waits of 0.3 s each at the same time, named results
             $slow = fn (string $name) => function () use ($name) {
                 Tenma::sleep(0.3);
                 return $name;

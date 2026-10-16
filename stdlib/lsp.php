@@ -73,7 +73,7 @@ function read($in): ?array
     while (true) {
         $line = fgets($in);
         if ($line === false) {
-            // Node hands over a socket, not a pipe: a read gives up after default_socket_timeout
+            // The editor may hand over a socket, not a pipe: a read gives up after default_socket_timeout
             // without the input having ended, when the editor sends nothing for a while
             if (timedOut($in)) {
                 continue;

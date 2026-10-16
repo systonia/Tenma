@@ -1,5 +1,5 @@
 <?php
-// For tests/http.rs: timers and background work in a script without a server, like in Node
+// For tests/http.rs: timers and background work in a script without a server
 $ticks = 0;
 $interval = Tenma::setInterval(function () use (&$ticks, &$interval) {
     if (++$ticks === 3) {

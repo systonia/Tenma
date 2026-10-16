@@ -1,4 +1,4 @@
-//! `tenma --watch`: reloads the workers when a file the script loaded changes, like `node --watch`.
+//! `tenma --watch`: reloads the workers when a file the script loaded changes.
 //! Workers report the files PHP loaded, also later ones (classes the autoloader loads on the first
 //! request). A thread watches their directories, not the files: many editors save by writing a
 //! new file and renaming it over the old one. Only a different content counts as a change.

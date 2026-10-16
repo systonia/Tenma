@@ -17,7 +17,7 @@ Tenma::serveClassic((int) getenv('PORT'), function () {
             echo 'before exit';
             exit;
         case '/flush-all':
-            // Like Symfony Response::send() or WordPress: flush all output buffers
+            // Like a framework sending its response: flush all output buffers
             ob_start();
             echo 'a';
             ob_start();

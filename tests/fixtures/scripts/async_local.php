@@ -1,5 +1,5 @@
 <?php
-// For tests/http.rs: Tenma\AsyncLocal travels with tasks and timers, like AsyncLocalStorage in Node
+// For tests/http.rs: Tenma\AsyncLocal travels with tasks and timers
 $id = new Tenma\AsyncLocal();
 $id->set('script');
 

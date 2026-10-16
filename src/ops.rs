@@ -1,6 +1,6 @@
 //! Async ops that PHP starts through the C layer. Each op runs as a task on the loop thread and
 //! then resumes the fiber waiting on it (or fires a timer). Ops can only be started inside the
-//! event loop. Pending ops keep a script without servers alive, as in Node.
+//! event loop. Pending ops keep a script without servers alive.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

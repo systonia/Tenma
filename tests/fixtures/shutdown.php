@@ -20,7 +20,7 @@ Tenma::serveClassic((int) getenv('PORT'), function () use (&$count) {
         match ($path) {
             '/throw-shutdown' => throw new RuntimeException('in shutdown'),
             '/exit-shutdown' => exit,
-            // Like an error page from Laravel, Symfony or Sentry
+            // Like a framework's error page
             '/fatal' => print(' error page: ' . (error_get_last()['type'] === E_ERROR ? 'fatal' : '?')),
             // A backtrace after a compile error must not reach into skipped frames
             '/compile-error' => print(' trace ' . count((new Exception())->getTrace())),

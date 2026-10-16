@@ -25,7 +25,7 @@ Depends: ca-certificates, $(paste -sd, /packages | sed 's/,/, /g')
 Section: web
 Priority: optional
 Homepage: https://tenma.dev
-Description: PHP with Node's execution model: one process, one event loop
+Description: PHP as a long-running process: the script runs once, then one event loop serves every request
  One process runs the PHP script once and then serves requests continuously,
  every request in its own fiber, with async Postgres, Redis, files and WebSockets.
 CONTROL
