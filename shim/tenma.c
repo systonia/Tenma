@@ -1682,6 +1682,12 @@ PHP_FUNCTION(tenma_respond) {
         Z_PARAM_ARRAY(tuple)
     ZEND_PARSE_PARAMETERS_END();
 
+    // Checked before the cast to 16 bits: 65736 would turn into 200
+    zval *status = zend_hash_index_find(Z_ARRVAL_P(tuple), 0);
+    if (status && Z_TYPE_P(status) == IS_LONG && (Z_LVAL_P(status) < 100 || Z_LVAL_P(status) > 999)) {
+        zend_value_error("HTTP status " ZEND_LONG_FMT " is not between 100 and 999", Z_LVAL_P(status));
+        RETURN_THROWS();
+    }
     tenma_response response;
     if (!read_response(tuple, &response)) {
         zend_argument_value_error(2, "must be [int $status, list<string> $headers, string $body]");
@@ -1816,6 +1822,10 @@ PHP_FUNCTION(tenma_stream_start) {
         Z_PARAM_LONG(status)
         Z_PARAM_ARRAY(headers)
     ZEND_PARSE_PARAMETERS_END();
+    if (status < 100 || status > 999) {
+        zend_value_error("HTTP status " ZEND_LONG_FMT " is not between 100 and 999", status);
+        RETURN_THROWS();
+    }
     size_t packed_len;
     char *packed = pack_lines(Z_ARRVAL_P(headers), &packed_len);
     int started = tenma_rs_stream_start((uint64_t) rid, (uint16_t) status, packed, packed_len);

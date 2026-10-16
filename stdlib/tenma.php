@@ -2244,6 +2244,11 @@ function finishClassic(bool $fatal): void
         $headers[] = 'Content-Type: text/html; charset=UTF-8';
     }
     $status = http_response_code() ?: 200;
+    // tenma_respond() would throw here, outside the script: that would end the worker
+    if ($status < 100 || $status > 999) {
+        error_log("HTTP status $status is not between 100 and 999");
+        $status = 500;
+    }
     \tenma_respond($rid, [$fatal && $status === 200 ? 500 : $status, $headers, $body]);
 }
 }

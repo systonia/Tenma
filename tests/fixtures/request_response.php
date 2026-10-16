@@ -35,6 +35,8 @@ Tenma::serve((int) getenv('PORT'), function (Request $request): Response {
         case '/header-in-array':
             // Past header(): the array is checked when the response goes out
             return new Response('never sent', headers: ['x-name' => $request->query['value'] ?? '']);
+        case '/status':
+            return new Response('never sent', (int) $request->query['code']);
         case '/html':
             return Response::html('<h1>Hello</h1>', 201);
         default:

@@ -82,6 +82,10 @@ fn classic_code_with_superglobals_header_and_echo() {
     assert!(second.starts_with("HTTP/1.1 404"), "{second}");
     assert!(second.contains("x-count: 2"));
     assert_eq!(second.matches("set-cookie").count(), 2);
+
+    // A status HTTP has no room for is a 500, and the worker keeps its state
+    assert!(get(port, "/?name=x&status=65736").starts_with("HTTP/1.1 500"));
+    assert!(get(port, "/?name=x").contains("x-count: 4"));
 }
 
 #[test]
@@ -910,6 +914,12 @@ fn request_and_response_in_fiber_mode() {
     let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).arg("tests/fixtures/request_response.php").env("PORT", port.to_string()).spawn().unwrap());
     get(port, "/");
     let send = |raw: String| request(port, &raw);
+
+    // A status out of range is an error, not a wrapped-around 200
+    for code in ["65736", "99", "1000", "-1"] {
+        let response = get(port, &format!("/status?code={code}"));
+        assert!(response.starts_with("HTTP/1.1 500"), "{code}: {response}");
+    }
 
     // Cookies like under FPM: the first one wins, names like a[b] and x.y are converted
     let cookies = send("GET /cookies HTTP/1.1\r\nHost: x\r\nCookie: sid=first; sid=second; a[b]=1; x.y=2\r\nConnection: close\r\n\r\n".into());
