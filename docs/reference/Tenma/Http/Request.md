@@ -175,4 +175,4 @@ public function files(): array
 Uploaded files from multipart/form-data, by field name; names as with form() (name[] becomes
 a list, name[a] nests).
 
-**Returns** `array<string, mixed>` — UploadedFile or arrays of them
+**Returns** `array<string, mixed>`: UploadedFile or arrays of them

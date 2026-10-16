@@ -52,7 +52,7 @@ public function __construct(
 **Parameters**
 
 - `$status` `int`
-- `$headers` `list<string>` — header lines "Name: Value"
+- `$headers` `list<string>`: header lines "Name: Value"
 - `$body` `string`
 
 ### header()

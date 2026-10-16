@@ -55,7 +55,7 @@ public function __construct(
 
 - `$body` `string`
 - `$status` `int`
-- `$headers` `array<string, string|list<string>>` — several values as a list, for example for Set-Cookie
+- `$headers` `array<string, string|list<string>>`: several values as a list, for example for Set-Cookie
 
 ### json()
 
@@ -162,7 +162,7 @@ after it. The Fiber waits when the client cannot keep up.
 
 - `$writer` `callable(`[`Stream`](Stream.md)`): void`
 - `$status` `int`
-- `$headers` `array<string, string|list<string>>` — several values as a list, for example for Set-Cookie
+- `$headers` `array<string, string|list<string>>`: several values as a list, for example for Set-Cookie
 
 **Returns** [`StreamedResponse`](StreamedResponse.md)
 

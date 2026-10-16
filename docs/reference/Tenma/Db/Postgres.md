@@ -25,7 +25,7 @@ public static function connect(string $url): \Tenma\Db\Postgres
 
 **Parameters**
 
-- `$url` `string` — postgres://user:password@host:5432/database
+- `$url` `string`: postgres://user:password@host:5432/database
 
 **Returns** [`Postgres`](Postgres.md)
 

@@ -10,7 +10,7 @@ order: 80
 tenma --watch app.php
 ```
 
-Tenma watches every file the script loaded — including classes the autoloader loads later and templates read with `include` — and restarts the workers' interpreters when one of them changes. A change means different content, not just a new timestamp, so saving without changes or switching git branches back and forth does not reload.
+Tenma watches every file the script loaded, including classes the autoloader loads later and templates read with `include`, and restarts the workers' interpreters when one of them changes. A change means different content, not just a new timestamp, so saving without changes or switching git branches back and forth does not reload.
 
 During a reload:
 
@@ -36,7 +36,7 @@ Tenma::serve(8080, fn () => "ok\n");
 
 ## Build hooks: tenma.dev.php
 
-Build steps — Tailwind, a JavaScript bundle, a route cache — come from a `tenma.dev.php` next to the script. It returns a list of [`Tenma\Hook`](../reference/Tenma/Hook.md). Production code never loads it.
+Build steps such as Tailwind, a JavaScript bundle or a route cache come from a `tenma.dev.php` next to the script. It returns a list of [`Tenma\Hook`](../reference/Tenma/Hook.md). Production code never loads it.
 
 ```php
 <?php

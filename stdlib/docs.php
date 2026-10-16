@@ -622,7 +622,7 @@ final class Writer
     {
         return $this->list('Template parameters', array_map(function ($body) {
             preg_match('/^(\S+)(?:\s+(?:of|as)\s+(\S+))?\s*(.*)$/s', $body, $match);
-            return "`$match[1]`" . ($match[2] !== '' ? ' of ' . $this->typeText($match[2]) : '') . ($match[3] !== '' ? " — $match[3]" : '');
+            return "`$match[1]`" . ($match[2] !== '' ? ' of ' . $this->typeText($match[2]) : '') . ($match[3] !== '' ? ": $match[3]" : '');
         }, $this->tags($tags, 'template')));
     }
 
@@ -648,19 +648,19 @@ final class Writer
         foreach ($method->getParameters() as $parameter) {
             [$type, $description] = $params[$parameter->getName()] ?? ['', ''];
             $type = $type !== '' ? $this->typeText($type) : $this->typeText($parameter->getType());
-            $items[] = '`' . ($parameter->isVariadic() ? '...' : '') . '$' . $parameter->getName() . '`' . ($type !== '' ? " $type" : '') . ($description !== '' ? " — $description" : '');
+            $items[] = '`' . ($parameter->isVariadic() ? '...' : '') . '$' . $parameter->getName() . '`' . ($type !== '' ? " $type" : '') . ($description !== '' ? ": $description" : '');
         }
         $out .= $this->list('Parameters', $items);
         $return = $this->tags($tags, 'return')[0] ?? null;
         if ($return !== null) {
             [$type, $description] = splitType($return);
-            $out .= '**Returns** ' . $this->typeText($type) . ($description !== '' ? " — $description" : '') . "\n\n";
+            $out .= '**Returns** ' . $this->typeText($type) . ($description !== '' ? ": $description" : '') . "\n\n";
         } elseif ($method->getReturnType() !== null && !in_array((string) $method->getReturnType(), ['void', 'never'], true) && !$method->isConstructor()) {
             $out .= '**Returns** ' . $this->typeText($method->getReturnType()) . "\n\n";
         }
         $out .= $this->list('Throws', array_map(function ($body) {
             [$type, $description] = splitType($body);
-            return $this->typeText($type) . ($description !== '' ? " — $description" : '');
+            return $this->typeText($type) . ($description !== '' ? ": $description" : '');
         }, $this->tags($tags, 'throws')));
         $out .= $this->templates($tags);
         return $out . $this->otherTags($tags);
@@ -726,7 +726,7 @@ final class Writer
             $out .= "## Types\n\n";
             foreach ($classes as $class) {
                 $summary = sentence(parse($class->getDocComment())[0]);
-                $out .= '- ' . $this->name($class->getName()) . ' · ' . $this->kind($class) . ($summary !== '' ? " — $summary" : '') . "\n";
+                $out .= '- ' . $this->name($class->getName()) . ' · ' . $this->kind($class) . ($summary !== '' ? ": $summary" : '') . "\n";
             }
         }
         return rtrim($out) . "\n";

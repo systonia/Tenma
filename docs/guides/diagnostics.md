@@ -4,7 +4,7 @@ description: Report problems from the running app to the editor with Tenma::diag
 order: 110
 ---
 
-Some problems only show up when the code runs: a template that fails to compile, a route that points to a missing method, an error after a click. [`Tenma::diagnostics()`](../reference/Tenma.md#diagnostics) reports them to the editor, which shows them at their line like any other error — also in files that are not open.
+Some problems only show up when the code runs: a template that fails to compile, a route that points to a missing method, an error after a click. [`Tenma::diagnostics()`](../reference/Tenma.md#diagnostics) reports them to the editor, which shows them at their line like any other error, also in files that are not open.
 
 ```php
 <?php

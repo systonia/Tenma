@@ -27,4 +27,4 @@ public function tokens(string $file, string $text): array
 - `$file` `string`
 - `$text` `string`
 
-**Returns** `list<array{line: int, column: int, length: int, type: 'keyword'|'comment'|'variable'|'property'|'method'|'function'|'class'|'string'|'number'|'operator'}>` — Lines count from 1, column and length are bytes within the line
+**Returns** `list<array{line: int, column: int, length: int, type: 'keyword'|'comment'|'variable'|'property'|'method'|'function'|'class'|'string'|'number'|'operator'}>`: Lines count from 1, column and length are bytes within the line

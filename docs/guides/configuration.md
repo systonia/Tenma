@@ -39,7 +39,7 @@ expose_php = Off
 | `opcache.revalidate_freq` | `0` under `--watch` | a saved file is picked up at once |
 | `opcache.enable` | `0` under `--inspect` | the debugger needs the plain opcodes |
 
-Opcache is on otherwise. It brings less than under FPM — each worker compiles the code once at startup anyway — but saves some memory. The JIT is built on Linux and can be enabled with `-d opcache.jit=tracing`; PHP does not build it for thread-safe PHP on Apple Silicon.
+Opcache is on otherwise. It brings less than under FPM, since each worker compiles the code once at startup anyway, but saves some memory. The JIT is built on Linux and can be enabled with `-d opcache.jit=tracing`; PHP does not build it for thread-safe PHP on Apple Silicon.
 
 `max_execution_time` is `0`, as on the PHP command line: a handler that computes forever holds up its worker.
 

@@ -4,7 +4,7 @@ description: Start a server with Tenma::serve(), read requests, build responses 
 order: 10
 ---
 
-`Tenma::serve()` registers an HTTP server. It does not block: the script runs to its end, and then Tenma opens the port and calls the handler for every request. The handler runs in fiber mode — each request in its own fiber — and returns a response.
+`Tenma::serve()` registers an HTTP server. It does not block: the script runs to its end, and then Tenma opens the port and calls the handler for every request. The handler runs in fiber mode, each request in its own fiber, and returns a response.
 
 ```php
 <?php
@@ -148,7 +148,7 @@ Tenma::serve(8080, function (Request $request) use (&$cache) {
 });
 ```
 
-Many requests run at the same time in one process, so never keep the state of *one* request in a global, a static or a singleton — another request would see it. Pass it along as an argument, or use [`AsyncLocal`](async.md#values-that-follow-a-request) for values that should follow a request into its tasks. With `--workers N`, each worker has its own copy of the state: see [Command line and deployment](deployment.md#workers).
+Many requests run at the same time in one process, so never keep the state of *one* request in a global, a static or a singleton, because another request would see it. Pass it along as an argument, or use [`AsyncLocal`](async.md#values-that-follow-a-request) for values that should follow a request into its tasks. With `--workers N`, each worker has its own copy of the state: see [Command line and deployment](deployment.md#workers).
 
 ## Errors and limits
 

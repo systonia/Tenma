@@ -64,6 +64,6 @@ try {
 
 A running file operation cannot be cancelled; it runs to completion even when the request is cancelled. A file larger than what `memory_limit` leaves free becomes an error in the request, not a fatal error.
 
-`Tenma\Fs` works in asynchronous code (handlers, tasks, timers). At script startup, plain `file_get_contents()` is fine — nothing else is running yet — or wrap the work in `Tenma::async()`. For files sent to clients as they are, [static files](http.md#static-files) are faster than reading them in PHP.
+`Tenma\Fs` works in asynchronous code (handlers, tasks, timers). At script startup, plain `file_get_contents()` is fine (nothing else is running yet), or wrap the work in `Tenma::async()`. For files sent to clients as they are, [static files](http.md#static-files) are faster than reading them in PHP.
 
 See also: [`Tenma\Fs`](../reference/Tenma/Fs.md), [`UploadedFile::moveTo()`](../reference/Tenma/Http/UploadedFile.md#moveto).

@@ -74,7 +74,7 @@ public function __construct(
 
 **Parameters**
 
-- `$inputs` `list<string>` — globs relative to tenma.dev.php: * and ? within a name, ** across directories
+- `$inputs` `list<string>`: globs relative to tenma.dev.php: * and ? within a name, ** across directories
 - `$run` `callable|array`
-- `$outputs` `list<string>` — files $run writes; they never trigger this hook again
-- `$name` `?string` — for log lines, default: the program's file name or "#N" (the position in the list)
+- `$outputs` `list<string>`: files $run writes; they never trigger this hook again
+- `$name` `?string`: for log lines, default: the program's file name or "#N" (the position in the list)

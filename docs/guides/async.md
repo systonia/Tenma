@@ -27,7 +27,7 @@ What waits without blocking:
 | `Stream::write()`, `EventStream::send()`, `WebSocket::receive()` and `send()` | [Streams](streams.md), [WebSockets](websockets.md) |
 | `Task::await()`, `Tenma::all()` | this page |
 
-PHP's own blocking functions — `sleep()`, `file_get_contents()`, PDO, mysqli, curl — still work, but they hold up the whole worker while they wait: no other request of that worker runs meanwhile. Use the Tenma functions in request code.
+PHP's own blocking functions (`sleep()`, `file_get_contents()`, PDO, mysqli, curl) still work, but they hold up the whole worker while they wait: no other request of that worker runs meanwhile. Use the Tenma functions in request code.
 
 ## Several things at once
 
@@ -214,6 +214,6 @@ A request starts with the values the script set at startup.
 - Start independent waits together (`Tenma::all()`), dependent ones one after another.
 - Keep CPU-heavy loops short: a fiber only gives way when it waits. An endless loop holds up its worker.
 - Use `Tenma::detach()` only for work that must outlive the request; everything else should end with it.
-- Waiting is possible in handlers, tasks, timers, subscriptions and hooks — not at the top level of the script.
+- Waiting is possible in handlers, tasks, timers, subscriptions and hooks, but not at the top level of the script.
 
 See also: [`Tenma`](../reference/Tenma.md) (`async`, `all`, `detach`, `sleep`, `setTimeout`, `setInterval`), [`Task`](../reference/Tenma/Task.md), [`Timer`](../reference/Tenma/Timer.md), [`Cancelled`](../reference/Tenma/Cancelled.md), [`AsyncLocal`](../reference/Tenma/AsyncLocal.md).

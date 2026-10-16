@@ -79,7 +79,7 @@ The transaction commits when the function returns and rolls back when it throws;
 
 ### The pool
 
-Each worker keeps a pool per URL, `--db-pool` connections at most. By default the pool is 20 divided by the number of workers, at least 2 and at most 10 per worker — about 20 connections in all, well below Postgres' default `max_connections` of 100. A query that finds every connection busy waits up to 10 seconds, then throws.
+Each worker keeps a pool per URL, `--db-pool` connections at most. By default the pool is 20 divided by the number of workers, at least 2 and at most 10 per worker: about 20 connections in all, well below Postgres' default `max_connections` of 100. A query that finds every connection busy waits up to 10 seconds, then throws.
 
 After every query, the connection is cleaned before it goes back to the pool (a `ROLLBACK`, then what `DISCARD ALL` does, except dropping prepared statements). `SET ROLE`, `set_config()`, temporary tables, advisory locks or a forgotten `BEGIN` never leak into another request. Session state across several statements therefore only exists inside `transaction()`.
 
@@ -149,7 +149,7 @@ Run it with `tenma --workers 4 app.php`, POST a new price, and every worker answ
 
 ### Across processes
 
-Several processes of the same app — on one machine or behind a load balancer — start with `--pubsub`:
+Several processes of the same app (on one machine or behind a load balancer) start with `--pubsub`:
 
 ```bash
 tenma --pubsub redis://cache.internal:6379 app.php

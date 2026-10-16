@@ -89,7 +89,7 @@ public static function readDir(string $path): array
 
 - `$path` `string`
 
-**Returns** `list<string>` — Names in the directory, sorted, without . and ..
+**Returns** `list<string>`: Names in the directory, sorted, without . and ..
 
 ### mkdir()
 
@@ -128,7 +128,7 @@ public static function copy(string $from, string $to): int
 - `$from` `string`
 - `$to` `string`
 
-**Returns** `int` — bytes copied; copying a file onto itself is an error
+**Returns** `int`: bytes copied; copying a file onto itself is an error
 
 ### remove()
 

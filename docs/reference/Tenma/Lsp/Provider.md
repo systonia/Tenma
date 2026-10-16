@@ -59,7 +59,7 @@ public function definition(string $file, string $text, int $offset): ?array
 - `$text` `string`
 - `$offset` `int`
 
-**Returns** `array{file: string, line: int}|null` — Where the name at $offset is declared
+**Returns** `array{file: string, line: int}|null`: Where the name at $offset is declared
 
 ### diagnostics()
 
@@ -72,4 +72,4 @@ public function diagnostics(string $file, string $text): array
 - `$file` `string`
 - `$text` `string`
 
-**Returns** `list<array{line: int, message: string, severity?: 'error'|'warning'|'info'}>` — Lines count from 1
+**Returns** `list<array{line: int, message: string, severity?: 'error'|'warning'|'info'}>`: Lines count from 1

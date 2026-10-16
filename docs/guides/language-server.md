@@ -4,7 +4,7 @@ description: Run tenma lsp next to the editor's PHP server, and extend it from a
 order: 100
 ---
 
-`tenma lsp` is a language server (LSP over stdin and stdout) that answers what the editor's own PHP language server cannot know, such as the class `$this` stands for in a template. It runs **next to** that server — Intelephense, PHP Tools, PhpStorm — not instead of it; the editor merges the answers of both.
+`tenma lsp` is a language server (LSP over stdin and stdout) that answers what the editor's own PHP language server cannot know, such as the class `$this` stands for in a template. It runs **next to** that server (Intelephense, PHP Tools, PhpStorm), not instead of it; the editor merges the answers of both.
 
 Out of the box it shows the problems a running app reports with [`Tenma::diagnostics()`](diagnostics.md). Packages add the rest through a provider.
 
@@ -117,7 +117,7 @@ When a provider names the class of a template, Tenma does the rest by reflection
 
 - completes `$this->` and `$this->prop->`, private members included (the template runs bound to the object),
 - shows type and doc comment on hover and jumps to the declaration with F12,
-- gives the variable of `foreach ($this->items as $item)` (also `@foreach`) the element type from the PHPDoc of `items` — `list<Item>`, `array<int, Item>` or `Item[]`, resolved through the class's `use` statements.
+- gives the variable of `foreach ($this->items as $item)` (also `@foreach`) the element type from the PHPDoc of `items` (`list<Item>`, `array<int, Item>` or `Item[]`), resolved through the class's `use` statements.
 
 ## Semantic tokens
 

@@ -11,4 +11,4 @@ generated: true
 
 ## Types
 
-- [`Tenma`](Tenma.md) · final class — Tenma's API: an HTTP server and asynchronous work in Fibers.
+- [`Tenma`](Tenma.md) · final class: Tenma's API: an HTTP server and asynchronous work in Fibers.

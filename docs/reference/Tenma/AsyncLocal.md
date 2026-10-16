@@ -44,4 +44,4 @@ public function set(mixed $value): void
 
 **Parameters**
 
-- `$value` `T|null` — null removes the value
+- `$value` `T|null`: null removes the value

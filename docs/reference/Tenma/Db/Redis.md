@@ -23,7 +23,7 @@ public static function connect(string $url = 'redis://127.0.0.1:6379'): \Tenma\D
 
 **Parameters**
 
-- `$url` `string` — redis://host:6379/0
+- `$url` `string`: redis://host:6379/0
 
 **Returns** [`Redis`](Redis.md)
 

@@ -6,7 +6,7 @@ order: 1
 
 Tenma runs a PHP script once and then keeps the process alive: the script registers an HTTP server with `Tenma::serve()`, and every request is answered by the same process, from an event loop. What the script built at startup (the router, the container, a cache, open database connections) stays in memory for every request.
 
-Every request runs in its own [fiber](https://www.php.net/manual/en/language.fibers.php). When it waits — for `Tenma::sleep()`, an outgoing HTTP request, a Postgres query, a Redis command or a file — only that fiber is suspended, and the event loop serves other requests meanwhile. There is no `await` keyword and no promise type in the code: an asynchronous call simply returns its result.
+Every request runs in its own [fiber](https://www.php.net/manual/en/language.fibers.php). When it waits for `Tenma::sleep()`, an outgoing HTTP request, a Postgres query, a Redis command or a file, only that fiber is suspended, and the event loop serves other requests meanwhile. There is no `await` keyword and no promise type in the code: an asynchronous call simply returns its result.
 
 Tenma is a single binary with PHP 8.5 (ZTS) and its usual extensions built in. Its PHP API (`Tenma`, `Tenma\Http`, `Tenma\Db`, `Tenma\Fs`) is part of the binary, not a Composer package.
 

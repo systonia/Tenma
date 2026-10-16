@@ -53,4 +53,4 @@ public function __construct(
 
 - `$writer` [`Closure`](https://www.php.net/manual/en/class.closure.php)
 - `$status` `int`
-- `$headers` `array<string, string|list<string>>` — several values as a list, for example for Set-Cookie
+- `$headers` `array<string, string|list<string>>`: several values as a list, for example for Set-Cookie

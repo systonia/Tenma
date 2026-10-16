@@ -64,9 +64,9 @@ fn documents_a_package() {
         "public string $label { get; }",
         "public readonly string $currency = 'EUR';",
         "public function add(\\Acme\\Shop\\Item $item, int $quantity = 1): static",
-        "- `$item` `TItem` — the item to add",
+        "- `$item` `TItem`: the item to add",
         "**Returns** `$this`",
-        "- [`InvalidArgumentException`](https://www.php.net/manual/en/class.invalidargumentexception.php) — when the cart is full",
+        "- [`InvalidArgumentException`](https://www.php.net/manual/en/class.invalidargumentexception.php): when the cart is full",
         "### total()\n\n```php\npublic function total(): int\n```\n\nThe total in cents.",
         "**Returns** `list<`[`Item`](Item.md)`>`",
     ] {
@@ -81,7 +81,7 @@ fn documents_a_package() {
     let status = &pages["Acme/Shop/Status.md"];
     assert!(status.contains("enum Status: string") && status.contains("case Open = 'open';\n```\n\nNot paid yet."), "{status}");
     assert!(!status.contains("$value") && !status.contains("tryFrom"), "{status}");
-    assert!(pages["Acme/Shop/index.md"].contains("- [`Cart`](Cart.md) · final class — A shopping cart.\n- [`HasItems`](HasItems.md) · trait"));
+    assert!(pages["Acme/Shop/index.md"].contains("- [`Cart`](Cart.md) · final class: A shopping cart.\n- [`HasItems`](HasItems.md) · trait"));
     assert!(pages["index.md"].contains("- [`Acme`](Acme/index.md)"));
     assert!(pages["Acme/index.md"].contains("- [`Acme\\Shop`](Shop/index.md)"));
 }

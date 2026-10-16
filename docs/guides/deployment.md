@@ -42,7 +42,7 @@ Tenma::serve((int) (getenv('PORT') ?: 8080), $handler);
 
 ## Scripts without a server
 
-A script that does not call `Tenma::serve()` is an ordinary script: it runs, then keeps running while timers, tasks or subscriptions are pending, and exits. `exit($status)` outside a request — in the script, a timer or background work — ends Tenma with that status, including a running server. A fatal error during startup work ends Tenma with 255.
+A script that does not call `Tenma::serve()` is an ordinary script: it runs, then keeps running while timers, tasks or subscriptions are pending, and exits. `exit($status)` outside a request (in the script, a timer or background work) ends Tenma with that status, including a running server. A fatal error during startup work ends Tenma with 255.
 
 ## Workers
 

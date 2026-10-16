@@ -48,17 +48,17 @@ Adds an item.
 
 **Parameters**
 
-- `$item` [`Item`](Item.md) — the item to add
+- `$item` [`Item`](Item.md): the item to add
 - `$quantity` `int`
 
 **Throws**
 
-- [`InvalidArgumentException`](https://www.php.net/manual/en/class.invalidargumentexception.php) — when the cart is full
+- [`InvalidArgumentException`](https://www.php.net/manual/en/class.invalidargumentexception.php): when the cart is full
 ````
 
 - **Front matter**: `title` is the short name, `description` the first sentence of the docblock, `generated: true` marks the page as written by `tenma docs`.
 - **Head**: full name, kind (`final class`, `abstract class`, `readonly class`, `interface`, `trait`, `enum`), namespace, the declaration, and what it extends, implements and uses.
-- **Text**: the docblock as Markdown — paragraphs, lists and code blocks stay as written.
+- **Text**: the docblock as Markdown. Paragraphs, lists and code blocks stay as written.
 - **Sections**: enum cases, constants, properties (type, default, `readonly`, hooks) and methods (signature, text, parameters, return value, exceptions, template parameters), in declaration order.
 - **Tags**: `@param`, `@return`, `@throws`, `@template` and `@var` become lists, with the docblock type preferred over the declared one (`list<Item>` says more than `array`). `@deprecated`, `@since` and `@see` are shown; tags for tools (`@phpstan-…`, `@codeCoverageIgnore`) are not.
 - **Links**: a type documented in the same run links to its page, relatively; PHP's own classes link to the PHP manual.
@@ -69,7 +69,7 @@ Methods without a docblock take the one of the method they implement or override
 
 - private members, and protected ones of final classes and enums,
 - types and members whose docblock has `@internal`,
-- members inherited from a parent (they are on the parent's page) — trait members appear on the using class.
+- members inherited from a parent (they are on the parent's page); trait members appear on the using class.
 
 ## Index pages
 
@@ -77,7 +77,7 @@ Every namespace folder gets an `index.md` listing its sub-namespaces and its typ
 
 ## Re-running
 
-The output is sorted and contains no dates or versions, so running `tenma docs` again on unchanged code changes nothing — a CI step can run it and fail when the committed pages are out of date:
+The output is sorted and contains no dates or versions, so running `tenma docs` again on unchanged code changes nothing. A CI step can run it and fail when the committed pages are out of date:
 
 ```bash
 tenma docs src/ && test -z "$(git status --porcelain docs/reference)"

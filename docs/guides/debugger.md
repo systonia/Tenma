@@ -4,7 +4,7 @@ description: Debug a running app with --inspect over the Debug Adapter Protocol,
 order: 90
 ---
 
-`tenma --inspect` starts a debugger inside Tenma that speaks the Debug Adapter Protocol (DAP). An editor connects to it and can set breakpoints, step, look at variables and evaluate PHP in the stopped request — with every request, timer and task shown as a thread of its own.
+`tenma --inspect` starts a debugger inside Tenma that speaks the Debug Adapter Protocol (DAP). An editor connects to it and can set breakpoints, step, look at variables and evaluate PHP in the stopped request. Every request, timer and task is shown as a thread of its own.
 
 ```bash
 tenma --inspect app.php            # debugger on 127.0.0.1:9229, the app starts at once

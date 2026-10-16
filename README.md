@@ -212,7 +212,7 @@ The script picks the way that fits:
 | Debian 13 | the `.deb` from the release, apt brings the libraries | `apt install ./tenma_0.1.4_amd64.deb` |
 | Ubuntu 24.04 | the `.deb` built on Ubuntu 24.04 | `apt install ./tenma_0.1.4_ubuntu24.04_amd64.deb` |
 | other Linux | the binary in `~/.local/bin` (`TENMA_DIR`); names the libraries still missing | `tenma-linux-x64.tar.gz` from the [release](https://github.com/systonia/Tenma/releases) |
-| anything with Docker | – | `docker run -p 8080:8080 -v "$PWD:/app" ghcr.io/systonia/tenma /app/index.php` |
+| anything with Docker | nothing, the image runs as is | `docker run -p 8080:8080 -v "$PWD:/app" ghcr.io/systonia/tenma /app/index.php` |
 
 `TENMA_VERSION=0.1.4` installs a given version on Linux. The tarballs and the image are built on Debian 13 and link its libraries; Ubuntu 24.04 has older ones (ICU 74) and gets a `.deb` of its own.
 

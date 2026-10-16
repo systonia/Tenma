@@ -83,6 +83,6 @@ Tenma::serve(8080, function () {
 });
 ```
 
-If the client disconnects, running fetches are cancelled with the request. Redirects are followed. `fetch()` only works in asynchronous code — handlers, tasks, timers; at the top level of a script wrap it in `Tenma::async()`. In classic mode it throws; use curl there.
+If the client disconnects, running fetches are cancelled with the request. Redirects are followed. `fetch()` only works in asynchronous code: handlers, tasks, timers. At the top level of a script, wrap it in `Tenma::async()`. In classic mode it throws; use curl there.
 
 See also: [`Tenma::fetch()`](../reference/Tenma.md#fetch), [`FetchResponse`](../reference/Tenma/Http/FetchResponse.md).
