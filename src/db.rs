@@ -221,11 +221,38 @@ async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result
         return Ok(affected.to_string());
     }
     let sql = sql.trim().trim_end_matches(';');
+    // Postgres turns the rows into JSON, so every type comes out as it does in json_agg
+    const AGGREGATE: &str = "SELECT coalesce(json_agg(tenma_query), '[]')::text FROM tenma_query";
+    if modifying_with(sql) {
+        // A data-modifying WITH must stay at the top level, so it cannot go inside another WITH.
+        // CREATE TABLE AS takes it, with parameters; the temporary table keeps the rows in order
+        client.execute(&format!("CREATE TEMP TABLE tenma_query AS {sql}\n"), &refs).await?;
+        let row = client.query_one(AGGREGATE, &[]).await;
+        client.batch_execute("DROP TABLE pg_temp.tenma_query").await?;
+        return Ok(exact_numbers(row?.get(0)));
+    }
     // Newline before the parenthesis: otherwise a --comment at the end of the query swallows it.
     // MATERIALIZED: the rows come in the order the query returns them (ORDER BY)
-    let wrapped = format!("WITH tenma_query AS MATERIALIZED ({sql}\n) SELECT coalesce(json_agg(tenma_query), '[]')::text FROM tenma_query");
-    let row = client.query_one(&wrapped, &refs).await?;
+    let row = client.query_one(&format!("WITH tenma_query AS MATERIALIZED ({sql}\n) {AGGREGATE}"), &refs).await?;
     Ok(exact_numbers(row.get(0)))
+}
+
+/// Whether the statement starts with WITH and mentions INSERT, UPDATE, DELETE or MERGE. One that only
+/// mentions them (in a string, a comment) takes the CREATE TABLE AS path as well, with the same result.
+fn modifying_with(sql: &str) -> bool {
+    let mut rest = sql;
+    loop {
+        rest = rest.trim_start();
+        if let Some(comment) = rest.strip_prefix("--") {
+            rest = comment.split_once('\n').map_or("", |(_, after)| after);
+        } else if let Some(comment) = rest.strip_prefix("/*") {
+            rest = comment.split_once("*/").map_or("", |(_, after)| after);
+        } else {
+            break;
+        }
+    }
+    let words = |text: &str| text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').map(str::to_ascii_lowercase).collect::<Vec<_>>();
+    words(rest).first().is_some_and(|word| word == "with") && words(rest).iter().any(|word| matches!(word.as_str(), "insert" | "update" | "delete" | "merge"))
 }
 
 /// PHP decodes a JSON number with a fraction or exponent as float. A `numeric` value a float cannot
