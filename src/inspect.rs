@@ -536,10 +536,11 @@ extern "C" fn tenma_rs_exception(description: *const u8, description_len: usize,
         return;
     }
     let description = String::from_utf8_lossy(bytes(description, description_len)).into_owned();
-    let text = if uncaught { "Uncaught exception" } else { "Exception" };
+    let reason = if uncaught { "Paused on uncaught exception" } else { "Paused on exception" };
     // ponytail: a step from here acts as continue; stepping into the catch block needs the fiber and depth
     STEPPING.set(None);
-    let _ = stop(json!({"reason": "exception", "description": description, "text": text}));
+    // The editor shows the text at the exception (class and message), the description in the call stack
+    let _ = stop(json!({"reason": "exception", "description": reason, "text": description}));
 }
 
 /// The breakpoints that stop at this line; copies: evaluating a condition must not hold the lock.

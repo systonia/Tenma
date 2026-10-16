@@ -1779,7 +1779,8 @@ fn inspect_shows_requests_as_threads_and_stops_at_exceptions() {
     // Uncaught by default, with the frame still alive; caught ones only with "all"
     let response = std::thread::spawn(move || get(port, "/throw"));
     let stop = dap.stopped();
-    assert_eq!((stop.line, &stop.event["reason"], &stop.event["description"]), (18, &serde_json::json!("exception"), &serde_json::json!("RuntimeException: boom")));
+    assert_eq!((stop.line, &stop.event["reason"], &stop.event["description"]), (18, &serde_json::json!("exception"), &serde_json::json!("Paused on uncaught exception")));
+    assert_eq!(stop.event["text"], "RuntimeException: boom");
     // Evaluating while the exception is pending leaves it pending
     let frame = dap.request("stackTrace", serde_json::json!({"threadId": stop.event["threadId"]}))["stackFrames"][0]["id"].clone();
     assert_eq!(dap.request("evaluate", serde_json::json!({"expression": "$request->path", "frameId": frame}))["result"], "'/throw'");
@@ -1789,7 +1790,7 @@ fn inspect_shows_requests_as_threads_and_stops_at_exceptions() {
     dap.request("setExceptionBreakpoints", serde_json::json!({"filters": ["all"]}));
     let response = std::thread::spawn(move || get(port, "/caught"));
     let stop = dap.stopped();
-    assert_eq!((stop.line, &stop.event["text"]), (22, &serde_json::json!("Exception")));
+    assert_eq!((stop.line, &stop.event["text"]), (22, &serde_json::json!("LogicException: handled")));
     dap.command("continue");
     assert!(response.join().unwrap().ends_with("caught"));
 }
@@ -1908,6 +1909,37 @@ fn inspect_keeps_the_session_and_breakpoints_across_watch_reloads() {
 }
 
 #[test]
+fn inspect_does_not_stop_when_a_reload_ends_waiting_requests() {
+    let (port, debugger) = (18_163, 19_253);
+    let directory = scratch("inspect-reload-exit");
+    let app = directory.join("app.php");
+    let script = |version: &str| format!("<?php\nTenma::serve({port}, function ($request) {{\n    if ($request->path === '/wait') {{\n        Tenma::sleep(30);\n    }}\n    throw new RuntimeException('{version}');\n}});\n");
+    std::fs::write(&app, script("one")).unwrap();
+    let _server = Server(Command::new(env!("CARGO_BIN_EXE_tenma")).args(["--watch", &format!("--inspect={debugger}")]).arg(&app).spawn().unwrap());
+    let mut dap = Dap::start(debugger);
+    dap.request("configurationDone", serde_json::json!({}));
+    let _waiting = std::thread::spawn(move || request(port, "GET /wait HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"));
+    std::thread::sleep(Duration::from_millis(300));
+    // The reload ends the waiting request's fiber (GracefulExit): Tenma's own business, no stop
+    std::fs::write(&app, script("two")).unwrap();
+    let started = Instant::now();
+    let stop = loop {
+        // Not joined: before the fix a stop at the reload kept the response from ever coming
+        std::thread::spawn(move || get(port, "/"));
+        let event = dap.expect("event", "stopped")["body"].clone();
+        dap.command("continue");
+        if event["text"] == "RuntimeException: two" {
+            break event;
+        }
+        assert_eq!(event["text"], "RuntimeException: one", "{event}");
+        assert!(started.elapsed() < Duration::from_secs(10), "no reload");
+    };
+    // The class and the message are in the text, which the editor shows at the exception
+    assert_eq!(stop["description"], "Paused on uncaught exception");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn inspect_evaluates_logs_and_changes_variables() {
     let (port, debugger) = (18_126, 19_233);
     let _server = inspected(port, debugger, "--inspect");
@@ -1941,6 +1973,9 @@ fn inspect_evaluates_logs_and_changes_variables() {
     assert!(evaluate(&mut dap, "nope(", "watch")["message"].as_str().unwrap().starts_with("ParseError"));
     assert!(evaluate(&mut dap, "throw new LogicException('no')", "watch")["message"].as_str().unwrap().starts_with("LogicException: no"));
     assert!(evaluate(&mut dap, "Tenma::sleep(0.01)", "watch")["message"].as_str().unwrap().starts_with("FiberError"));
+    // A warning is the evaluation's error, not output on the console: editors hover names from other files too
+    let missing = evaluate(&mut dap, "$point->counters", "hover");
+    assert_eq!((&missing["success"], missing["message"].as_str().unwrap()), (&serde_json::json!(false), "Warning: Undefined property: Point::$counters"));
     // The debug console runs statements too
     assert_eq!(evaluate(&mut dap, "echo 'hi'; $id = 5", "repl")["success"], true);
     assert_eq!(dap.expect("event", "output")["body"]["output"], "hi");
@@ -2021,7 +2056,7 @@ fn inspect_hit_counts_exception_classes_debugger_and_setting_children() {
 
     let response = std::thread::spawn(move || get(port, "/throw"));
     let stop = dap.stopped();
-    assert_eq!((stop.line, &stop.event["description"]), (22, &serde_json::json!("NotFound: missing")));
+    assert_eq!((stop.line, &stop.event["text"]), (22, &serde_json::json!("NotFound: missing")));
     dap.command("continue");
     assert!(response.join().unwrap().starts_with("HTTP/1.1 500"));
 

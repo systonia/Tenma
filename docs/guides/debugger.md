@@ -52,11 +52,11 @@ dap.configurations.php = {
 
 - **Breakpoints** on lines, with a condition (`$user['id'] === 42`), a hit count (`5`, `>= 5`, `% 3`) or as logpoints (`user {$user['name']} logged in`). A breakpoint on a line without its own statement (a method's head, the middle of a multi-line `return [`) moves to the next statement. One on a function's closing brace stops whenever it returns, with the return value among the variables.
 - **`Tenma::debugger()`** in the code stops there when an editor is connected and does nothing otherwise.
-- **Exceptions** the app does not catch stop where they are thrown, with the frames still alive. The filter "All exceptions" stops at caught ones too; a condition on a filter limits it to classes, e.g. `RuntimeException, App\NotFound` (subclasses included).
+- **Exceptions** the app does not catch stop where they are thrown, with the frames still alive. The filter "All exceptions" stops at caught ones too; a condition on a filter limits it to classes, e.g. `RuntimeException, App\NotFound` (subclasses included). `Tenma\Cancelled`, `exit()` and a reload ending waiting requests never stop.
 - **Stepping**: continue, step over, into and out. A step stays in its request: stepping over `Tenma::sleep()` or a query lets other requests run meanwhile and stops at the next line of the same request.
 - **Threads**: every request, timer and `Tenma::async()` task is a thread, named after its method and URI. While stopped, the editor lists them and shows where each waiting one waits.
 - **Variables** of every frame, arrays and objects expandable, and editable: a shared array is copied first as PHP would do, and property types and `readonly` apply.
-- **Evaluate**: watch expressions, hovers and the debug console evaluate PHP in the selected frame, with its variables and `$this`; the console also runs statements. Evaluated code cannot wait (`Tenma::sleep()` throws a `FiberError` there). `echo` and the error log appear in the debug console.
+- **Evaluate**: watch expressions, hovers and the debug console evaluate PHP in the selected frame, with its variables and `$this`; the console also runs statements. Evaluated code cannot wait (`Tenma::sleep()` throws a `FiberError` there). A warning or notice is the evaluation's error, e.g. `Warning: Undefined property: Point::$x`. `echo` and the error log appear in the debug console.
 
 A stopped request stops its worker, with its other requests and timers. Tenma's own standard library is never stepped into. With `--watch`, breakpoints keep applying across reloads; a change saved while stopped reloads after you continue. The editor's `stopOnEntry` overrides `--inspect-wait` and `--inspect-brk`.
 

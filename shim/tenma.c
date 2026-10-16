@@ -1275,11 +1275,36 @@ static int evaluate_code(smart_str *out, const char *code, size_t code_len, bool
     ZVAL_NULL(result);
     zend_result compiled = FAILURE;
     bool fatal = false;
+    // Warnings and notices are the evaluation's answer, not output on the console
+    bool recording = EG(record_errors);
+    uint32_t num_errors = EG(num_errors);
+    zend_error_info **errors = EG(errors);
+    EG(num_errors) = 0;
+    EG(errors) = NULL;
+    EG(record_errors) = true;
     zend_try {
         compiled = zend_eval_stringl(code, code_len, statements ? NULL : result, "debugger");
     } zend_catch {
         fatal = true;
     } zend_end_try();
+    zend_error_info *error = EG(num_errors) ? EG(errors)[0] : NULL;
+    bool warned = error && !fatal && !EG(exception) && compiled == SUCCESS;
+    if (warned) {
+        int type = error->type;
+        smart_str_appends(out, "error");
+        smart_str_appendc(out, 0);
+        smart_str_appends(out, type & (E_NOTICE | E_USER_NOTICE) ? "Notice: " : type & (E_DEPRECATED | E_USER_DEPRECATED) ? "Deprecated: " : "Warning: ");
+        smart_str_append(out, error->message);
+        smart_str_appendc(out, 0);
+    }
+    zend_free_recorded_errors();
+    EG(record_errors) = recording;
+    EG(num_errors) = num_errors;
+    EG(errors) = errors;
+    if (warned) {
+        zval_ptr_dtor(result);
+        return -1;
+    }
     if (fatal) {
         evaluation_fatal = 1;
         smart_str_appends(out, "fatal");
@@ -1505,8 +1530,9 @@ static void inspect_throw(zend_object *exception) {
     if (previous_throw_hook) {
         previous_throw_hook(exception);
     }
-    // Tenma\Cancelled ends a task, as Tenma intends
-    if (!inspecting || evaluating || zend_string_equals_literal_ci(exception->ce->name, "Tenma\\Cancelled")) {
+    // Tenma\Cancelled ends a task, as Tenma intends; exit() and the end of a fiber (a reload ends waiting requests) are no exceptions
+    if (!inspecting || evaluating || zend_string_equals_literal_ci(exception->ce->name, "Tenma\\Cancelled")
+        || zend_is_unwind_exit(exception) || zend_is_graceful_exit(exception)) {
         return;
     }
     zend_execute_data *outer = paused;
