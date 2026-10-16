@@ -2,6 +2,7 @@
 
 namespace Acme;
 
+/** Writes rows with `$csv->write('. ')` style calls. Second sentence. */
 final class Csv
 {
     public const string SEPARATOR = ',';

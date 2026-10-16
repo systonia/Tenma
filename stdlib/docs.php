@@ -208,7 +208,8 @@ function parse(string|false $doc): array
 function sentence(string $text): string
 {
     $paragraph = preg_replace('/\s+/', ' ', explode("\n\n", $text)[0]);
-    return preg_match('/^(.+?[.!?])(?:\s|$)/', $paragraph, $match) ? $match[1] : $paragraph;
+    // A code span is never cut: `a. b` is one piece
+    return preg_match('/^((?:`[^`]*`|[^`])+?[.!?])(?:\s|$)/', $paragraph, $match) ? $match[1] : $paragraph;
 }
 
 /** Splits "type $name description" or "type description" at the end of the type, respecting brackets. */

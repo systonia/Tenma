@@ -135,6 +135,7 @@ fn prints_defaults_as_php_source() {
     let csv = std::fs::read_to_string(out.join("Acme/Csv.md")).unwrap();
     assert!(csv.contains(r#"public string $lineEnding = "\r\n";"#), "{csv}");
     assert!(csv.contains("public function write(string $separator = self::SEPARATOR): void"), "{csv}");
+    assert!(csv.contains("description: \"Writes rows with `$csv->write('. ')` style calls.\""), "{csv}");
 }
 
 #[test]
