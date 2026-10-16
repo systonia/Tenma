@@ -778,7 +778,8 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
                     };
                     let (handler, mounts) = (*handler, mounts.clone());
                     let peers = (remote, local);
-                    let service = service_fn(move |request| respond(handler, mounts.clone(), request, options, peers));
+                    let counter = Rc::clone(&open);
+                    let service = service_fn(move |request| respond(handler, mounts.clone(), request, options, peers, Rc::clone(&counter)));
                     let mut drained = drained.clone();
                     let open = Open::count(&open);
                     tokio::task::spawn_local(async move {
@@ -924,13 +925,14 @@ impl tokio::io::AsyncWrite for WriteTimeout {
 /// Body of a response: complete or piece by piece (from PHP or a file).
 pub type ResponseBody = Either<Full<Bytes>, streams::ChannelBody>;
 
-/// `peers`: remote and local address of the connection.
+/// `peers`: remote and local address of the connection. `open`: the worker's open connections.
 async fn respond(
     handler: u32,
     mounts: std::sync::Arc<Vec<files::Mount>>,
     request: Request<Incoming>,
     options: Options,
     peers: (std::net::SocketAddr, std::net::SocketAddr),
+    open: Rc<Cell<usize>>,
 ) -> Result<Response<ResponseBody>, Infallible> {
     // The file first, if there is one; otherwise the handler
     if !mounts.is_empty()
@@ -985,7 +987,7 @@ async fn respond(
     let (status, headers, body) = match reply {
         php::Reply::Full(response) => (response.status, response.headers, Either::Left(Full::new(Bytes::from(response.body)))),
         php::Reply::Stream { status, headers, body } => (status, headers, Either::Right(body)),
-        php::Reply::Upgrade(pipes) => return Ok(accept_websocket(&parts.headers, upgrade, pipes)),
+        php::Reply::Upgrade(pipes) => return Ok(accept_websocket(&parts.headers, upgrade, pipes, &open)),
     };
     let mut builder = Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
     for (name, value) in headers {
@@ -1005,12 +1007,17 @@ fn close_if_restarting(mut response: Response<ResponseBody>, options: Options) -
 }
 
 /// Responds with 101 and hands the connection to PHP after the upgrade.
-fn accept_websocket(headers: &hyper::HeaderMap, upgrade: Option<hyper::upgrade::OnUpgrade>, pipes: streams::Pipes) -> Response<ResponseBody> {
+fn accept_websocket(headers: &hyper::HeaderMap, upgrade: Option<hyper::upgrade::OnUpgrade>, pipes: streams::Pipes, open: &Rc<Cell<usize>>) -> Response<ResponseBody> {
     let (Some(key), Some(upgrade)) = (headers.get("sec-websocket-key"), upgrade) else {
         return plain(StatusCode::BAD_REQUEST, "Not a WebSocket request\n");
     };
     let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
-    tokio::task::spawn_local(streams::run_websocket(upgrade, pipes));
+    // The HTTP connection's count ends with the 101: the socket counts on its own
+    let open = Open::count(open);
+    tokio::task::spawn_local(async move {
+        let _open = open;
+        streams::run_websocket(upgrade, pipes).await;
+    });
     Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header("connection", "upgrade")

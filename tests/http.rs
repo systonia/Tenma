@@ -484,6 +484,14 @@ fn clients_that_hold_the_server_are_limited() {
     drop(idle);
     std::thread::sleep(Duration::from_millis(100));
     assert!(get(port, "/").ends_with("ok"));
+
+    // Open WebSockets count too, after their 101
+    let sockets: Vec<_> = (0..3).map(|_| tokio_tungstenite::tungstenite::connect(format!("ws://127.0.0.1:{port}/ws")).unwrap()).collect();
+    let refused = get(port, "/");
+    assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
+    drop(sockets);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(get(port, "/").ends_with("ok"));
 }
 
 #[test]
