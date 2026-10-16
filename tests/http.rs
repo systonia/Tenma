@@ -119,6 +119,7 @@ fn fibers_wait_without_blocking_the_server() {
     assert!(get(port, "/cancel-all").ends_with("children cancelled\n"));
     assert!(get(port, "/nested").ends_with("[\"hello\\n\",\"inner\"]\n"));
     assert!(get(port, "/unreachable").starts_with("HTTP/1.1 500"));
+    assert!(get(port, "/bad-method").ends_with("invalid method\n"));
     let started = Instant::now();
     assert!(get(port, "/fetch-timeout").ends_with("timeout\n"));
     assert!(started.elapsed() < Duration::from_secs(1));

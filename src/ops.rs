@@ -140,7 +140,10 @@ extern "C" fn tenma_rs_fetch(method: *const u8, method_len: usize, url: *const u
     let body = php::bytes(body, body_len).to_vec();
     let request = {
         let client = client();
-        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
+        // A typo must not turn into a GET that may well succeed
+        let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
+            return spawn(async { OpResult::Error("invalid method".into()) });
+        };
         let mut request = client.request(method, &url).body(body).timeout(Duration::from_millis(timeout_ms.max(1)));
         for line in headers.split('\0').filter(|line| !line.is_empty()) {
             if let Some((name, value)) = line.split_once(':') {

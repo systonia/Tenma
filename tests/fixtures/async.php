@@ -166,6 +166,12 @@ Tenma::serve($port, function (Request $request) use ($port, &$ticks, &$left): st
             }
             Tenma::sleep(0.2);
             return $late ? "child kept running\n" : "children cancelled\n";
+        case '/bad-method':
+            try {
+                return Tenma::fetch("http://127.0.0.1:$port/hello", method: "GE T")->body;
+            } catch (Throwable $error) {
+                return $error->getMessage() . "\n";
+            }
         case '/unreachable':
             return Tenma::fetch('http://127.0.0.1:1/')->body;
         default:
