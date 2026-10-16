@@ -804,7 +804,7 @@ fn prints_its_version() {
 
 #[test]
 fn nonsensical_options_are_rejected() {
-    for args in [["--max-body", "99999999999999999999g"], ["--max-body", "17179869184g"], ["--workers", "0"]] {
+    for args in [["--max-body", "99999999999999999999g"], ["--max-body", "17179869184g"], ["--workers", "0"], ["--request-timeout", "inf"], ["--request-timeout", "1e30"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(args).arg("tests/fixtures/hello.php").output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}");
     }

@@ -268,7 +268,7 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
             "-c" => php::set_ini_path(&value("-c")?)?,
             "--request-timeout" => {
                 let seconds = value("--request-timeout")?;
-                options.request_timeout = seconds.parse::<f64>().ok().filter(|&s| s > 0.0).map(Duration::from_secs_f64).ok_or(format!("--request-timeout {seconds}: not a number above 0"))?;
+                options.request_timeout = seconds.parse::<f64>().ok().filter(|&s| s > 0.0).and_then(|s| Duration::try_from_secs_f64(s).ok()).ok_or(format!("--request-timeout {seconds}: not a number above 0"))?;
             }
             "--max-connections" => {
                 let number = value("--max-connections")?;
