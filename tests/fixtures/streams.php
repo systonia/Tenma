@@ -7,7 +7,8 @@ $closed = false;
 $quiet = false;
 $ticks = 0;
 $flooded = false;
-Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$quiet, &$ticks, &$flooded) {
+$slept = '';
+Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$quiet, &$ticks, &$flooded, &$slept) {
     switch ($request->path) {
         case '/stream':
             return Response::stream(function (Stream $out) {
@@ -99,6 +100,20 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
             });
         case '/flooded':
             return $flooded ? 'closed' : 'open';
+        case '/ws-sleep':
+            // Waits for something else than a message: the client leaving must end it anyway
+            return Response::websocket(function (WebSocket $socket) use (&$slept) {
+                $slept = 'open';
+                $socket->send('ready');
+                try {
+                    Tenma::sleep(10);
+                    $slept = 'woke';
+                } catch (Tenma\Cancelled) {
+                    $slept = 'cancelled';
+                }
+            });
+        case '/slept':
+            return $slept;
         case '/ticks':
             return "ticks $ticks";
         case '/ws':

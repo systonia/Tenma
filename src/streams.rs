@@ -87,6 +87,21 @@ impl Body for ChannelBody {
 pub struct Pipes {
     outgoing: mpsc::Receiver<Message>,
     incoming: mpsc::Sender<Vec<u8>>,
+    gone: Gone,
+}
+
+/// Dropped when the connection ends: a handler waiting for something other than receive() learns
+/// that the client is gone, as with streams. One in receive() gets null instead and ends itself.
+struct Gone(u64);
+
+impl Drop for Gone {
+    fn drop(&mut self) {
+        let receiving = SOCKETS.with_borrow(|sockets| sockets.get(&self.0).map(|socket| socket.incoming.borrow().is_none()));
+        if receiving == Some(false) {
+            SOCKETS.with_borrow_mut(|sockets| sockets.remove(&self.0));
+            php::gone(self.0);
+        }
+    }
 }
 
 /// The PHP side of a WebSocket.
@@ -165,7 +180,7 @@ extern "C" fn tenma_rs_stream_end(rid: u64, finished: c_int) {
 extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
     let (outgoing, outgoing_receiver) = mpsc::channel(SOCKET_BACKLOG);
     let (incoming_sender, incoming) = mpsc::channel(SOCKET_BACKLOG);
-    if !php::reply(rid, Reply::Upgrade(Pipes { outgoing: outgoing_receiver, incoming: incoming_sender })) {
+    if !php::reply(rid, Reply::Upgrade(Pipes { outgoing: outgoing_receiver, incoming: incoming_sender, gone: Gone(rid) })) {
         return 0;
     }
     let socket = Socket { outgoing, incoming: Rc::new(RefCell::new(Some(incoming))) };
@@ -245,7 +260,7 @@ extern "C" fn tenma_rs_ws_close(rid: u64, finished: c_int) {
 
 /// After the 101 response: pass messages between client and PHP until one side closes.
 pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
-    let Pipes { mut outgoing, incoming } = pipes;
+    let Pipes { mut outgoing, incoming, gone: _gone } = pipes;
     let Ok(upgraded) = upgrade.await else {
         return;
     };

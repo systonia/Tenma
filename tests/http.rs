@@ -410,6 +410,13 @@ fn streaming_sse_und_websockets() {
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(ticks(), after_close);
 
+    // A handler that waits for something else than a message is cancelled when the client leaves
+    let (mut sleeper, _) = connect(format!("ws://127.0.0.1:{port}/ws-sleep")).unwrap();
+    assert_eq!(sleeper.read().unwrap(), Message::text("ready"));
+    sleeper.close(None).unwrap();
+    let slept = eventually(port, "/slept", |response| response.ends_with("cancelled"));
+    assert!(slept.ends_with("cancelled"), "{slept}");
+
     // A burst larger than the queue arrives whole: the handler waits for the client
     let (mut burst, _) = connect(format!("ws://127.0.0.1:{port}/ws-burst")).unwrap();
     for i in 1..=1000 {
