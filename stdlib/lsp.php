@@ -636,10 +636,14 @@ final class Answers
             $owner = self::propertyOwner($member);
             return ['file' => (string) $owner->getFileName(), 'line' => self::propertyLine($owner, $member->getName())];
         }
-        return self::loopLine($file, $text, $offset);
+        // In a class file the editor's PHP server knows the variable; a template's @foreach it does not
+        return $this->thisClass($file) === null ? null : self::loopLine($file, $text, $offset);
     }
 
-    /** For a plain `$name` at $offset: the last foreach above that introduces it, as value or key. */
+    /**
+     * For a plain `$name` at $offset: the last foreach above that introduces it, as value or key, not one in a
+     * comment or string.
+     */
     private static function loopLine(string $file, string $text, int $offset): ?array
     {
         preg_match('/^\$?\w*/', substr($text, $offset), $rest);
@@ -649,7 +653,13 @@ final class Answers
         }
         $at = $offset + strlen($rest[0]);
         $name = preg_quote($m[1], '/');
-        if (preg_match_all('/\bas\s+(?:\$\w+\s*=>\s*)?&?\$' . $name . '\b|\bas\s+&?\$' . $name . '\s*=>/', substr($text, 0, $at), $found, PREG_OFFSET_CAPTURE) === 0) {
+        // Comments and strings of the PHP parts blanked out, offsets kept; a template's own syntax is inline HTML
+        $code = '';
+        foreach (token_get_all(substr($text, 0, $at)) as $token) {
+            $hidden = is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT, T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE], true);
+            $code .= $hidden ? (string) preg_replace('/[^\n]/', ' ', $token[1]) : (is_array($token) ? $token[1] : $token);
+        }
+        if (preg_match_all('/\bas\s+(?:\$\w+\s*=>\s*)?&?\$' . $name . '\b|\bas\s+&?\$' . $name . '\s*=>/', $code, $found, PREG_OFFSET_CAPTURE) === 0) {
             return null;
         }
         return ['file' => $file, 'line' => substr_count($text, "\n", 0, end($found[0])[1]) + 1];

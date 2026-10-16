@@ -178,6 +178,13 @@ fn loop_variables_get_the_element_type_of_what_they_loop_over() {
         assert_eq!(definition["range"]["start"]["line"], 1, "{definition}");
     }
     assert!(lsp.at("textDocument/definition", &template, 2, 25).is_null());
+    // Not a loop in a comment
+    lsp.change(&template, "<?php // foreach ($list as $x) ?>\n{{ $x }}");
+    assert!(lsp.at("textDocument/definition", &template, 1, 4).is_null());
+    // A class file is the PHP server's: no guess from a loop in another method
+    let class = root.join("src/Rows.php");
+    lsp.open(&class, "<?php\nclass Rows {\n    function a($rows) { foreach ($rows as $row) {} }\n    function b($row) { return $row; }\n}");
+    assert!(lsp.at("textDocument/definition", &class, 3, 31).is_null());
 }
 
 #[test]
