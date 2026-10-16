@@ -105,11 +105,23 @@ function load(array $paths): array
             require_once $declared[$name];
         }
     });
-    foreach (array_keys($declared) as $name) {
-        class_exists($name) || interface_exists($name) || trait_exists($name) || enum_exists($name)
-            || throw new \RuntimeException("$name from {$declared[$name]} did not load");
+    // A type that does not load (say, its interface exists only inside a tool's phar) is skipped, not fatal
+    $loaded = [];
+    foreach ($declared as $name => $file) {
+        try {
+            $ok = class_exists($name) || interface_exists($name) || trait_exists($name) || enum_exists($name);
+            $error = 'did not load';
+        } catch (\Throwable $e) {
+            $ok = false;
+            $error = $e->getMessage();
+        }
+        if ($ok) {
+            $loaded[] = $name;
+        } else {
+            file_put_contents('php://stderr', "warning: skipping $name from $file: $error\n");
+        }
     }
-    return array_keys($declared);
+    return $loaded;
 }
 
 /** Names of the classes, interfaces, traits and enums a PHP file declares. */
@@ -226,6 +238,12 @@ function yaml(string $value): string
     return json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 }
 
+/** A constant as written in code: fully qualified, except for self::, static:: and parent::. */
+function constantName(string $name): string
+{
+    return preg_match('/^(self|static|parent)::/i', $name) ? $name : '\\' . ltrim($name, '\\');
+}
+
 function value(mixed $value): string
 {
     return match (true) {
@@ -239,6 +257,12 @@ function value(mixed $value): string
         $value instanceof \UnitEnum => '\\' . $value::class . '::' . $value->name,
         is_object($value) => 'new \\' . $value::class . '(…)',
         is_float($value) && floor($value) === $value && is_finite($value) => sprintf('%.1F', $value),
+        // Control characters escaped as in PHP source, so "\r\n" does not break the line
+        is_string($value) && preg_match('/[\x00-\x1f\x7f]/', $value) => '"' . preg_replace_callback(
+            '/[\x00-\x1f\x7f]/',
+            fn ($match) => match ($match[0]) { "\n" => '\n', "\r" => '\r', "\t" => '\t', "\v" => '\v', "\e" => '\e', "\f" => '\f', default => sprintf('\x%02X', ord($match[0])) },
+            addcslashes($value, '\\"$'),
+        ) . '"',
         default => var_export($value, true),
     };
 }
@@ -417,7 +441,7 @@ final class Writer
         $out .= $type !== '' ? "$type " : '';
         $out .= ($parameter->isPassedByReference() ? '&' : '') . ($parameter->isVariadic() ? '...' : '') . '$' . $parameter->getName();
         if ($parameter->isDefaultValueAvailable()) {
-            $out .= ' = ' . ($parameter->isDefaultValueConstant() ? '\\' . ltrim((string) $parameter->getDefaultValueConstantName(), '\\') : value($parameter->getDefaultValue()));
+            $out .= ' = ' . ($parameter->isDefaultValueConstant() ? constantName((string) $parameter->getDefaultValueConstantName()) : value($parameter->getDefaultValue()));
         }
         return $out;
     }

@@ -127,3 +127,22 @@ fn documents_tenmas_own_api_without_paths() {
     assert!(pages.contains_key("Tenma/Lsp/Provider.md") && pages.contains_key("Tenma/Db/index.md"));
     assert!(!pages.keys().any(|name| name.contains("Internal")), "{:?}", pages.keys());
 }
+
+#[test]
+fn prints_defaults_as_php_source() {
+    let out = scratch("defaults");
+    docs(&["tests/fixtures/docs/defaults"], &out);
+    let csv = std::fs::read_to_string(out.join("Acme/Csv.md")).unwrap();
+    assert!(csv.contains(r#"public string $lineEnding = "\r\n";"#), "{csv}");
+    assert!(csv.contains("public function write(string $separator = self::SEPARATOR): void"), "{csv}");
+}
+
+#[test]
+fn skips_a_type_that_does_not_load() {
+    let out = scratch("unloadable");
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma")).args(["docs", "tests/fixtures/docs/unloadable", "tests/fixtures/docs/defaults", "--out"]).arg(&out).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("warning: skipping Acme\\Rule") && stderr.contains("Elsewhere\\Missing"), "{stderr}");
+    assert!(out.join("Acme/Csv.md").exists() && !out.join("Acme/Rule.md").exists());
+}
