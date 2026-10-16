@@ -1214,6 +1214,25 @@ fn watch_reruns_scripts_without_servers() {
     // can come twice, but must be followed by run three
     let next = lines.find(|line| line.as_deref().map_or(true, |line| line != "run two")).unwrap().unwrap();
     assert_eq!(next, "run three");
+    drop(_child);
+
+    // A script that starts serving only now: tenma restarts and listens on its port. Saved by a
+    // rename, so no half-written file fails in between (a failed run would hide the bug)
+    let port = 18_141;
+    std::fs::write(&script, "<?php echo \"no server\\n\";").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("--watch").arg(&script).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+    let _child = Server(child);
+    assert_eq!(lines.next().unwrap().unwrap(), "no server");
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(directory.join("next.php"), format!("<?php Tenma::serve({port}, fn () => \"served\\n\");")).unwrap();
+    std::fs::rename(directory.join("next.php"), &script).unwrap();
+    let started = Instant::now();
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(started.elapsed() < Duration::from_secs(5), "tenma does not listen on the new port");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(get(port, "/").ends_with("served\n"));
     let _ = std::fs::remove_dir_all(directory);
 }
 
