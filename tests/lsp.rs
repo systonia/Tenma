@@ -235,6 +235,11 @@ fn hover_and_definition_follow_this_into_the_class() {
     // A property: the line of its declaration, in the class it belongs to
     let property = lsp.at("textDocument/definition", &template, 0, 47);
     assert_eq!(property["uri"], uri(&root.join("src/Author.php")), "{property}");
+    assert_eq!(property["range"]["start"]["line"], 8, "{property}");
+    // A property from a trait: in the trait
+    lsp.change(&template, "<?= $this->author->phone ?>");
+    let property = lsp.at("textDocument/definition", &template, 0, 21);
+    assert_eq!(property["uri"], uri(&root.join("src/Contact.php")), "{property}");
     assert_eq!(property["range"]["start"]["line"], 6, "{property}");
 }
 

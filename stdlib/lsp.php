@@ -633,8 +633,8 @@ final class Answers
             return ['file' => (string) $member->getFileName(), 'line' => (int) $member->getStartLine()];
         }
         if ($member instanceof \ReflectionProperty) {
-            $file = (string) $member->getDeclaringClass()->getFileName();
-            return ['file' => $file, 'line' => self::propertyLine($member)];
+            $owner = self::propertyOwner($member);
+            return ['file' => (string) $owner->getFileName(), 'line' => self::propertyLine($owner, $member->getName())];
         }
         return self::loopLine($file, $text, $offset);
     }
@@ -827,16 +827,26 @@ final class Answers
         return "$modifiers function {$member->getName()}(" . implode(', ', $parameters) . ')' . ($return !== null ? ": $return" : '');
     }
 
+    /** Where a property is written: getDeclaringClass() names the class that uses a trait, not the trait. */
+    private static function propertyOwner(\ReflectionProperty $property): \ReflectionClass
+    {
+        $owner = $property->getDeclaringClass();
+        do {
+            $traits = array_filter($owner->getTraits(), static fn (\ReflectionClass $trait) => $trait->hasProperty($property->getName()));
+            $owner = $traits ? reset($traits) : $owner;
+        } while ($traits);
+        return $owner;
+    }
+
     /**
-     * Reflection knows no line for a property: the first `$name` in its class's declaration.
+     * Reflection knows no line for a property: the first `$name` in the declaration of $class.
      *
      * ponytail: a method parameter of the same name above the property wins; good enough while properties come first
      */
-    private static function propertyLine(\ReflectionProperty $property): int
+    private static function propertyLine(\ReflectionClass $class, string $name): int
     {
-        $class = $property->getDeclaringClass();
         foreach (token_get_all((string) file_get_contents((string) $class->getFileName())) as $token) {
-            if (is_array($token) && $token[0] === T_VARIABLE && $token[1] === '$' . $property->getName() && $token[2] >= $class->getStartLine() && $token[2] <= $class->getEndLine()) {
+            if (is_array($token) && $token[0] === T_VARIABLE && $token[1] === '$' . $name && $token[2] >= $class->getStartLine() && $token[2] <= $class->getEndLine()) {
                 return $token[2];
             }
         }
