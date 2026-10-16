@@ -768,7 +768,14 @@ final class Answers
         }
         $imports = [];
         // ponytail: one namespace per file and no function or const imports, as PSR-4 files are
-        $code = (string) preg_replace('/\b(?:class|interface|trait|enum)\b.*/s', '', (string) @file_get_contents($file));
+        // The code up to the first declaration, without comments: "class" in a comment is no declaration
+        $code = '';
+        foreach (token_get_all((string) @file_get_contents($file)) as $token) {
+            if (is_array($token) && in_array($token[0], [T_CLASS, T_INTERFACE, T_TRAIT, T_ENUM], true)) {
+                break;
+            }
+            $code .= is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true) ? ' ' : (is_array($token) ? $token[1] : $token);
+        }
         preg_match_all('/\buse\s+([\w\\\\]+)(?:\s*\{([^}]*)\}|\s+as\s+(\w+))?\s*;/', $code, $uses, PREG_SET_ORDER);
         foreach ($uses as $use) {
             $prefix = rtrim($use[1], '\\');

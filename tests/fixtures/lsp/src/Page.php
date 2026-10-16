@@ -1,4 +1,4 @@
-<?php
+<?php // The page class of the fixture, before its use statements
 
 namespace Fixture;
 
