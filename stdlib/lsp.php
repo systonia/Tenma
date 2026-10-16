@@ -634,6 +634,12 @@ final class Answers
                 array_push($items, ...self::members($target, $target->getName() === $this->thisClass($file)));
             }
         }
+        if (preg_match('/(?<![\w\\\\$>:])(\\\\?[A-Za-z_][\w\\\\]*)::\$?\w*$/', $before, $m) === 1 && $this->thisClass($file) !== null) {
+            $class = $this->resolve($m[1], $file, $text);
+            if ($class !== null) {
+                array_push($items, ...self::statics(new \ReflectionClass($class), $class === $this->thisClass($file)));
+            }
+        }
         return $items;
     }
 
@@ -652,6 +658,10 @@ final class Answers
         if ($member instanceof \ReflectionProperty) {
             $owner = self::propertyOwner($member);
             return ['file' => (string) $owner->getFileName(), 'line' => self::propertyLine($owner, $member->getName())];
+        }
+        $class = $this->classAt($file, $text, $offset);
+        if ($class !== null) {
+            return ['file' => (string) $class->getFileName(), 'line' => (int) $class->getStartLine()];
         }
         // In a class file the editor's PHP server knows the variable; a template's @foreach or assignment it does not
         return $this->thisClass($file) === null ? null : self::introduction($file, $text, $offset);
@@ -690,12 +700,43 @@ final class Answers
 
     private function hover(string $file, string $text, int $offset): ?string
     {
-        $member = $this->member($file, $text, $offset);
+        $member = $this->member($file, $text, $offset) ?? $this->classAt($file, $text, $offset);
         if ($member === null) {
             return null;
         }
         $doc = trim((string) preg_replace('#^\s*/\*\*|\*/\s*$|^\s*\* ?#m', '', (string) $member->getDocComment()));
-        return "```php\n" . self::signature($member) . "\n```" . ($doc !== '' ? "\n\n$doc" : '');
+        $head = $member instanceof \ReflectionClass ? self::kind($member) . ' ' . $member->getName() : self::signature($member);
+        return "```php\n$head\n```" . ($doc !== '' ? "\n\n$doc" : '');
+    }
+
+    /**
+     * In a file a provider binds: the class named at $offset where PHP code names one, before `::` or after
+     * `new` or `instanceof`; plain words of the template stay words.
+     */
+    private function classAt(string $file, string $text, int $offset): ?\ReflectionClass
+    {
+        preg_match('/[\w\\\\]*$/', substr($text, 0, $offset), $head);
+        preg_match('/^[\w\\\\]*/', substr($text, $offset), $tail);
+        $name = $head[0] . $tail[0];
+        $before = substr($text, 0, $offset - strlen($head[0]));
+        $after = substr($text, $offset + strlen($tail[0]));
+        if (preg_match('/^\\\\?[A-Za-z_]/', $name) !== 1 || preg_match('/(?:\$|->|::)$/', $before) === 1
+            || (preg_match('/^\s*::/', $after) !== 1 && preg_match('/\b(?:new|instanceof)\s+$/', $before) !== 1)
+            || $this->thisClass($file) === null) {
+            return null;
+        }
+        $class = $this->resolve($name, $file, $text);
+        return $class === null ? null : new \ReflectionClass($class);
+    }
+
+    private static function kind(\ReflectionClass $class): string
+    {
+        return match (true) {
+            $class->isEnum() => 'enum',
+            $class->isInterface() => 'interface',
+            $class->isTrait() => 'trait',
+            default => ltrim(($class->isFinal() ? 'final ' : '') . ($class->isAbstract() ? 'abstract ' : '') . 'class'),
+        };
     }
 
     /** The method or property named at $offset in a `$this->a->b` chain. */
@@ -815,10 +856,22 @@ final class Answers
         return class_exists($class) || interface_exists($class) ? $class : null;
     }
 
-    /** @return array<string, string> The `use` statements of a file by lower-case alias, its namespace under '' */
+    /**
+     * @return array<string, string> The names a file sees, by lower-case alias, its namespace under '': its own `use`
+     *     statements and namespace, and for what it has not, the providers' Tenma\Lsp\Imports (the first one wins)
+     */
     private function imports(string $file, string $text): array
     {
-        return self::own($text);
+        $imports = self::own($text);
+        foreach ($this->providers as $provider) {
+            $given = $provider instanceof \Tenma\Lsp\Imports ? $this->guard(static fn () => $provider->imports($file, $text)) : null;
+            foreach (is_array($given) ? $given : [] as $alias => $class) {
+                if (is_string($class)) {
+                    $imports[strtolower((string) $alias)] ??= trim($class, '\\');
+                }
+            }
+        }
+        return $imports;
     }
 
     /** @var array<string, array<string, string>> hash of a text => its imports */
@@ -889,6 +942,28 @@ final class Answers
         }
         foreach ($class->getMethods() as $method) {
             if (!$method->isStatic() && !str_starts_with($method->getName(), '__') && ($inside || $method->isPublic())) {
+                $items[] = ['label' => $method->getName(), 'kind' => 'method', 'detail' => self::signature($method)];
+            }
+        }
+        return $items;
+    }
+
+    /** @return list<array{label: string, kind: string, detail: string}> What `Name::` offers: cases, constants, statics */
+    private static function statics(\ReflectionClass $class, bool $inside): array
+    {
+        $items = [];
+        foreach ($class->getReflectionConstants() as $constant) {
+            if ($inside || $constant->isPublic()) {
+                $items[] = ['label' => $constant->getName(), 'kind' => 'value', 'detail' => ($constant->isEnumCase() ? 'case ' : 'const ') . $constant->getName()];
+            }
+        }
+        foreach ($class->getProperties(\ReflectionProperty::IS_STATIC) as $property) {
+            if ($inside || $property->isPublic()) {
+                $items[] = ['label' => '$' . $property->getName(), 'kind' => 'property', 'detail' => self::signature($property)];
+            }
+        }
+        foreach ($class->getMethods(\ReflectionMethod::IS_STATIC) as $method) {
+            if ($inside || $method->isPublic()) {
                 $items[] = ['label' => $method->getName(), 'kind' => 'method', 'detail' => self::signature($method)];
             }
         }

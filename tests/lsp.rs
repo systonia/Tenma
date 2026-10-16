@@ -379,3 +379,25 @@ fn assigned_variables_get_the_type_of_what_is_assigned() {
     lsp.change(&template, "<?php // $x = 1\nif ($x == 2) {} ?>\n{{ $x }}");
     assert!(lsp.at("textDocument/definition", &template, 2, 4).is_null());
 }
+
+#[test]
+fn a_provider_s_imports_resolve_class_names_in_a_template() {
+    let root = project("imports");
+    let template = root.join("page.tpl.php");
+    let mut lsp = Lsp::start(&root);
+    lsp.open(&template, "{{ OrderStatus:: }}\n<?php $author = new Author(); ?>{{ $author-> }}\n<p>OrderStatus</p>");
+    // Cases, constants and static methods; the namespace the provider names resolves Author
+    assert_eq!(lsp.labels(&template, 0, 16), ["Open", "Paid", "DEFAULT", "label", "cases", "from", "tryFrom"]);
+    assert_eq!(lsp.labels(&template, 1, 44), ["name"]);
+    let definition = lsp.at("textDocument/definition", &template, 0, 5);
+    assert_eq!(definition["uri"], uri(&root.join("src/OrderStatus.php")), "{definition}");
+    assert_eq!(definition["range"]["start"]["line"], 5, "{definition}");
+    let hover = lsp.at("textDocument/hover", &template, 0, 5);
+    assert_eq!(hover["contents"]["value"], "```php\nenum Fixture\\Shop\\OrderStatus\n```\n\nWhere an order stands.", "{hover}");
+    // A word of the template is no class name
+    assert!(lsp.at("textDocument/hover", &template, 2, 6).is_null());
+    // The file's own import wins over the provider's
+    lsp.change(&template, "<?php use Fixture\\People\\Writer as OrderStatus; ?>\n{{ OrderStatus::class }}");
+    let definition = lsp.at("textDocument/definition", &template, 1, 5);
+    assert_eq!(definition["uri"], uri(&root.join("src/Writer.php")), "{definition}");
+}

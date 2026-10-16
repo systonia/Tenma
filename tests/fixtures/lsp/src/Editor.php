@@ -2,10 +2,13 @@
 
 namespace Fixture;
 
-use Tenma\Lsp\{Provider, Tokens};
+use Tenma\Lsp\{Imports, Provider, Tokens};
 
-/** Binds $this in page.tpl.php to Page, completes "data-on-" values, reports "TODO" lines, colours "@words". */
-final class Editor implements Provider, Tokens
+/**
+ * Binds $this in page.tpl.php to Page, completes "data-on-" values, reports "TODO" lines, colours "@words", and gives
+ * page.tpl.php the namespace Fixture and OrderStatus.
+ */
+final class Editor implements Provider, Tokens, Imports
 {
     public function __construct(private string $root)
     {
@@ -56,5 +59,10 @@ final class Editor implements Provider, Tokens
         }
         // Not in the order of the text, and one of no known type
         return [...array_reverse($tokens), ['line' => 1, 'column' => 0, 'length' => 1, 'type' => 'unknown']];
+    }
+
+    public function imports(string $file, string $text): array
+    {
+        return $file === $this->root . '/page.tpl.php' ? ['' => 'Fixture', 'OrderStatus' => 'Fixture\\Shop\\OrderStatus'] : [];
     }
 }

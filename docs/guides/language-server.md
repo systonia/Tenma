@@ -1,6 +1,6 @@
 ---
 title: Language server
-description: Run tenma lsp next to the editor's PHP server, and extend it from a package with Tenma\Lsp\Provider and Tenma\Lsp\Tokens.
+description: Run tenma lsp next to the editor's PHP server, and extend it from a package with Tenma\Lsp\Provider, Tenma\Lsp\Tokens and Tenma\Lsp\Imports.
 order: 100
 ---
 
@@ -156,6 +156,43 @@ final class Highlighter implements Provider, Tokens
 
 Lines count from 1; `column` is the byte offset within the line, from 0. Types: `keyword`, `comment`, `variable`, `property`, `method`, `function`, `class`, `string`, `number`, `operator`. Tokens may come in any order; overlapping ones are dropped.
 
+## Imports
+
+A template has no `use` statements of its own, so `OrderStatus::` in it would complete nothing. A provider that also implements [`Tenma\Lsp\Imports`](../reference/Tenma/Lsp/Imports.md) names the imports a file sees, here those of the template's class file:
+
+```php
+<?php
+
+namespace Acme\Views;
+
+use Tenma\Lsp\{Imports, Provider};
+
+final class Editor implements Provider, Imports
+{
+    // thisClass(), completions(), definition() and diagnostics() as above
+
+    public function imports(string $file, string $text): array
+    {
+        $class = $this->thisClass($file);
+        if ($class === null) {
+            return [];
+        }
+        // views/cart.php sees what src/Cart.php imports, and its namespace
+        $source = (string) file_get_contents((new \ReflectionClass($class))->getFileName());
+        preg_match_all('/^use\s+([\w\\\\]+)(?:\s+as\s+(\w+))?;/m', $source, $uses, PREG_SET_ORDER);
+        $imports = ['' => (new \ReflectionClass($class))->getNamespaceName()];
+        foreach ($uses as $use) {
+            $imports[$use[2] ?? substr(strrchr('\\' . $use[1], '\\'), 1)] = $use[1];
+        }
+        return $imports;
+    }
+}
+```
+
+`imports($file, $text)` returns alias => fully qualified class name, and the namespace under the key `''`. Tenma resolves every class name in the file with them: completion after `Name::` (cases, constants, static properties and methods), hover and F12 on a class name before `::` or after `new` or `instanceof`, the types of loop and assigned variables (`new Order()`), and the `@var` and `@return` types it reads from doc comments.
+
+The rule when both name something: the file's own `use` statements and `namespace` come first, and the provider fills in only what the file does not have. An alias the file imports itself keeps the file's class; a file without a `namespace` line takes the provider's. When several providers name the same alias, the first one wins.
+
 `extra.tenma.lsp` may also be a list of classes when a package has several providers.
 
-See also: [`Tenma\Lsp\Provider`](../reference/Tenma/Lsp/Provider.md), [`Tenma\Lsp\Tokens`](../reference/Tenma/Lsp/Tokens.md), [Diagnostics](diagnostics.md), [Debugger and editor setup](debugger.md).
+See also: [`Tenma\Lsp\Provider`](../reference/Tenma/Lsp/Provider.md), [`Tenma\Lsp\Tokens`](../reference/Tenma/Lsp/Tokens.md), [`Tenma\Lsp\Imports`](../reference/Tenma/Lsp/Imports.md), [Diagnostics](diagnostics.md), [Debugger and editor setup](debugger.md).
