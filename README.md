@@ -140,6 +140,7 @@ tenma --inspect-wait app.php     # wait until the debugger has set its breakpoin
 tenma --inspect-brk app.php      # wait for the debugger, stop at the script's first line
 tenma build                      # run the hooks of tenma.dev.php once (CI, Dockerfile)
 tenma lsp                        # language server for editors, on stdin and stdout
+tenma docs src/                  # Markdown reference pages for the classes in src/, into docs/reference
 tenma --workers 4 app.php        # four workers, each with its own PHP interpreter and its own state
 tenma --workers auto app.php     # one worker per core
 tenma --max-body 50m app.php     # largest request body, default 10m, 413 above that
@@ -244,6 +245,22 @@ vim.lsp.config('tenma', { cmd = { 'tenma', 'lsp' }, filetypes = { 'php' }, root_
 vim.lsp.enable('tenma')
 ```
 
+## Reference pages
+
+`tenma docs` writes Markdown reference pages from PHP code: one page per class, interface, trait and enum, built from reflection and docblocks.
+
+```
+tenma docs src/                     # the types declared in src/, into docs/reference
+tenma docs src/ lib/Api.php --out site/api
+tenma docs                          # Tenma's own built-in API
+```
+
+Paths are PHP files or directories (`vendor`, `node_modules` and dot directories inside them are skipped). The types are loaded through the nearest `vendor/autoload.php` above the first path, so reflection sees their parents and interfaces; what the autoloader does not find is loaded straight from the files. Loading runs the project's code, as with `tenma lsp`.
+
+Each type gets `<out>/<Namespace path>/<ShortName>.md`: its kind, namespace, parents, interfaces and traits, the docblock text as Markdown, then constants, properties (type, default, `readonly`, hooks), methods (signature, description, parameters, return value, exceptions) and enum cases. `@param`, `@return`, `@throws`, `@template` and `@var` become lists; types documented in the same run are linked, PHP's own classes link to php.net. Public members are documented, protected ones too in classes that can be extended; types and members marked `@internal` are left out. Every namespace folder gets an `index.md` listing its types with their first sentence, and the output directory an `index.md` over all namespaces.
+
+Every page starts with YAML front matter (`title`, `description`, `order`, `generated: true`). The output is sorted and has no timestamps, so a second run changes nothing. A run removes the pages with `generated: true` whose type is gone and refuses to overwrite a file without it, so hand-written pages can sit next to the generated ones. Tenma's own reference in [docs/reference](docs/reference/index.md) is generated this way.
+
 ## Architecture
 
 | Path | Contents |
@@ -263,10 +280,12 @@ vim.lsp.enable('tenma')
 | `stdlib/tenma.php` | Standard library in PHP, embedded in the binary: `Tenma::serve()`, `Tenma::serveClassic()`, `Request`, `Response` |
 | `stdlib/stubs.php` | `tenma --stubs`: prints the public API as stubs by reflection, for IDEs and PHPStan |
 | `stdlib/lsp.php` | `tenma lsp`: the language server and its worker, in PHP; the providers' interface `Tenma\Lsp\Provider` is in `stdlib/tenma.php` |
+| `stdlib/docs.php` | `tenma docs`: Markdown reference pages by reflection and docblocks |
 | `php-build/build.sh` | Builds PHP 8.5 from source as `libphp.a` (embed SAPI, ZTS), linked statically. Extensions: PDO with MySQL, Postgres and SQLite, mysqli, pgsql, sqlite3, openssl, curl, sodium, intl, bcmath, gmp, gd, zip, mbstring, session, sockets, exif, XML, fileinfo, filter. The libraries for these come from the macOS SDK and Homebrew (list in the script) and are linked dynamically. |
 | `demo/waypoint/` | Waypoint app (framework [Waypoint](https://github.com/systonia/Waypoint)) with a waypoint API; runs under tenma in fiber mode and unchanged under `php -S` |
 | `tests/http.rs` | Starts the binary and sends real requests |
 | `tests/lsp.rs` | Speaks LSP to `tenma lsp` on the project in `tests/fixtures/lsp` |
+| `tests/docs.rs` | Runs `tenma docs` on the package in `tests/fixtures/docs` and on Tenma's own API |
 
 Flow: the main thread starts PHP (modules); each worker thread gets its own interpreter (ZTS, `tenma_thread_start`) and loads the standard library, then the script. The first worker starts alone; if the script registers no server, it was an ordinary script and tenma exits. Otherwise the remaining workers start, and the main thread opens the ports, accepts connections and distributes them round-robin across the workers. A connection stays with its worker. As with the CLI, `$_SERVER['SCRIPT_FILENAME']` points to the script. `Tenma::serve()` only registers a handler via `tenma_listen()`. Once the script has finished, Rust opens the ports. Each request calls the PHP handler synchronously on the loop thread. Asynchronously: the handler runs in a fiber. When it calls an op (`\tenma_op_sleep`, `\tenma_op_fetch`), Rust starts a task and returns an op ID, and the fiber suspends with `Fiber::suspend()`. When the task is done, Rust calls `Tenma\Internal\complete()`, which resumes the fiber with the result. Finished handlers respond via `\tenma_respond($rid, …)`, and Rust passes the response to the waiting HTTP request. Classic mode has no fibers, because superglobals, headers and output buffers exist only once; there, requests run one after another and asynchronous functions throw.
 

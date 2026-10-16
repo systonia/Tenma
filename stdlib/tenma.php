@@ -826,6 +826,7 @@ namespace Tenma {
 }
 
 namespace Tenma {
+    /** Asynchronous file system functions: only the Fiber waits while the work runs on a background thread. */
     final class Fs
     {
         /**
@@ -1511,7 +1512,10 @@ namespace Tenma\Db {
 
 namespace Tenma\Http {
 
-
+/**
+ * An HTTP request in fiber mode, the argument of the handler of Tenma::serve(). Query, headers and body
+ * are read in full before the handler runs; form(), files() and cookies() parse them on demand.
+ */
 final class Request
 {
     public readonly string $method;
@@ -1760,6 +1764,11 @@ final class Multipart
     }
 }
 
+/**
+ * A complete response with status, headers and body. A handler may also return a string, which becomes a
+ * 200 with Content-Type text/plain. The static constructors build the usual kinds, header() and cookie()
+ * add to it.
+ */
 final class Response
 {
     /** @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie */
@@ -1872,6 +1881,7 @@ final class Response
     }
 }
 
+/** A response whose body a writer produces while it is sent, from Response::stream() and Response::events(). */
 final class StreamedResponse
 {
     /** @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie */
@@ -1882,6 +1892,7 @@ final class StreamedResponse
     ) {}
 }
 
+/** Accepts the request as a WebSocket and runs the handler with the connection, from Response::websocket(). */
 final class WebSocketResponse
 {
     public function __construct(public readonly \Closure $handler) {}
@@ -1937,6 +1948,7 @@ final class EventStream
     }
 }
 
+/** An accepted WebSocket connection, passed to the handler of Response::websocket(). */
 final class WebSocket
 {
     public function __construct(private readonly int $rid) {}
@@ -2271,7 +2283,7 @@ function finishClassic(bool $fatal): void
 
 namespace {
     /**
-     * Tenma's API: an HTTP server and asynchronous work in Fibers. Classes live under Tenma\
+     * Tenma's API: an HTTP server and asynchronous work in Fibers. Classes live under `Tenma\`
      * (Tenma\Http\Request, Tenma\Task, Tenma\AsyncLocal, Tenma\Fs, Tenma\Db\Postgres).
      */
     final class Tenma

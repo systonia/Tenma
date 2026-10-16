@@ -44,7 +44,9 @@ const STDLIB: &str = include_str!("../stdlib/tenma.php");
 const STUBS: &str = include_str!("../stdlib/stubs.php");
 /// The language server; only evaluated for `tenma lsp`.
 const LSP: &str = include_str!("../stdlib/lsp.php");
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma --version";
+/// The reference generator; only evaluated for `tenma docs`.
+const DOCS: &str = include_str!("../stdlib/docs.php");
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs > tenma.php   (the PHP API as stubs for IDEs and PHPStan)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes; without paths for Tenma's API)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -132,7 +134,8 @@ pub fn broken() -> bool {
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("--stubs") => return stubs(),
-        Some("lsp") => return lsp(),
+        Some("lsp") => return tool(LSP, "Lsp"),
+        Some("docs") => return tool(DOCS, "Docs"),
         Some("--version" | "-v") => {
             println!("tenma {} (PHP {})", env!("CARGO_PKG_VERSION"), env!("TENMA_PHP_VERSION"));
             return ExitCode::SUCCESS;
@@ -188,20 +191,21 @@ fn stubs() -> ExitCode {
     }
 }
 
-/// `tenma lsp`: the language server of stdlib/lsp.php on stdin and stdout. `tenma lsp --worker DIR` is
-/// its own child process, the one that loads the project.
-fn lsp() -> ExitCode {
+/// A command written in PHP: `tenma lsp`, the language server of stdlib/lsp.php on stdin and stdout
+/// (`tenma lsp --worker DIR` is its own child process, the one that loads the project), and `tenma docs`
+/// of stdlib/docs.php. Runs `Tenma\Internal\<namespace>\main($binary, $args)` after the standard library.
+fn tool(source: &str, namespace: &str) -> ExitCode {
     let quote = |text: &str| format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"));
     let binary = std::env::current_exe().map_or_else(|_| "tenma".to_owned(), |path| path.to_string_lossy().into_owned());
     let args: Vec<String> = std::env::args().skip(2).map(|arg| quote(&arg)).collect();
-    let setup = format!("namespace Tenma\\Internal\\Lsp; const VERSION = '{}';", env!("CARGO_PKG_VERSION"));
-    let call = format!("\\Tenma\\Internal\\Lsp\\main({}, [{}]);", quote(&binary), args.join(", "));
+    let setup = format!("namespace Tenma\\Internal\\{namespace}; const VERSION = '{}';", env!("CARGO_PKG_VERSION"));
+    let call = format!("\\Tenma\\Internal\\{namespace}\\main({}, [{}]);", quote(&binary), args.join(", "));
     // stdout carries the protocol: PHP's warnings go to stderr, which editors show in their log
     let ran = php::define_ini("display_errors=stderr").and_then(|()| php::start()).and_then(|()| {
         php::eval(STDLIB.trim_start_matches("<?php"), "tenma:stdlib")
             .and_then(|()| php::eval(&setup, "tenma:version"))
-            .and_then(|()| php::eval(LSP.trim_start_matches("<?php"), "tenma:lsp"))
-            .and_then(|()| php::eval(&call, "tenma:lsp-main"))
+            .and_then(|()| php::eval(source.trim_start_matches("<?php"), &format!("tenma:{}", namespace.to_lowercase())))
+            .and_then(|()| php::eval(&call, &format!("tenma:{}-main", namespace.to_lowercase())))
     });
     php::stop();
     match ran {
