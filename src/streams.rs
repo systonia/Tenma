@@ -1,7 +1,7 @@
 //! Streaming responses and WebSockets for PHP. Both belong to a request running in a fiber;
 //! Rust holds the channels, PHP talks to them through the C layer.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::c_int;
 use std::pin::Pin;
@@ -87,6 +87,8 @@ impl Body for ChannelBody {
 pub struct Pipes {
     outgoing: mpsc::Receiver<Message>,
     incoming: mpsc::Sender<Vec<u8>>,
+    /// Bytes of the incoming messages PHP has not read yet.
+    unread: Rc<Cell<usize>>,
     gone: Gone,
 }
 
@@ -109,6 +111,7 @@ struct Socket {
     outgoing: mpsc::Sender<Message>,
     /// Held by the op of a running receive(), otherwise here.
     incoming: Rc<RefCell<Option<mpsc::Receiver<Vec<u8>>>>>,
+    unread: Rc<Cell<usize>>,
 }
 
 thread_local! {
@@ -180,10 +183,11 @@ extern "C" fn tenma_rs_stream_end(rid: u64, finished: c_int) {
 extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
     let (outgoing, outgoing_receiver) = mpsc::channel(SOCKET_BACKLOG);
     let (incoming_sender, incoming) = mpsc::channel(SOCKET_BACKLOG);
-    if !php::reply(rid, Reply::Upgrade(Pipes { outgoing: outgoing_receiver, incoming: incoming_sender, gone: Gone(rid) })) {
+    let unread = Rc::new(Cell::new(0));
+    if !php::reply(rid, Reply::Upgrade(Pipes { outgoing: outgoing_receiver, incoming: incoming_sender, unread: Rc::clone(&unread), gone: Gone(rid) })) {
         return 0;
     }
-    let socket = Socket { outgoing, incoming: Rc::new(RefCell::new(Some(incoming))) };
+    let socket = Socket { outgoing, incoming: Rc::new(RefCell::new(Some(incoming))), unread };
     SOCKETS.with_borrow_mut(|sockets| sockets.insert(rid, socket));
     1
 }
@@ -223,7 +227,7 @@ extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> i64 {
 /// Op for the next message: a string, or null if the client has closed. 0: no socket.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_ws_receive(rid: u64) -> u64 {
-    let Some(incoming) = SOCKETS.with_borrow(|sockets| sockets.get(&rid).map(|socket| Rc::clone(&socket.incoming))) else {
+    let Some((incoming, unread)) = SOCKETS.with_borrow(|sockets| sockets.get(&rid).map(|socket| (Rc::clone(&socket.incoming), Rc::clone(&socket.unread)))) else {
         return 0;
     };
     ops::spawn(async move {
@@ -232,7 +236,10 @@ extern "C" fn tenma_rs_ws_receive(rid: u64) -> u64 {
         };
         let mut lent = Lent { slot: incoming, receiver: Some(receiver) };
         let message = lent.receiver.as_mut().unwrap().recv().await;
-        message.map_or(OpResult::Null, OpResult::Text)
+        message.map_or(OpResult::Null, |message| {
+            unread.set(unread.get() - message.len());
+            OpResult::Text(message)
+        })
     })
 }
 
@@ -260,7 +267,7 @@ extern "C" fn tenma_rs_ws_close(rid: u64, finished: c_int) {
 
 /// After the 101 response: pass messages between client and PHP until one side closes.
 pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
-    let Pipes { mut outgoing, incoming, gone: _gone } = pipes;
+    let Pipes { mut outgoing, incoming, unread, gone: _gone } = pipes;
     let Ok(upgraded) = upgrade.await else {
         return;
     };
@@ -272,12 +279,12 @@ pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
         tokio::select! {
             message = stream.next() => match message {
                 Some(Ok(Message::Text(text))) => {
-                    if !accept_message(&incoming, text.as_bytes().to_vec(), &mut sink).await {
+                    if !accept_message(&incoming, &unread, limit, text.as_bytes().to_vec(), &mut sink).await {
                         break;
                     }
                 }
                 Some(Ok(Message::Binary(data))) => {
-                    if !accept_message(&incoming, data.to_vec(), &mut sink).await {
+                    if !accept_message(&incoming, &unread, limit, data.to_vec(), &mut sink).await {
                         break;
                     }
                 }
@@ -300,10 +307,16 @@ pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
 }
 
 /// Passes a message on to PHP. If PHP does not keep reading, the backlog does not grow without end:
-/// at SOCKET_BACKLOG unread messages tenma disconnects the client. False means: end the connection.
-async fn accept_message(incoming: &mpsc::Sender<Vec<u8>>, message: Vec<u8>, sink: &mut (impl SinkExt<Message> + Unpin)) -> bool {
-    match incoming.try_send(message) {
-        Ok(()) => true,
+/// at SOCKET_BACKLOG unread messages or more than $limit unread bytes (one message is at most that)
+/// tenma disconnects the client. False means: end the connection.
+async fn accept_message(incoming: &mpsc::Sender<Vec<u8>>, unread: &Cell<usize>, limit: usize, message: Vec<u8>, sink: &mut (impl SinkExt<Message> + Unpin)) -> bool {
+    let size = message.len();
+    let sent = if !incoming.is_closed() && unread.get() + size > limit { Err(mpsc::error::TrySendError::Full(message)) } else { incoming.try_send(message) };
+    match sent {
+        Ok(()) => {
+            unread.set(unread.get() + size);
+            true
+        }
         // PHP no longer reads messages (handler done or only sending): dropping them is right here
         Err(mpsc::error::TrySendError::Closed(_)) => true,
         Err(mpsc::error::TrySendError::Full(_)) => {

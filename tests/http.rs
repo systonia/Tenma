@@ -450,7 +450,7 @@ fn clients_that_hold_the_server_are_limited() {
     let port = 18_139;
     let _server = Server(
         Command::new(env!("CARGO_BIN_EXE_tenma"))
-            .args(["--request-timeout", "0.5", "--max-connections", "3", "tests/fixtures/streams.php"])
+            .args(["--request-timeout", "0.5", "--max-connections", "3", "--max-body", "64k", "tests/fixtures/streams.php"])
             .env("PORT", port.to_string())
             .spawn()
             .unwrap(),
@@ -484,6 +484,24 @@ fn clients_that_hold_the_server_are_limited() {
     drop(idle);
     std::thread::sleep(Duration::from_millis(100));
     assert!(get(port, "/").ends_with("ok"));
+
+    // Unread messages are limited by their bytes too: --max-body in all, long before 256 messages
+    let (mut flood, _) = tokio_tungstenite::tungstenite::connect(format!("ws://127.0.0.1:{port}/ws-ignore")).unwrap();
+    for _ in 0..20 {
+        if flood.send(tokio_tungstenite::tungstenite::Message::binary(vec![0; 8 << 10])).is_err() {
+            break;
+        }
+    }
+    let close = loop {
+        match flood.read() {
+            Ok(tokio_tungstenite::tungstenite::Message::Close(frame)) => break frame,
+            Ok(_) => continue,
+            Err(error) => panic!("{error}"),
+        }
+    };
+    assert!(close.is_some_and(|frame| frame.reason.contains("Too many unread messages")));
+    drop(flood);
+    std::thread::sleep(Duration::from_millis(100));
 
     // Open WebSockets count too, after their 101
     let sockets: Vec<_> = (0..3).map(|_| tokio_tungstenite::tungstenite::connect(format!("ws://127.0.0.1:{port}/ws")).unwrap()).collect();
