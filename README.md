@@ -4,6 +4,8 @@
 
 PHP as a long-running process: one process runs the script once and then serves requests continuously on a thread with an event loop. In-memory state persists between requests.
 
+The [documentation](docs/index.md) has a [guide](docs/guides/index.md) per feature with runnable examples, and a [reference](docs/reference/index.md) of every class and method. This README is the overview.
+
 ```php
 Tenma::serve(8080, fn (Tenma\Http\Request $request) => "Hello World\n");
 ```
