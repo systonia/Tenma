@@ -189,7 +189,8 @@ fn loop_variables_get_the_element_type_of_what_they_loop_over() {
 
 #[test]
 fn what_the_running_app_publishes_shows_next_to_the_providers_problems() {
-    let root = project("published");
+    // An @ the client leaves as it is (as Neovim does), the server's own URIs would encode
+    let root = project("published@app");
     let template = root.join("page.tpl.php");
     let mut lsp = Lsp::start(&root);
     let before = lsp.open(&template, "ä<?= $this->nope ?> TODO");

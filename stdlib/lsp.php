@@ -181,8 +181,14 @@ final class Server
     /** @var array<string, list<array>> uri => the providers' diagnostics of an open document */
     private array $checked = [];
 
-    /** @var array<string, array<string, list<array>>> project => uri => what the running app published there */
+    /** @var array<string, array<string, list<array>>> project => path => what the running app published there */
     private array $published = [];
+
+    /**
+     * @var array<string, string> path => the URI the client spells it with. Clients encode differently (Neovim keeps
+     * @ and + as they are): a URI of our own would name a second document.
+     */
+    private array $uris = [];
 
     /** @var array<string, string> project => its lists as they were last read: names and hashes */
     private array $lists = [];
@@ -215,14 +221,14 @@ final class Server
                 $list = json_decode((string) @file_get_contents($file), true);
                 foreach (is_array($list) ? $list : [] as $problem) {
                     if (is_array($problem) && is_string($problem['file'] ?? null)) {
-                        $now[uri($problem['file'])][] = ['source' => $source] + $problem;
+                        $now[$problem['file']][] = ['source' => $source] + $problem;
                     }
                 }
             }
             $this->published[$project] = $now;
-            foreach (array_keys($before + $now) as $uri) {
-                if (($before[$uri] ?? null) !== ($now[$uri] ?? null)) {
-                    $this->publish($uri);
+            foreach (array_keys($before + $now) as $path) {
+                if (($before[$path] ?? null) !== ($now[$path] ?? null)) {
+                    $this->publish($this->uris[$path] ?? uri((string) $path));
                 }
             }
         }
@@ -234,7 +240,7 @@ final class Server
         $diagnostics = $this->checked[$uri] ?? [];
         $file = path($uri);
         foreach ($this->published as $files) {
-            foreach ($files[$uri] ?? [] as $problem) {
+            foreach ($files[$file ?? ''] ?? [] as $problem) {
                 $text = $this->documents[$uri] ?? ($file !== null && is_file($file) ? (string) file_get_contents($file) : '');
                 $line = max(0, (int) ($problem['line'] ?? 1) - 1);
                 // An app that checks what a provider checks too: once is enough, the provider's follows the typing
@@ -355,6 +361,10 @@ final class Server
     private function open(string $uri, string $text): null
     {
         $this->documents[$uri] = $text;
+        $path = path($uri);
+        if ($path !== null) {
+            $this->uris[$path] = $uri;
+        }
         $this->diagnose($uri);
         return null;
     }
