@@ -1318,7 +1318,7 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
     std::fs::create_dir(directory.join("bin")).unwrap();
     let script = directory.join("bin/script.php");
     let list = directory.join(".tenma/diagnostics/app.checks.json");
-    let publish = "<?php\nTenma::diagnostics('checks', [['file' => __FILE__, 'line' => 2, 'message' => 'run one', 'severity' => 'warning']]);\necho 'run one' . (Tenma::reloadedBy() === null ? '' : ' again') . \"\\n\";";
+    let publish = "<?php\nTenma::diagnostics('checks', [['file' => __FILE__, 'line' => 2, 'message' => 'run one', 'severity' => 'warning'], ['file' => 'page.tpl.php', 'line' => 1, 'message' => 'relative']]);\necho 'run one' . (Tenma::reloadedBy() === null ? '' : ' again') . \"\\n\";";
     std::fs::write(&script, publish).unwrap();
     std::fs::write(directory.join("bin/tenma.dev.php"), "<?php\nreturn [new Tenma\\Hook(name: 'check', inputs: [], run: fn () => Tenma::diagnostics('hooks', [['file' => __FILE__, 'line' => 1, 'message' => 'from a hook']]))];\n").unwrap();
 
@@ -1336,6 +1336,8 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
     let published: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&list).unwrap()).unwrap();
     assert_eq!(published[0]["message"], "run one");
     assert_eq!(published[0]["column"], 1);
+    // A relative file counts from the working directory
+    assert_eq!(published[1]["file"], format!("{}/page.tpl.php", env!("CARGO_MANIFEST_DIR")));
     assert_eq!(std::fs::read_to_string(directory.join(".tenma/.gitignore")).unwrap(), "*\n");
     let line = errors.find(|line| line.as_deref().map_or(true, |line| line.contains("run one"))).unwrap().unwrap();
     assert_eq!(line, format!("{}:2:1: warning: run one", script.canonicalize().unwrap().display()));

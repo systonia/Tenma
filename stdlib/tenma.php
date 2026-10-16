@@ -1046,7 +1046,8 @@ namespace Tenma\Internal {
                 throw new \InvalidArgumentException("Tenma::diagnostics(): entry $i needs file, line and message");
             }
             $problems[] = [
-                'file' => $problem['file'],
+                // Relative as for PHP's file functions, from the working directory: the editor needs the whole path
+                'file' => str_starts_with($problem['file'], '/') ? $problem['file'] : getcwd() . '/' . $problem['file'],
                 'line' => max(1, $problem['line']),
                 'column' => max(1, is_int($problem['column'] ?? null) ? $problem['column'] : 1),
                 'severity' => in_array($problem['severity'] ?? null, ['warning', 'info'], true) ? $problem['severity'] : 'error',
@@ -2362,7 +2363,8 @@ namespace {
          * Replaces the problems $source reports: the editor shows them at their line (through `tenma lsp`), and new
          * ones go to stderr as `path:line:column: error: message`, the form problem matchers and quickfix read. An
          * empty list clears them. Only under --watch, which also clears the script's lists when it reloads it;
-         * otherwise it does nothing. $source names the reporter: 'waypoint-live', 'my-app:checks'.
+         * otherwise it does nothing. $source names the reporter: 'waypoint-live', 'my-app:checks'. A relative file
+         * counts from the working directory.
          *
          * @param list<array{file: string, line: int, message: string, severity?: 'error'|'warning'|'info', column?: int}> $list
          */
