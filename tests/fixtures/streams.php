@@ -6,7 +6,8 @@ use Tenma\Http\{EventStream, Request, Response, Stream, WebSocket};
 $closed = false;
 $quiet = false;
 $ticks = 0;
-Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$quiet, &$ticks) {
+$flooded = false;
+Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$quiet, &$ticks, &$flooded) {
     switch ($request->path) {
         case '/stream':
             return Response::stream(function (Stream $out) {
@@ -78,6 +79,26 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
                 while ($socket->receive() !== null) {
                 }
             });
+        case '/ws-burst':
+            // More messages at once than the queue holds: send() waits for the client instead of failing
+            return Response::websocket(function (WebSocket $socket) {
+                for ($i = 1; $i <= 1000; $i++) {
+                    $socket->send("message $i");
+                }
+            });
+        case '/ws-flood':
+            // To a client that does not read: send() waits, until tenma gives up on the client
+            return Response::websocket(function (WebSocket $socket) use (&$flooded) {
+                try {
+                    while (true) {
+                        $socket->send(str_repeat('x', 64 * 1024));
+                    }
+                } finally {
+                    $flooded = true;
+                }
+            });
+        case '/flooded':
+            return $flooded ? 'closed' : 'open';
         case '/ticks':
             return "ticks $ticks";
         case '/ws':

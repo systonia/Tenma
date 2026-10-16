@@ -70,7 +70,7 @@ extern int tenma_rs_stream_start(uint64_t rid, uint16_t status, const char *head
 extern int64_t tenma_rs_stream_write(uint64_t rid, const char *chunk, size_t len);
 extern void tenma_rs_stream_end(uint64_t rid, int finished);
 extern int tenma_rs_ws_accept(uint64_t rid);
-extern int tenma_rs_ws_send(uint64_t rid, const char *text, size_t len);
+extern int64_t tenma_rs_ws_send(uint64_t rid, const char *text, size_t len);
 extern uint64_t tenma_rs_ws_receive(uint64_t rid);
 extern void tenma_rs_ws_close(uint64_t rid, int finished);
 /** Databases, see src/db.rs. */
@@ -265,11 +265,6 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_rid_string_long, 0, 2, IS_
     ZEND_ARG_TYPE_INFO(0, data, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_rid_string_bool, 0, 2, _IS_BOOL, 0)
-    ZEND_ARG_TYPE_INFO(0, rid, IS_LONG, 0)
-    ZEND_ARG_TYPE_INFO(0, data, IS_STRING, 0)
-ZEND_END_ARG_INFO()
-
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_rid_void, 0, 1, IS_VOID, 0)
     ZEND_ARG_TYPE_INFO(0, rid, IS_LONG, 0)
 ZEND_END_ARG_INFO()
@@ -370,7 +365,7 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE(tenma_stream_write, arginfo_tenma_rid_string_long)
     ZEND_FE(tenma_stream_end, arginfo_tenma_rid_finished)
     ZEND_FE(tenma_ws_accept, arginfo_tenma_rid_bool)
-    ZEND_FE(tenma_ws_send, arginfo_tenma_rid_string_bool)
+    ZEND_FE(tenma_ws_send, arginfo_tenma_rid_string_long)
     ZEND_FE(tenma_ws_receive, arginfo_tenma_rid_long)
     ZEND_FE(tenma_ws_close, arginfo_tenma_rid_finished)
     ZEND_FE(tenma_op_db, arginfo_tenma_op_db)
@@ -1863,6 +1858,7 @@ PHP_FUNCTION(tenma_ws_accept) {
     RETURN_BOOL(tenma_rs_ws_accept((uint64_t) rid));
 }
 
+/** tenma_ws_send(int $rid, string $data): int. 0 queued, above 0 an op to wait on, -1 socket closed. */
 PHP_FUNCTION(tenma_ws_send) {
     zend_long rid;
     zend_string *text;
@@ -1870,7 +1866,7 @@ PHP_FUNCTION(tenma_ws_send) {
         Z_PARAM_LONG(rid)
         Z_PARAM_STR(text)
     ZEND_PARSE_PARAMETERS_END();
-    RETURN_BOOL(tenma_rs_ws_send((uint64_t) rid, ZSTR_VAL(text), ZSTR_LEN(text)));
+    RETURN_LONG((zend_long) tenma_rs_ws_send((uint64_t) rid, ZSTR_VAL(text), ZSTR_LEN(text)));
 }
 
 /** tenma_ws_receive(int $rid): int. Op for the next message; 0 if the socket does not exist. */

@@ -410,6 +410,13 @@ fn streaming_sse_und_websockets() {
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(ticks(), after_close);
 
+    // A burst larger than the queue arrives whole: the handler waits for the client
+    let (mut burst, _) = connect(format!("ws://127.0.0.1:{port}/ws-burst")).unwrap();
+    for i in 1..=1000 {
+        assert_eq!(burst.read().unwrap(), Message::text(format!("message {i}")));
+    }
+    assert!(matches!(burst.read(), Ok(Message::Close(_))));
+
     // 300 messages to a handler that never reads: tenma disconnects after 256, long before the handler ends
     let started = Instant::now();
     let (mut flood, _) = connect(format!("ws://127.0.0.1:{port}/ws-ignore")).unwrap();
@@ -452,6 +459,15 @@ fn clients_that_hold_the_server_are_limited() {
         std::thread::sleep(Duration::from_millis(100));
     }
     drop(stuck);
+    // The same for a WebSocket: send() waits for the client until it has stalled for too long
+    let started = Instant::now();
+    let (flood, _) = tokio_tungstenite::tungstenite::connect(format!("ws://127.0.0.1:{port}/ws-flood")).unwrap();
+    while !get(port, "/flooded").ends_with("closed") {
+        assert!(started.elapsed() < Duration::from_secs(5), "send() still waits for a client that does not read");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(flood);
+    std::thread::sleep(Duration::from_millis(100));
 
     // Three connections are the limit: the fourth gets 503 at once, and once one closes there is room again
     let idle: Vec<TcpStream> = (0..3).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();

@@ -26,8 +26,8 @@ use crate::php::{self, OpResult, Reply, bytes};
 
 /// This many chunks may wait for a slow client, then the fiber waits when writing.
 const STREAM_BUFFER: usize = 16;
-/// This many messages may wait in either direction (PHP not reading, client not reading); after
-/// that tenma disconnects.
+/// This many messages may wait in either direction. PHP not reading: tenma disconnects the client.
+/// The client not reading: send() waits.
 const SOCKET_BACKLOG: usize = 256;
 /// Largest WebSocket message in bytes, like --max-body.
 pub static MAX_MESSAGE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(10 << 20);
@@ -173,21 +173,36 @@ extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
     1
 }
 
-/// 1: on its way. 0: socket closed. A client that leaves SOCKET_BACKLOG messages unread is
-/// disconnected instead of filling memory, as for incoming messages.
+/// 0: on its way. Above 0: SOCKET_BACKLOG messages wait already, an op the fiber must wait on, as
+/// for streams. -1: socket closed. A client that stops reading stalls the write to it and is
+/// disconnected after --request-timeout (WriteTimeout), which ends the op too.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> c_int {
+extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> i64 {
+    let Some(sender) = SOCKETS.with_borrow(|sockets| sockets.get(&rid).map(|socket| socket.outgoing.clone())) else {
+        return -1;
+    };
     // Text if it is UTF-8, otherwise a binary frame: bytes arrive as they were sent
     let data = bytes(text, len).to_vec();
     let message = match String::from_utf8(data) {
         Ok(text) => Message::text(text),
         Err(error) => Message::binary(error.into_bytes()),
     };
-    let sent = SOCKETS.with_borrow(|sockets| sockets.get(&rid).is_some_and(|socket| socket.outgoing.try_send(message).is_ok()));
-    if !sent {
-        SOCKETS.with_borrow_mut(|sockets| sockets.remove(&rid));
+    match sender.try_send(message) {
+        Ok(()) => 0,
+        Err(mpsc::error::TrySendError::Full(message)) => match ops::spawn(async move {
+            match sender.send(message).await {
+                Ok(()) => OpResult::Null,
+                Err(_) => OpResult::Error("connection closed".into()),
+            }
+        }) {
+            0 => -1,
+            op => op as i64,
+        },
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            SOCKETS.with_borrow_mut(|sockets| sockets.remove(&rid));
+            -1
+        }
     }
-    sent.into()
 }
 
 /// Op for the next message: a string, or null if the client has closed. 0: no socket.

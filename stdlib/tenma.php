@@ -1945,10 +1945,19 @@ final class WebSocket
         return $op === 0 ? null : \Tenma\Internal\await($op);
     }
 
-    /** Sends $data as a text message if it is valid UTF-8, otherwise as a binary one. */
+    /**
+     * Sends $data as a text message if it is valid UTF-8, otherwise as a binary one. Waits while the client
+     * is behind, like Stream::write().
+     */
     public function send(string $data): void
     {
-        if (!\tenma_ws_send($this->rid, $data)) {
+        $result = \tenma_ws_send($this->rid, $data);
+        try {
+            $result > 0 && \Tenma\Internal\await($result);
+        } catch (\RuntimeException) {
+            $result = -1;
+        }
+        if ($result < 0) {
             throw new ConnectionClosed('The WebSocket is closed');
         }
     }
