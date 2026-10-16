@@ -1486,8 +1486,14 @@ namespace Tenma\Db {
                     . 'EVAL a script for atomic steps, the database in the URL (redis://host/2), Tenma::subscribe() for messages, polling instead of blocking');
             }
             \Tenma\Internal\requireFiber();
-            $json = \Tenma\Internal\await(\tenma_op_db('redis', $this->url, '', json_encode([$name, ...$args], JSON_THROW_ON_ERROR)));
-            return json_decode($json, true, flags: JSON_THROW_ON_ERROR);
+            // Length and bytes: values need not be UTF-8 (serialized or compressed data)
+            $packed = '';
+            foreach ([$name, ...$args] as $arg) {
+                // (string) would round a float to 14 digits
+                $arg = is_float($arg) ? json_encode($arg, JSON_THROW_ON_ERROR) : (string) $arg;
+                $packed .= strlen($arg) . ':' . $arg;
+            }
+            return unserialize(\Tenma\Internal\await(\tenma_op_db('redis', $this->url, '', $packed)), ['allowed_classes' => false]);
         }
 
         public function get(string $key): ?string

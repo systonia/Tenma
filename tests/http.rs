@@ -559,6 +559,8 @@ fn postgres_and_redis_async() {
 
     let redis = get(port, "/redis");
     assert!(redis.contains(r#""value""#) && redis.contains("1,\n"), "{redis}");
+    let binary = get(port, "/redis-binary");
+    assert!(binary.ends_with("\"636166e900ff ff 312e35 32\"\n"), "{binary}");
     assert!(get(port, "/drop").starts_with("HTTP/1.1 200"));
 }
 

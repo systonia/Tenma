@@ -48,6 +48,14 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
             }
         })(),
         '/redis' => [$redis->set("$table:key", 'value', 60), $redis->get("$table:key"), $redis->command('INCR', "$table:counter"), $redis->command('DEL', "$table:key", "$table:counter")],
+        // Bytes that are no UTF-8 go in and come back unchanged, also inside a list
+        '/redis-binary' => (function () use ($redis, $table) {
+            $redis->set("$table:bin", "caf\xe9\0\xff", 60);
+            $redis->command('RPUSH', "$table:list", "\xff", 1.5, 2);
+            $values = [$redis->get("$table:bin"), ...$redis->command('LRANGE', "$table:list", 0, -1)];
+            $redis->command('DEL', "$table:bin", "$table:list");
+            return implode(' ', array_map(bin2hex(...), $values));
+        })(),
         '/drop' => $db->execute("DROP TABLE $table"),
         // What one request changes on the connection, the next one must not see
         // Session state and a transaction left open; afterwards the connection must be clean

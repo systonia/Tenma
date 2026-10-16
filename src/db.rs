@@ -19,7 +19,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_postgres::{Client, NoTls};
 
 use crate::ops;
-use crate::php::{OpResult, text};
+use crate::php::{OpResult, bytes, text};
 
 type Failure = Box<dyn Error + Send + Sync>;
 
@@ -347,7 +347,9 @@ async fn postgres(mode: String, target: String, sql: String, params: Vec<Value>)
     result
 }
 
-async fn redis_command(url: String, args: Vec<Value>) -> Result<String, Failure> {
+/// $args: the command and its arguments as "<length>:<bytes>" one after another, so that any bytes
+/// pass. The reply comes back in PHP's serialize() format, binary-safe as well.
+async fn redis_command(url: String, args: Vec<u8>) -> Result<Vec<u8>, Failure> {
     let existing = REDIS.with_borrow(|connections| connections.get(&url).cloned());
     let mut connection = match existing {
         Some(connection) => connection,
@@ -361,11 +363,13 @@ async fn redis_command(url: String, args: Vec<Value>) -> Result<String, Failure>
         }
     };
     let mut command = redis::Cmd::new();
-    for arg in &args {
-        match arg {
-            Value::String(text) => command.arg(text.as_bytes()),
-            other => command.arg(other.to_string()),
-        };
+    let mut rest = args.as_slice();
+    while !rest.is_empty() {
+        let colon = rest.iter().position(|&byte| byte == b':').ok_or("malformed Redis arguments")?;
+        let length: usize = std::str::from_utf8(&rest[..colon]).ok().and_then(|length| length.parse().ok()).ok_or("malformed Redis arguments")?;
+        let arg = rest[colon + 1..].get(..length).ok_or("malformed Redis arguments")?;
+        command.arg(arg);
+        rest = &rest[colon + 1 + length..];
     }
     let value: redis::Value = match command.query_async(&mut connection).await {
         Ok(value) => value,
@@ -378,41 +382,67 @@ async fn redis_command(url: String, args: Vec<Value>) -> Result<String, Failure>
             return Err(error.into());
         }
     };
-    Ok(redis_json(value).to_string())
+    let mut serialized = Vec::new();
+    serialize(value, &mut serialized);
+    Ok(serialized)
 }
 
-fn redis_json(value: redis::Value) -> Value {
+/// A Redis reply as PHP's serialize() writes it; a map becomes a list of [key, value] pairs.
+fn serialize(value: redis::Value, out: &mut Vec<u8>) {
+    use std::io::Write;
+    let string = |out: &mut Vec<u8>, bytes: &[u8]| {
+        let _ = write!(out, "s:{}:\"", bytes.len());
+        out.extend_from_slice(bytes);
+        out.extend_from_slice(b"\";");
+    };
+    let list = |out: &mut Vec<u8>, items: Vec<redis::Value>| {
+        let _ = write!(out, "a:{}:{{", items.len());
+        for (index, item) in items.into_iter().enumerate() {
+            let _ = write!(out, "i:{index};");
+            serialize(item, out);
+        }
+        out.push(b'}');
+    };
     match value {
-        redis::Value::Nil => Value::Null,
-        redis::Value::Int(number) => number.into(),
-        redis::Value::BulkString(bytes) => String::from_utf8_lossy(&bytes).into_owned().into(),
-        redis::Value::SimpleString(text) => text.into(),
-        redis::Value::Okay => "OK".into(),
-        redis::Value::Array(items) | redis::Value::Set(items) => items.into_iter().map(redis_json).collect(),
-        redis::Value::Boolean(flag) => flag.into(),
-        redis::Value::Double(number) => number.into(),
-        redis::Value::Map(pairs) => pairs.into_iter().map(|(key, value)| Value::Array(vec![redis_json(key), redis_json(value)])).collect(),
-        other => format!("{other:?}").into(),
+        redis::Value::Nil => out.extend_from_slice(b"N;"),
+        redis::Value::Int(number) => {
+            let _ = write!(out, "i:{number};");
+        }
+        redis::Value::BulkString(bytes) => string(out, &bytes),
+        redis::Value::SimpleString(text) => string(out, text.as_bytes()),
+        redis::Value::Okay => string(out, b"OK"),
+        redis::Value::Array(items) | redis::Value::Set(items) => list(out, items),
+        redis::Value::Boolean(flag) => {
+            let _ = write!(out, "b:{};", u8::from(flag));
+        }
+        redis::Value::Double(number) if number.is_nan() => out.extend_from_slice(b"d:NAN;"),
+        redis::Value::Double(number) if number.is_infinite() => out.extend_from_slice(if number > 0.0 { b"d:INF;" } else { b"d:-INF;" }),
+        redis::Value::Double(number) => {
+            let _ = write!(out, "d:{number:?};");
+        }
+        redis::Value::Map(pairs) => list(out, pairs.into_iter().map(|(key, value)| redis::Value::Array(vec![key, value])).collect()),
+        other => string(out, format!("{other:?}").as_bytes()),
     }
 }
 
 /// Starts a database op. $op: "pg.query", "pg.execute", "pg.script", "pg.begin", "pg.commit", "pg.rollback" or
-/// "redis"; $target: URL or "tx:<id>"; $params: JSON array. The result comes as JSON text.
+/// "redis"; $target: URL or "tx:<id>"; $params: JSON array (Redis: see redis_command). The result comes as JSON text.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_db(op: *const u8, op_len: usize, target: *const u8, target_len: usize, sql: *const u8, sql_len: usize, params: *const u8, params_len: usize) -> u64 {
     let (op, target, sql) = (text(op, op_len), text(target, target_len), text(sql, sql_len));
-    let params: Vec<Value> = serde_json::from_str(&text(params, params_len)).unwrap_or_default();
+    // JSON for Postgres, raw bytes for Redis
+    let params = bytes(params, params_len).to_vec();
     // COMMIT and ROLLBACK run to completion even if the caller is cancelled: cancelled midway,
     // it would be unclear whether the transaction holds, and its entry would stay forever
     let spawn = if matches!(op.as_str(), "pg.commit" | "pg.rollback") { ops::spawn_uncancellable } else { ops::spawn };
     spawn(async move {
         let result = match op.split_once('.') {
-            Some(("pg", mode)) => postgres(mode.to_owned(), target, sql, params).await,
+            Some(("pg", mode)) => postgres(mode.to_owned(), target, sql, serde_json::from_slice(&params).unwrap_or_default()).await.map(String::into_bytes),
             _ if op == "redis" => redis_command(target, params).await,
             _ => Err(format!("unknown database op {op}").into()),
         };
         match result {
-            Ok(json) => OpResult::Text(json.into_bytes()),
+            Ok(result) => OpResult::Text(result),
             Err(error) => OpResult::Error(describe(error.as_ref())),
         }
     })
