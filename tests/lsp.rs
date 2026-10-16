@@ -136,6 +136,9 @@ fn completes_this_in_a_file_a_provider_binds() {
     assert_eq!(lsp.labels(&template, 1, 19), ["name"]);
     // The provider's own completions
     assert_eq!(lsp.labels(&template, 2, 18), ["increment"]);
+    // A value JSON cannot hold costs no other answer
+    lsp.change(&template, "<?= $this-> NAN ?>");
+    assert_eq!(lsp.labels(&template, 0, 11), ["not-a-number", "title", "author", "authors", "pens", "tags", "increment", "secret", "team"]);
     // A file no provider binds: nothing
     let other = root.join("other.php");
     lsp.open(&other, "<?php $this->");

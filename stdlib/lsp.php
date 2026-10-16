@@ -108,9 +108,9 @@ function timedOut($stream): bool
     return !feof($stream) && (stream_get_meta_data($stream)['timed_out'] ?? false);
 }
 
-function encode(mixed $value): string
+function encode(mixed $value, int $flags = 0): string
 {
-    return json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR);
+    return json_encode($value, $flags | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR);
 }
 
 function log(string $message): void
@@ -545,7 +545,8 @@ function work(string $root): void
         } catch (\Throwable $e) {
             log(($question['m'] ?? '?') . ': ' . $e->getMessage());
         }
-        fwrite($out, encode(['r' => $result]) . "\n");
+        // A provider's NAN or INF becomes 0 instead of ending the worker and every other provider's answer with it
+        fwrite($out, encode(['r' => $result], JSON_PARTIAL_OUTPUT_ON_ERROR) . "\n");
         fflush($out);
     }
 }

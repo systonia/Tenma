@@ -18,6 +18,9 @@ final class Editor implements Provider, Tokens
 
     public function completions(string $file, string $text, int $offset): array
     {
+        if (str_contains($text, 'NAN')) {
+            return [['label' => 'not-a-number', 'detail' => NAN]];
+        }
         return str_ends_with(substr($text, 0, $offset), 'data-on-click="') ? [['label' => 'increment', 'kind' => 'method']] : [];
     }
 
