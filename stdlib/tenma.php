@@ -2066,6 +2066,15 @@ function runWebSocket(int $rid, Request $request, WebSocketResponse $response): 
         \tenma_respond($rid, [426, ['Content-Type: text/plain; charset=utf-8', 'Upgrade: websocket'], "Upgrade Required\n"]);
         return;
     }
+    // RFC 6455 4.2: only a GET opens a WebSocket, and only version 13 exists
+    if ($request->method !== 'GET') {
+        \tenma_respond($rid, [405, ['Content-Type: text/plain; charset=utf-8', 'Allow: GET'], "Method Not Allowed\n"]);
+        return;
+    }
+    if ($request->header('sec-websocket-version') !== '13') {
+        \tenma_respond($rid, [426, ['Content-Type: text/plain; charset=utf-8', 'Sec-WebSocket-Version: 13'], "Upgrade Required\n"]);
+        return;
+    }
     if (!\tenma_ws_accept($rid)) {
         return;
     }

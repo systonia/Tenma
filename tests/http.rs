@@ -382,6 +382,19 @@ fn streaming_sse_und_websockets() {
     socket.close(None).unwrap();
     assert!(get(port, "/").ends_with("ok"));
 
+    // Only a GET for version 13 opens a WebSocket (RFC 6455 4.2)
+    let handshake = |method: &str, version: &str| {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        write!(stream, "{method} /ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: {version}\r\nContent-Length: 0\r\n\r\n").unwrap();
+        let mut response = [0; 512];
+        let read = stream.read(&mut response).unwrap();
+        String::from_utf8_lossy(&response[..read]).into_owned()
+    };
+    assert!(handshake("POST", "13").starts_with("HTTP/1.1 405"));
+    let unsupported = handshake("GET", "99");
+    assert!(unsupported.starts_with("HTTP/1.1 426") && unsupported.contains("sec-websocket-version: 13"), "{unsupported}");
+
     // An interval set in the handler ends with the connection instead of sending into a closed socket
     let (mut ticker, _) = connect(format!("ws://127.0.0.1:{port}/ws-ticker")).unwrap();
     assert_eq!(ticker.read().unwrap(), Message::text("tick"));
