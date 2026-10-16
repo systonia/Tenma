@@ -243,8 +243,11 @@ final class Server
                         continue 2;
                     }
                 }
+                // The column counts bytes, as everywhere in the Provider API; past the end it is the end
+                $lineText = rtrim(explode("\n", $text)[$line] ?? '', "\r");
+                $character = utf16(substr($lineText, 0, max(0, (int) ($problem['column'] ?? 1) - 1)));
                 $diagnostics[] = [
-                    'range' => ['start' => ['line' => $line, 'character' => max(0, (int) ($problem['column'] ?? 1) - 1)], 'end' => ['line' => $line, 'character' => lineLength($text, $line)]],
+                    'range' => ['start' => ['line' => $line, 'character' => $character], 'end' => ['line' => $line, 'character' => utf16($lineText)]],
                     'severity' => match ($problem['severity'] ?? 'error') { 'warning' => 2, 'info' => 3, default => 1 },
                     'source' => (string) $problem['source'],
                     'message' => (string) ($problem['message'] ?? ''),

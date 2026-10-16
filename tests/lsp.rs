@@ -192,16 +192,17 @@ fn what_the_running_app_publishes_shows_next_to_the_providers_problems() {
     let root = project("published");
     let template = root.join("page.tpl.php");
     let mut lsp = Lsp::start(&root);
-    let before = lsp.open(&template, "<?= $this->nope ?> TODO");
+    let before = lsp.open(&template, "ä<?= $this->nope ?> TODO");
     let published = root.join(".tenma/diagnostics");
     std::fs::create_dir_all(&published).unwrap();
     // As Tenma::diagnostics() writes it under --watch
-    let list = json!([{ "file": template.to_str().unwrap(), "line": 1, "column": 5, "severity": "warning", "message": "slow render" }]);
+    // Column 7 in bytes is the "$" after "ä<?= ", the sixth UTF-16 unit
+    let list = json!([{ "file": template.to_str().unwrap(), "line": 1, "column": 7, "severity": "warning", "message": "slow render" }]);
     std::fs::write(published.join("app.my-app.json"), list.to_string()).unwrap();
     let diagnostics = lsp.diagnostics();
     assert_eq!(diagnostics.as_array().unwrap().len(), before.as_array().unwrap().len() + 1, "{diagnostics}");
     let mine = diagnostics.as_array().unwrap().iter().find(|d| d["source"] == "my-app").unwrap();
-    assert_eq!((mine["message"].as_str(), mine["severity"].as_u64(), mine["range"]["start"]["character"].as_u64()), (Some("slow render"), Some(2), Some(4)));
+    assert_eq!((mine["message"].as_str(), mine["severity"].as_u64(), mine["range"]["start"]["character"].as_u64()), (Some("slow render"), Some(2), Some(5)));
     // The same problem from a provider and from the app shows once
     let own = &before[0];
     let twice = json!([{ "file": template.to_str().unwrap(), "line": own["range"]["start"]["line"].as_u64().unwrap() + 1, "message": own["message"] }]);
