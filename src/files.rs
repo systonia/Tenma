@@ -182,9 +182,11 @@ pub async fn serve(mounts: &[Mount], method: &Method, uri: &hyper::Uri, headers:
         Found::File(file, meta, real) => (file, meta, real),
         Found::Directory => {
             let mut response = empty(StatusCode::MOVED_PERMANENTLY);
+            // One leading slash: "//docs/" would send the browser to the host "docs"
+            let path = uri.path().trim_start_matches('/');
             let location = match uri.query() {
-                Some(query) => format!("{}/?{query}", uri.path()),
-                None => format!("{}/", uri.path()),
+                Some(query) => format!("/{path}/?{query}"),
+                None => format!("/{path}/"),
             };
             response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&location).ok()?);
             return Some(response);

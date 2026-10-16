@@ -983,6 +983,8 @@ fn static_files() {
     // A directory without / is redirected, without index.html it goes to PHP
     let directory = get(port, "/sub?a=1");
     assert!(directory.starts_with("HTTP/1.1 301") && directory.contains("location: /sub/?a=1"), "{directory}");
+    let doubled = get(port, "//sub");
+    assert!(doubled.starts_with("HTTP/1.1 301") && doubled.contains("location: /sub/\r\n"), "{doubled}");
     assert!(get(port, "/sub/").ends_with("php: /sub/\n"));
     // If-Range no longer matches: the whole file instead of a piece
     let stale = send("GET /sub/digits.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=2-4\r\nIf-Range: \"old\"\r\nConnection: close\r\n\r\n");
