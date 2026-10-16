@@ -147,3 +147,31 @@ fn skips_a_type_that_does_not_load() {
     assert!(stderr.contains("warning: skipping Acme\\Rule") && stderr.contains("Elsewhere\\Missing"), "{stderr}");
     assert!(out.join("Acme/Csv.md").exists() && !out.join("Acme/Rule.md").exists());
 }
+
+#[test]
+fn documents_functions_in_the_index_of_their_namespace() {
+    let out = scratch("functions");
+    let report = docs(&["tests/fixtures/docs/functions"], &out);
+    assert!(report.contains("1 types, 3 functions, 5 pages"), "{report}");
+    let pages = files(&out);
+    let text = &pages["Acme/Text/index.md"];
+    for expected in [
+        "description: \"The classes, interfaces, traits, enums and functions in Acme\\\\Text.\"",
+        "## Types\n\n- [`Style`](Style.md) · enum\n\n## Functions\n\n### classes()\n\n```php\nfunction classes(array|string ...$parts): string\n```\n\nJoins CSS classes, each once.",
+        "- `...$parts` `string|array<string, bool>`: strings and arrays of class => condition",
+        "**Returns** `string`: the classes, separated by one space",
+        "### styled()\n\n```php\nfunction styled(string $text, \\Acme\\Text\\Style $look = \\Acme\\Text\\Style::Plain): string\n```",
+        "- `$look` [`Style`](Style.md)",
+    ] {
+        assert!(text.contains(expected), "missing {expected} in\n{text}");
+    }
+    // @internal functions, closures and methods are no functions of the namespace
+    for hidden in ["hidden", "apply", "wrap", "inner"] {
+        assert!(!text.contains(hidden), "leaks {hidden}");
+    }
+    // A second namespace in the same file, with functions only, gets an index of its own
+    assert!(pages["Acme/Text/Html/index.md"].contains("### escape()\n\n```php\nfunction &escape(string $text): string\n```\n\nEscapes for HTML."));
+    assert!(pages["Acme/Text/index.md"].contains("- [`Acme\\Text\\Html`](Html/index.md)"));
+    let again = docs(&["tests/fixtures/docs/functions"], &out);
+    assert!(again.contains("(0 written, 0 removed)"), "{again}");
+}

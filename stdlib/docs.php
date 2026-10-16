@@ -1,7 +1,8 @@
 <?php
 // `tenma docs [<path>...] [--out <dir>]`: writes Markdown reference pages for PHP classes, interfaces,
 // traits and enums, one file per type at <out>/<Namespace path>/<ShortName>.md plus an index.md per
-// namespace folder. With paths it documents the types declared in those files and directories (loaded
+// namespace folder, which also documents the namespace's functions. With paths it documents the types and
+// functions declared in those files and directories (loaded
 // through the project's vendor/autoload.php, or straight from the files); without, Tenma's own built-in
 // API. Signatures come from reflection, prose from docblocks. Pages carry `generated: true` in their front
 // matter: a run replaces them and removes the ones whose type is gone, and never touches any other file.
@@ -30,7 +31,15 @@ function main(string $binary, array $args): void
         }
     }
     $out = rtrim($out, '/');
-    $names = $paths === [] ? builtIn() : load($paths);
+    [$names, $functionNames] = $paths === [] ? [builtIn(), []] : load($paths);
+    $functions = [];
+    foreach ($functionNames as $name) {
+        $function = new \ReflectionFunction($name);
+        if (!$function->isInternal() && !internal($function->getDocComment())) {
+            $functions[$function->getName()] = $function;
+        }
+    }
+    ksort($functions, SORT_STRING | SORT_FLAG_CASE);
     $classes = [];
     foreach ($names as $name) {
         $class = new \ReflectionClass($name);
@@ -39,7 +48,7 @@ function main(string $binary, array $args): void
         }
     }
     ksort($classes, SORT_STRING | SORT_FLAG_CASE);
-    $pages = (new Writer($classes))->pages();
+    $pages = (new Writer($classes, $functions))->pages();
     $written = 0;
     foreach ($pages as $path => $content) {
         $file = "$out/$path";
@@ -53,7 +62,7 @@ function main(string $binary, array $args): void
         }
     }
     $removed = is_dir($out) ? prune($out, $out, $pages) : 0;
-    echo count($classes), ' types, ', count($pages), " pages in $out ($written written, $removed removed)\n";
+    echo count($classes), ' types, ', $functions !== [] ? count($functions) . ' functions, ' : '', count($pages), " pages in $out ($written written, $removed removed)\n";
 }
 
 /** The class Tenma and everything under Tenma\ except Tenma\Internal: what `tenma --stubs` covers. */
@@ -65,7 +74,7 @@ function builtIn(): array
     );
 }
 
-/** Loads the types declared in $paths and returns their names. */
+/** Loads the types and functions declared in $paths and returns their names: [types, functions]. */
 function load(array $paths): array
 {
     $files = [];
@@ -87,9 +96,14 @@ function load(array $paths): array
         }
     }
     $declared = [];
+    $functions = [];
     foreach ($files as $file) {
-        foreach (declarations((string) file_get_contents($file)) as $name) {
+        [$types, $named] = declarations((string) file_get_contents($file));
+        foreach ($types as $name) {
             $declared[$name] = realpath($file);
+        }
+        foreach ($named as $name) {
+            $functions[$name] = realpath($file);
         }
     }
     // The project's autoloader (the nearest vendor/ above the first path) first, so dependencies resolve; the files themselves for anything it misses
@@ -121,26 +135,63 @@ function load(array $paths): array
             file_put_contents('php://stderr', "warning: skipping $name from $file: $error\n");
         }
     }
-    return $loaded;
+    // Functions do not autoload: their files are loaded here, unless the autoloader's `files` did already
+    // (loading one twice would declare its functions again)
+    $loadedFunctions = [];
+    foreach ($functions as $name => $file) {
+        try {
+            if (!function_exists($name) && !array_filter(array_keys($functions, $file, true), function_exists(...))) {
+                require_once $file;
+            }
+            $error = 'did not load';
+        } catch (\Throwable $e) {
+            $error = $e->getMessage();
+        }
+        if (function_exists($name)) {
+            $loadedFunctions[] = $name;
+        } else {
+            file_put_contents('php://stderr', "warning: skipping $name() from $file: $error\n");
+        }
+    }
+    return [$loaded, $loadedFunctions];
 }
 
-/** Names of the classes, interfaces, traits and enums a PHP file declares. */
+/**
+ * Names of the classes, interfaces, traits and enums a PHP file declares, and of the functions it declares
+ * at the top level of a namespace (not methods, closures or functions inside functions): [types, functions].
+ */
 function declarations(string $code): array
 {
     $tokens = array_values(array_filter(\PhpToken::tokenize($code), fn ($token) => !$token->isIgnorable()));
     $namespace = '';
     $names = [];
+    $functions = [];
+    // The brace depth, and the depth at which a namespace's declarations are (1 inside `namespace X { }`)
+    $depth = 0;
+    $top = 0;
     foreach ($tokens as $i => $token) {
-        if ($token->is(T_NAMESPACE) && ($tokens[$i + 1] ?? null)?->is([T_STRING, T_NAME_QUALIFIED])) {
+        if ($token->text === '{' || $token->is([T_CURLY_OPEN, T_DOLLAR_OPEN_CURLY_BRACES])) {
+            $depth++;
+        } elseif ($token->text === '}') {
+            $depth--;
+            $top = min($top, $depth);
+        } elseif ($token->is(T_NAMESPACE) && ($tokens[$i + 1] ?? null)?->is([T_STRING, T_NAME_QUALIFIED])) {
             $namespace = $tokens[$i + 1]->text . '\\';
+            $top = ($tokens[$i + 2] ?? null)?->text === '{' ? $depth + 1 : $depth;
         } elseif ($token->is(T_NAMESPACE) && ($tokens[$i + 1] ?? null)?->text === '{') {
             $namespace = '';
+            $top = $depth + 1;
         } elseif ($token->is([T_CLASS, T_INTERFACE, T_TRAIT, T_ENUM]) && ($tokens[$i + 1] ?? null)?->is(T_STRING)
             && !($tokens[$i - 1] ?? null)?->is([T_NEW, T_DOUBLE_COLON])) {
             $names[] = $namespace . $tokens[$i + 1]->text;
+        } elseif ($token->is(T_FUNCTION) && $depth === $top && !($tokens[$i - 1] ?? null)?->is(T_USE)) {
+            $name = ($tokens[$i + 1] ?? null)?->text === '&' ? $tokens[$i + 2] ?? null : $tokens[$i + 1] ?? null;
+            if ($name?->is(T_STRING)) {
+                $functions[] = $namespace . $name->text;
+            }
         }
     }
-    return $names;
+    return [$names, $functions];
 }
 
 function generated(string $file): bool
@@ -276,18 +327,30 @@ final class Writer
     private array $uses = [];
     private string $namespace = '';
 
-    /** @param array<string, \ReflectionClass> $classes */
-    public function __construct(private array $classes) {}
+    /**
+     * @param array<string, \ReflectionClass> $classes
+     * @param array<string, \ReflectionFunction> $functions
+     */
+    public function __construct(private array $classes, private array $functions = []) {}
 
     /** @return array<string, string> path relative to the output directory → content */
     public function pages(): array
     {
         $pages = [];
         $members = ['' => []];
-        foreach ($this->classes as $name => $class) {
-            $pages[$this->path($name)] = $this->type($class);
+        $functions = [];
+        foreach ($this->functions as $function) {
+            $functions[$function->getNamespaceName()][] = $function;
+        }
+        // A namespace with functions only gets an index too
+        foreach ([...array_values($this->classes), ...array_values($this->functions)] as $class) {
             $namespace = $class->getNamespaceName();
-            $members[$namespace][] = $class;
+            if ($class instanceof \ReflectionClass) {
+                $pages[$this->path($class->getName())] = $this->type($class);
+                $members[$namespace][] = $class;
+            } else {
+                $members[$namespace] ??= [];
+            }
             // Every folder on the way gets an index, also one without types of its own
             for ($parent = $namespace; $parent !== ''; $parent = substr($parent, 0, (int) strrpos($parent, '\\'))) {
                 $members[$parent] ??= [];
@@ -300,7 +363,7 @@ final class Writer
         foreach ($members as $namespace => $classes) {
             $children = array_filter(array_keys($members), fn ($other) => $other !== '' && $this->parent($other) === $namespace);
             $path = $namespace === '' ? 'index.md' : str_replace('\\', '/', $namespace) . '/index.md';
-            $pages[$path] = $this->index($namespace, $classes, $children, $path);
+            $pages[$path] = $this->index($namespace, $classes, $functions[$namespace] ?? [], $children, $path);
         }
         ksort($pages, SORT_STRING);
         return $pages;
@@ -402,14 +465,14 @@ final class Writer
         return $out . ($code !== '' ? '`' . $code . '`' : '');
     }
 
-    private function signature(\ReflectionMethod $method): string
+    private function signature(\ReflectionFunctionAbstract $method): string
     {
-        $modifiers = \Reflection::getModifierNames($method->getModifiers());
-        if ($method->getDeclaringClass()->isInterface()) {
+        $modifiers = $method instanceof \ReflectionMethod ? \Reflection::getModifierNames($method->getModifiers()) : [];
+        if ($method instanceof \ReflectionMethod && $method->getDeclaringClass()->isInterface()) {
             $modifiers = array_diff($modifiers, ['abstract']);
         }
         $parameters = array_map(fn ($parameter) => $this->parameter($parameter), $method->getParameters());
-        $head = implode(' ', $modifiers) . ' function ' . $method->getName();
+        $head = ltrim(implode(' ', $modifiers) . ' function ' . ($method->returnsReference() ? '&' : '') . ($method instanceof \ReflectionMethod ? $method->getName() : $method->getShortName()));
         $list = implode(', ', $parameters);
         if (strlen($head . $list) > 100) {
             $list = "\n    " . implode(",\n    ", $parameters) . ",\n";
@@ -663,10 +726,12 @@ final class Writer
         return $params;
     }
 
-    private function method(\ReflectionMethod $method): string
+    /** A method, or a function of a namespace's index page. */
+    private function method(\ReflectionFunctionAbstract $method): string
     {
-        [$text, $tags] = parse($this->methodDoc($method));
-        $out = '### ' . $method->getName() . "()\n\n```php\n" . $this->signature($method) . "\n```\n\n";
+        [$text, $tags] = parse($method instanceof \ReflectionMethod ? $this->methodDoc($method) : $method->getDocComment());
+        $name = $method instanceof \ReflectionMethod ? $method->getName() : $method->getShortName();
+        $out = '### ' . $name . "()\n\n```php\n" . $this->signature($method) . "\n```\n\n";
         $out .= $text !== '' ? "$text\n\n" : '';
         $params = $this->params($tags);
         $items = [];
@@ -680,7 +745,7 @@ final class Writer
         if ($return !== null) {
             [$type, $description] = splitType($return);
             $out .= '**Returns** ' . $this->typeText($type) . ($description !== '' ? ": $description" : '') . "\n\n";
-        } elseif ($method->getReturnType() !== null && !in_array((string) $method->getReturnType(), ['void', 'never'], true) && !$method->isConstructor()) {
+        } elseif ($method->getReturnType() !== null && !in_array((string) $method->getReturnType(), ['void', 'never'], true) && !($method instanceof \ReflectionMethod && $method->isConstructor())) {
             $out .= '**Returns** ' . $this->typeText($method->getReturnType()) . "\n\n";
         }
         $out .= $this->list('Throws', array_map(function ($body) {
@@ -691,8 +756,8 @@ final class Writer
         return $out . $this->otherTags($tags);
     }
 
-    /** The `use` imports of the file that declares $class, lowercased alias → name. */
-    private function imports(\ReflectionClass $class): array
+    /** The `use` imports of the file that declares $class or a function, lowercased alias → name. */
+    private function imports(\ReflectionClass|\ReflectionFunction $class): array
     {
         $file = $class->getFileName();
         if ($file === false || !is_file($file)) {
@@ -731,12 +796,20 @@ final class Writer
         return $uses;
     }
 
-    /** @param list<\ReflectionClass> $classes */
-    private function index(string $namespace, array $classes, array $children, string $path): string
+    /**
+     * @param list<\ReflectionClass> $classes
+     * @param list<\ReflectionFunction> $functions
+     */
+    private function index(string $namespace, array $classes, array $functions, array $children, string $path): string
     {
         $this->page = $path;
         $title = $namespace === '' ? 'Reference' : $namespace;
-        $description = $namespace === '' ? 'Every documented class, interface, trait and enum, by namespace.' : "The classes, interfaces, traits and enums in $namespace.";
+        $description = match (true) {
+            $namespace === '' && $this->functions !== [] => 'Every documented class, interface, trait, enum and function, by namespace.',
+            $namespace === '' => 'Every documented class, interface, trait and enum, by namespace.',
+            $functions !== [] => "The classes, interfaces, traits, enums and functions in $namespace.",
+            default => "The classes, interfaces, traits and enums in $namespace.",
+        };
         $out = "---\ntitle: " . yaml($title) . "\ndescription: " . yaml($description) . "\norder: " . ($namespace === '' ? 900 : 200) . "\ngenerated: true\n---\n\n";
         sort($children, SORT_STRING | SORT_FLAG_CASE);
         if ($children !== []) {
@@ -752,6 +825,17 @@ final class Writer
             foreach ($classes as $class) {
                 $summary = sentence(parse($class->getDocComment())[0]);
                 $out .= '- ' . $this->name($class->getName()) . ' · ' . $this->kind($class) . ($summary !== '' ? ": $summary" : '') . "\n";
+            }
+            $out .= "\n";
+        }
+        if ($functions !== []) {
+            usort($functions, fn ($a, $b) => strcasecmp($a->getShortName(), $b->getShortName()));
+            $out .= "## Functions\n\n";
+            foreach ($functions as $function) {
+                // Names in the docblock resolve against the function's own file
+                $this->namespace = $function->getNamespaceName();
+                $this->uses = $this->imports($function);
+                $out .= $this->method($function);
             }
         }
         return rtrim($out) . "\n";

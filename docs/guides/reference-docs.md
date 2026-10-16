@@ -4,7 +4,7 @@ description: Generate Markdown reference pages for a PHP package with tenma docs
 order: 105
 ---
 
-`tenma docs` writes one Markdown page per class, interface, trait and enum of a PHP project, from reflection and docblocks. The pages are meant to be committed next to hand-written guides; Tenma's own [reference](../reference/index.md) is made this way.
+`tenma docs` writes one Markdown page per class, interface, trait and enum of a PHP project, and documents its functions on the index page of their namespace, from reflection and docblocks. The pages are meant to be committed next to hand-written guides; Tenma's own [reference](../reference/index.md) is made this way.
 
 ```bash
 tenma docs src/                         # into docs/reference
@@ -12,7 +12,7 @@ tenma docs src/ lib/Legacy.php --out site/api
 tenma docs                              # Tenma's own built-in API
 ```
 
-Paths are PHP files or directories; inside directories, `vendor`, `node_modules` and hidden directories are skipped. Tenma finds the types declared in those files, loads them through the nearest `vendor/autoload.php` above the first path (so parents, interfaces and attribute classes resolve), and loads straight from the files whatever the autoloader does not know. Loading runs the project's code: run it only on code you trust.
+Paths are PHP files or directories; inside directories, `vendor`, `node_modules` and hidden directories are skipped. Tenma finds the types and functions declared in those files, loads the types through the nearest `vendor/autoload.php` above the first path (so parents, interfaces and attribute classes resolve), and loads straight from the files whatever the autoloader does not know. Loading runs the project's code: run it only on code you trust.
 
 ## What a page contains
 
@@ -74,6 +74,46 @@ Methods without a docblock take the one of the method they implement or override
 ## Index pages
 
 Every namespace folder gets an `index.md` listing its sub-namespaces and its types with kind and first sentence; the output directory gets an `index.md` titled "Reference" over the top-level namespaces and the types without a namespace. In a docs site, each folder becomes a section with its `index.md` as landing page.
+
+## Functions
+
+Functions declared at the top level of a file or of a namespace block are documented in a `## Functions` section of their namespace's `index.md` (functions without a namespace in the top `index.md`), sorted by name, each like a method: signature, text, parameters, return value, exceptions. A link to one is `index.md#name`, the heading's anchor. For `src/text.php`:
+
+```php
+<?php
+
+namespace Acme\Text;
+
+/**
+ * Joins CSS classes, each once.
+ *
+ * @param string|array<string, bool> ...$parts strings and arrays of class => condition
+ * @return string the classes, separated by one space
+ */
+function classes(string|array ...$parts): string { /* … */ }
+```
+
+`docs/reference/Acme/Text/index.md` gets:
+
+````markdown
+## Functions
+
+### classes()
+
+```php
+function classes(array|string ...$parts): string
+```
+
+Joins CSS classes, each once.
+
+**Parameters**
+
+- `...$parts` `string|array<string, bool>`: strings and arrays of class => condition
+
+**Returns** `string`: the classes, separated by one space
+````
+
+A namespace with functions only still gets its `index.md`. Methods, closures and functions declared inside other functions are not listed, nor functions marked `@internal`. Functions do not autoload, so Tenma loads their files itself, except files whose functions the autoloader's `files` list already declared.
 
 ## Re-running
 

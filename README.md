@@ -249,17 +249,17 @@ vim.lsp.enable('tenma')
 
 ## Reference pages
 
-`tenma docs` writes Markdown reference pages from PHP code: one page per class, interface, trait and enum, built from reflection and docblocks.
+`tenma docs` writes Markdown reference pages from PHP code: one page per class, interface, trait and enum, and the functions of a namespace on its index page, built from reflection and docblocks.
 
 ```
-tenma docs src/                     # the types declared in src/, into docs/reference
+tenma docs src/                     # the types and functions declared in src/, into docs/reference
 tenma docs src/ lib/Api.php --out site/api
 tenma docs                          # Tenma's own built-in API
 ```
 
 Paths are PHP files or directories (`vendor`, `node_modules` and dot directories inside them are skipped). The types are loaded through the nearest `vendor/autoload.php` above the first path, so reflection sees their parents and interfaces; what the autoloader does not find is loaded straight from the files. Loading runs the project's code, as with `tenma lsp`.
 
-Each type gets `<out>/<Namespace path>/<ShortName>.md`: its kind, namespace, parents, interfaces and traits, the docblock text as Markdown, then constants, properties (type, default, `readonly`, hooks), methods (signature, description, parameters, return value, exceptions) and enum cases. `@param`, `@return`, `@throws`, `@template` and `@var` become lists; types documented in the same run are linked, PHP's own classes link to php.net. Public members are documented, protected ones too in classes that can be extended; types and members marked `@internal` are left out. Every namespace folder gets an `index.md` listing its types with their first sentence, and the output directory an `index.md` over all namespaces.
+Each type gets `<out>/<Namespace path>/<ShortName>.md`: its kind, namespace, parents, interfaces and traits, the docblock text as Markdown, then constants, properties (type, default, `readonly`, hooks), methods (signature, description, parameters, return value, exceptions) and enum cases. `@param`, `@return`, `@throws`, `@template` and `@var` become lists; types documented in the same run are linked, PHP's own classes link to php.net. Public members are documented, protected ones too in classes that can be extended; types and members marked `@internal` are left out. Every namespace folder gets an `index.md` listing its types with their first sentence, followed by a `## Functions` section with each function of the namespace (signature, description, parameters, return value, exceptions, anchored as `index.md#name`), and the output directory an `index.md` over all namespaces. Functions are found at the top level of a file or namespace block; their files are loaded unless the autoloader's `files` already did.
 
 Every page starts with YAML front matter (`title`, `description`, `order`, `generated: true`). The output is sorted and has no timestamps, so a second run changes nothing. A run removes the pages with `generated: true` whose type is gone and refuses to overwrite a file without it, so hand-written pages can sit next to the generated ones. Tenma's own reference in [docs/reference](docs/reference/index.md) is generated this way.
 
