@@ -401,3 +401,46 @@ fn a_provider_s_imports_resolve_class_names_in_a_template() {
     let definition = lsp.at("textDocument/definition", &template, 1, 5);
     assert_eq!(definition["uri"], uri(&root.join("src/Writer.php")), "{definition}");
 }
+
+#[test]
+fn a_provider_s_variables_get_their_class() {
+    let root = project("variables");
+    let template = root.join("page.tpl.php");
+    let mut lsp = Lsp::start(&root);
+    let lines = [
+        "{{ $model-> }}",
+        "{{ $model->owner-> }} {{ $model->first()-> }}",
+        "@foreach ($model->buyers as $buyer) {{ $buyer-> }} @endforeach",
+        "<?php $who = $model->owner; ?>{{ $who-> }}",
+        "{{ $gone-> }}",
+        "<?php $model = $this; ?>{{ $model-> }}",
+    ];
+    lsp.open(&template, &lines.join("\n"));
+    // The column after the n-th "->" of a line
+    let after = |line: usize, n: usize| lines[line].match_indices("->").nth(n).unwrap().0 as u32 + 2;
+    // Outside the class it binds: only public members
+    assert_eq!(lsp.labels(&template, 0, after(0, 0)), ["owner", "buyers", "first"]);
+    // Chains through a property and a method, a loop over a property, an assignment from one
+    assert_eq!(lsp.labels(&template, 1, after(1, 1)), ["name"]);
+    assert_eq!(lsp.labels(&template, 1, after(1, 3)), ["name"]);
+    assert_eq!(lsp.labels(&template, 2, after(2, 1)), ["name"]);
+    assert_eq!(lsp.labels(&template, 3, after(3, 1)), ["name"]);
+    // A class that does not exist types nothing; below its own assignment the file's typing wins
+    assert!(lsp.labels(&template, 4, after(4, 0)).is_empty());
+    assert_eq!(lsp.labels(&template, 5, after(5, 0)), ["title", "author", "authors", "pens", "tags", "increment", "secret", "team"]);
+    // Hover on the variable and on a member, F12 on a member
+    lsp.change(&template, "{{ $model->owner }} {{ $model->first() }}");
+    let hover = lsp.at("textDocument/hover", &template, 0, 5);
+    assert_eq!(hover["contents"]["value"], "```php\nFixture\\Cart $model\n```", "{hover}");
+    let hover = lsp.at("textDocument/hover", &template, 0, 13);
+    assert_eq!(hover["contents"]["value"], "```php\npublic Fixture\\Author $owner\n```", "{hover}");
+    let method = lsp.at("textDocument/definition", &template, 0, 32);
+    assert_eq!(method["uri"], uri(&root.join("src/Cart.php")), "{method}");
+    assert_eq!(method["range"]["start"]["line"], 14, "{method}");
+    let property = lsp.at("textDocument/definition", &template, 0, 13);
+    assert_eq!(property["range"]["start"]["line"], 7, "{property}");
+    // A file no provider binds: nothing
+    let other = root.join("other.php");
+    lsp.open(&other, "<?php $model->");
+    assert!(lsp.labels(&other, 0, 14).is_empty());
+}

@@ -1,6 +1,6 @@
 ---
 title: Language server
-description: Run tenma lsp next to the editor's PHP server, and extend it from a package with Tenma\Lsp\Provider, Tenma\Lsp\Tokens and Tenma\Lsp\Imports.
+description: Run tenma lsp next to the editor's PHP server, and extend it from a package with Tenma\Lsp\Provider, Tenma\Lsp\Tokens, Tenma\Lsp\Imports and Tenma\Lsp\Variables.
 order: 100
 ---
 
@@ -193,6 +193,33 @@ final class Editor implements Provider, Imports
 
 The rule when both name something: the file's own `use` statements and `namespace` come first, and the provider fills in only what the file does not have. An alias the file imports itself keeps the file's class; a file without a `namespace` line takes the provider's. When several providers name the same alias, the first one wins.
 
+## Variables
+
+A template often gets more than `$this`: a model, say, as `$model`. A provider that also implements [`Tenma\Lsp\Variables`](../reference/Tenma/Lsp/Variables.md) names the class of such variables:
+
+```php
+<?php
+
+namespace Acme\Views;
+
+use Tenma\Lsp\{Provider, Variables};
+
+final class Editor implements Provider, Variables
+{
+    // thisClass(), completions(), definition() and diagnostics() as above
+
+    public function variables(string $file, string $text): array
+    {
+        // views/cart.php renders a Cart as $cart
+        return str_ends_with($file, '/views/cart.php') ? ['cart' => \Acme\Shop\Cart::class] : [];
+    }
+}
+```
+
+`variables($file, $text)` returns variable name (without `$`) => fully qualified class name; a class that does not exist is left out. Tenma then treats such a variable as it treats `$this`: it completes `$cart->`, `$cart->owner->` and `$cart->first()->` (public members), shows hover on the variable and its members, leads F12 to the declaration, gives `@foreach ($cart->items as $item)` the element type of `items` and `$owner = $cart->owner;` the type of `owner`. A file a provider types variables in counts as bound even without `thisClass()`. A `this` entry stands in for `thisClass()` when that returns `null`.
+
+The rule when both type a name: below an assignment or a loop in the file that introduces it, the file's own typing wins; above, the provider's. When several providers name the same variable, the first one wins.
+
 `extra.tenma.lsp` may also be a list of classes when a package has several providers.
 
-See also: [`Tenma\Lsp\Provider`](../reference/Tenma/Lsp/Provider.md), [`Tenma\Lsp\Tokens`](../reference/Tenma/Lsp/Tokens.md), [`Tenma\Lsp\Imports`](../reference/Tenma/Lsp/Imports.md), [Diagnostics](diagnostics.md), [Debugger and editor setup](debugger.md).
+See also: [`Tenma\Lsp\Provider`](../reference/Tenma/Lsp/Provider.md), [`Tenma\Lsp\Tokens`](../reference/Tenma/Lsp/Tokens.md), [`Tenma\Lsp\Imports`](../reference/Tenma/Lsp/Imports.md), [`Tenma\Lsp\Variables`](../reference/Tenma/Lsp/Variables.md), [Diagnostics](diagnostics.md), [Debugger and editor setup](debugger.md).

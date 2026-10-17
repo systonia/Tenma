@@ -627,17 +627,18 @@ final class Answers
     {
         $items = $this->collect(static fn (Provider $p) => $p->completions($file, $text, $offset));
         $before = substr($text, 0, $offset);
-        if (preg_match('/\$(\w+)((?:->\w+)*)->\w*$/', $before, $m) === 1) {
+        $types = $this->types($file, $text);
+        if (preg_match('/\$(\w+)((?:->\w+(?:\([^()]*\))?)*)->\w*$/', $before, $m) === 1) {
             $root = $this->variable($file, $text, $before, $m[1]);
             $target = $root === null ? null : $this->follow($root, $m[2]);
             if ($target !== null) {
-                array_push($items, ...self::members($target, $target->getName() === $this->thisClass($file)));
+                array_push($items, ...self::members($target, $target->getName() === ($types['this'] ?? null)));
             }
         }
-        if (preg_match('/(?<![\w\\\\$>:])(\\\\?[A-Za-z_][\w\\\\]*)::\$?\w*$/', $before, $m) === 1 && $this->thisClass($file) !== null) {
+        if (preg_match('/(?<![\w\\\\$>:])(\\\\?[A-Za-z_][\w\\\\]*)::\$?\w*$/', $before, $m) === 1 && $types !== []) {
             $class = $this->resolve($m[1], $file, $text);
             if ($class !== null) {
-                array_push($items, ...self::statics(new \ReflectionClass($class), $class === $this->thisClass($file)));
+                array_push($items, ...self::statics(new \ReflectionClass($class), $class === ($types['this'] ?? null)));
             }
         }
         return $items;
@@ -664,7 +665,7 @@ final class Answers
             return ['file' => (string) $class->getFileName(), 'line' => (int) $class->getStartLine()];
         }
         // In a class file the editor's PHP server knows the variable; a template's @foreach or assignment it does not
-        return $this->thisClass($file) === null ? null : self::introduction($file, $text, $offset);
+        return $this->types($file, $text) === [] ? null : self::introduction($file, $text, $offset);
     }
 
     /**
@@ -702,11 +703,22 @@ final class Answers
     {
         $member = $this->member($file, $text, $offset) ?? $this->classAt($file, $text, $offset);
         if ($member === null) {
-            return null;
+            return $this->typeAt($file, $text, $offset);
         }
         $doc = trim((string) preg_replace('#^\s*/\*\*|\*/\s*$|^\s*\* ?#m', '', (string) $member->getDocComment()));
         $head = $member instanceof \ReflectionClass ? self::kind($member) . ' ' . $member->getName() : self::signature($member);
         return "```php\n$head\n```" . ($doc !== '' ? "\n\n$doc" : '');
+    }
+
+    /** The hover of a plain `$name` at $offset that has a class: the class and the name. */
+    private function typeAt(string $file, string $text, int $offset): ?string
+    {
+        preg_match('/^\w*/', substr($text, $offset), $rest);
+        if (preg_match('/\$(\w+)$/', substr($text, 0, $offset) . $rest[0], $m, PREG_OFFSET_CAPTURE) !== 1) {
+            return null;
+        }
+        $class = $this->variable($file, $text, substr($text, 0, $m[0][1]), $m[1][0]);
+        return $class === null ? null : "```php\n{$class->getName()} \${$m[1][0]}\n```";
     }
 
     /**
@@ -722,7 +734,7 @@ final class Answers
         $after = substr($text, $offset + strlen($tail[0]));
         if (preg_match('/^\\\\?[A-Za-z_]/', $name) !== 1 || preg_match('/(?:\$|->|::)$/', $before) === 1
             || (preg_match('/^\s*::/', $after) !== 1 && preg_match('/\b(?:new|instanceof)\s+$/', $before) !== 1)
-            || $this->thisClass($file) === null) {
+            || $this->types($file, $text) === []) {
             return null;
         }
         $class = $this->resolve($name, $file, $text);
@@ -739,12 +751,12 @@ final class Answers
         };
     }
 
-    /** The method or property named at $offset in a `$this->a->b` chain. */
+    /** The method or property named at $offset in a `$this->a->b()->c` chain. */
     private function member(string $file, string $text, int $offset): \ReflectionMethod|\ReflectionProperty|null
     {
         preg_match('/^\w*/', substr($text, $offset), $rest);
         $before = substr($text, 0, $offset);
-        if (preg_match('/\$(\w+)((?:->\w+)*)->(\w*)$/', $before . $rest[0], $m) !== 1 || $m[3] === '') {
+        if (preg_match('/\$(\w+)((?:->\w+(?:\([^()]*\))?)*)->(\w*)$/', $before . $rest[0], $m) !== 1 || $m[3] === '') {
             return null;
         }
         $root = $this->variable($file, $text, $before, $m[1]);
@@ -769,7 +781,31 @@ final class Answers
     }
 
     /**
-     * The class of `$name` in the text before the cursor. `$this` is the class a provider binds. In a file a
+     * @return array<string, string> The variables the providers type in $file, by name: `$this` from thisClass(),
+     *     the others from Tenma\Lsp\Variables (the first provider wins); empty in a file no provider binds
+     */
+    private function types(string $file, string $text): array
+    {
+        $types = [];
+        $bound = $this->thisClass($file);
+        if ($bound !== null) {
+            $types['this'] = $bound;
+        }
+        foreach ($this->providers as $provider) {
+            $given = $provider instanceof \Tenma\Lsp\Variables ? $this->guard(static fn () => $provider->variables($file, $text)) : null;
+            foreach (is_array($given) ? $given : [] as $name => $class) {
+                $class = is_string($class) ? trim($class, '\\') : '';
+                if (class_exists($class) || interface_exists($class)) {
+                    $types[ltrim((string) $name, '$')] ??= $class;
+                }
+            }
+        }
+        return $types;
+    }
+
+    /**
+     * The class of `$name` in the text before the cursor. `$this` is the class a provider binds, and a variable
+     * a provider types (Tenma\Lsp\Variables) has that class unless the file introduces it above. In a file a
      * provider binds, another variable gets its type from the last foreach or assignment above that introduces
      * it: a foreach over `$this->items` (or another such variable) gives the element type of `items`, from its
      * PHPDoc (`list<Item>`, `array<int, Item>`, `Item[]`); `$name = $this->item;`, `$name = $this->item();` and
@@ -777,11 +813,11 @@ final class Answers
      */
     private function variable(string $file, string $text, string $before, string $name, int $depth = 0): ?\ReflectionClass
     {
+        $types = $this->types($file, $text);
         if ($name === 'this') {
-            $class = $this->thisClass($file);
-            return $class === null ? null : new \ReflectionClass($class);
+            return isset($types['this']) ? new \ReflectionClass($types['this']) : null;
         }
-        if ($depth > 3 || $this->thisClass($file) === null) {
+        if ($depth > 3 || $types === []) {
             return null;
         }
         $chain = '\$(\w+)((?:->\w+(?:\([^()]*\))?)*)';
@@ -790,7 +826,7 @@ final class Answers
             . '|\$' . $n . '\b\s*=(?![=>])\s*(?:new\s+(\\\\?[\w\\\\]+)\s*(?:\([^()]*\))?\s*(?:;|\?>)|' . $chain . '\s*(?:;|\?>))?/';
         $code = self::code($before);
         if (preg_match_all($pattern, $code, $found, PREG_SET_ORDER | PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL) === 0) {
-            return null;
+            return isset($types[$name]) ? new \ReflectionClass($types[$name]) : null;
         }
         $last = end($found);
         $above = substr($code, 0, $last[0][1]);
