@@ -12,7 +12,7 @@ order: 10
 use Tenma\Http\{Request, Response};
 
 Tenma::serve(8080, function (Request $request): Response|string {
-    return "Hello {$request->method} {$request->path}\n";
+    return "Sonnenkorn bakery: {$request->method} {$request->path}\n";
 });
 ```
 
@@ -25,7 +25,13 @@ A handler gets a [`Request`](../reference/Tenma/Http/Request.md) and returns one
 
 An exception that leaves the handler becomes a `500 Internal Server Error`; the message goes to the log on stderr, never to the client, and the server keeps running. `exit()` inside a handler ends only that request.
 
-Everything outside the handler runs once, when the script starts. That is the place for the expensive setup: configuration, routes, templates, database connections. A script can call `Tenma::serve()` for several ports.
+Everything outside the handler runs once, when the script starts. That is the place for the expensive setup: configuration, routes, templates, database connections. A script can call `Tenma::serve()` for several ports. The bakery's `index.php` builds its whole app once and hands it to Tenma; the app is itself a handler:
+
+```php
+// from index.php of the bakery, shortened: app.php builds the Waypoint app with its routes and services
+$app = require __DIR__ . '/app.php';
+$app->serve();   // Tenma::serve() with the app as handler
+```
 
 ## Reading the request
 
@@ -37,13 +43,13 @@ use Tenma\Http\{Request, Response};
 Tenma::serve(8080, function (Request $request): Response {
     return Response::json([
         'method' => $request->method,            // GET, POST, …
-        'uri' => $request->uri,                  // path with query string: /search?q=tenma
-        'path' => $request->path,                // /search
-        'query' => $request->query,              // ['q' => 'tenma'], parsed like $_GET
+        'uri' => $request->uri,                  // path with query string: /products?category=bread
+        'path' => $request->path,                // /products
+        'query' => $request->query,              // ['category' => 'bread'], parsed like $_GET
         'agent' => $request->header('user-agent'),   // case-insensitive, null if missing
         'host' => $request->host(),              // Host header without port
         'client' => $request->remoteAddress,     // IP of the client (or of the proxy in front)
-        'session' => $request->cookie('session'),
+        'cart' => $request->cookie('cart'),      // the cart id, null on the first visit
     ]);
 });
 ```
@@ -66,11 +72,11 @@ The body is read completely before the handler runs (up to `--max-body`, default
 use Tenma\Http\{Request, Response};
 
 Tenma::serve(8080, fn (Request $request) => match ($request->path) {
-    '/' => Response::html('<form method="post" action="/login"><input name="user"><button>Log in</button></form>'),
-    '/login' => Response::redirect('/welcome', 303)
-        ->cookie('user', $request->form()['user'] ?? 'guest', expires: time() + 3600),
-    '/welcome' => Response::html('<p>Hello ' . htmlspecialchars($request->cookie('user') ?? 'stranger') . '</p>'),
-    '/api' => Response::json(['ok' => true])
+    '/checkout' => Response::html('<form method="post" action="/orders"><input name="name"><button>Reserve</button></form>'),
+    '/orders' => Response::redirect('/orders/thanks', 303)
+        ->cookie('customer', $request->form()['name'] ?? 'guest', expires: time() + 3600),
+    '/orders/thanks' => Response::html('<p>Thank you, ' . htmlspecialchars($request->cookie('customer') ?? 'guest') . '! Your order is reserved.</p>'),
+    '/v1/products' => Response::json([['slug' => 'croissant', 'priceCents' => 180]])
         ->header('cache-control', 'no-store')
         ->header('vary', 'cookie', append: true),
     default => new Response("Not found\n", 404),
@@ -91,21 +97,22 @@ Tenma::serve(8080, fn (Request $request) => match ($request->path) {
 
 use Tenma\Http\{Request, Response};
 
-$uploads = sys_get_temp_dir() . '/uploads';
-@mkdir($uploads);
+// The back office uploads a new picture for a product; they live in public/products
+$pictures = __DIR__ . '/public/products';
+@mkdir($pictures, recursive: true);
 
-Tenma::serve(8080, function (Request $request) use ($uploads) {
+Tenma::serve(8080, function (Request $request) use ($pictures) {
     if ($request->method === 'GET') {
         return Response::html('<form method="post" enctype="multipart/form-data">'
-            . '<input type="file" name="avatar"><button>Upload</button></form>');
+            . '<input type="file" name="picture" accept="image/svg+xml"><button>Upload</button></form>');
     }
-    $avatar = $request->files()['avatar'] ?? null;
-    if ($avatar === null || $avatar->size() === 0) {
+    $picture = $request->files()['picture'] ?? null;
+    if ($picture === null || $picture->size() === 0) {
         return new Response("No file\n", 422);
     }
-    $name = bin2hex(random_bytes(8)) . '.' . pathinfo($avatar->name, PATHINFO_EXTENSION);
-    $avatar->moveTo("$uploads/$name");   // writes without blocking the server
-    return Response::json(['stored' => $name, 'type' => $avatar->type, 'bytes' => $avatar->size()]);
+    $name = bin2hex(random_bytes(8)) . '.svg';
+    $picture->moveTo("$pictures/$name");   // writes without blocking the server
+    return Response::json(['stored' => $name, 'type' => $picture->type, 'bytes' => $picture->size()]);
 });
 ```
 
@@ -118,13 +125,14 @@ Tenma serves files itself, without calling PHP, when `static:` names them:
 ```php
 <?php
 
-Tenma::serve(8080, fn () => "the app\n", static: [
-    '/assets' => __DIR__ . '/public/assets',
-    '/favicon.ico' => __DIR__ . '/public/favicon.ico',
+Tenma::serve(8080, fn () => "the shop\n", static: [
+    '/products' => __DIR__ . '/public/products',
+    '/app.css' => __DIR__ . '/public/app.css',
+    '/favicon.svg' => __DIR__ . '/public/favicon.svg',
 ]);
 ```
 
-- Under a prefix (`/assets`), Tenma looks in the directory: `/assets/app.css` is `public/assets/app.css`. A single file matches only its exact path. The longest prefix wins.
+- Under a prefix (`/products`), Tenma looks in the directory: `/products/croissant.svg` is `public/products/croissant.svg`. A single file matches only its exact path. The longest prefix wins.
 - A request outside every prefix goes to the handler without touching the file system. A file that does not exist under a prefix goes to the handler too, so the app can answer the 404.
 - `static: __DIR__ . '/public'` is short for `['/' => __DIR__ . '/public']`. Then every GET is checked against the directory first, which costs PHP routes about a third of their throughput; prefixes are cheaper.
 - Files are sent with a `Content-Type` from their extension, `ETag` and `Last-Modified` (304 for a cached copy) and `Range` (206), in chunks. A directory answers with its `index.html`; one without a trailing `/` is redirected.
@@ -140,15 +148,17 @@ The script runs once, so variables, statics and objects live as long as the proc
 
 use Tenma\Http\Request;
 
-$cache = [];
+// Computed once per worker, then answered from memory
+$prices = [];
 
-Tenma::serve(8080, function (Request $request) use (&$cache) {
-    $key = $request->query['n'] ?? '30';
-    return $cache[$key] ??= (string) array_sum(range(1, (int) $key)) . "\n";
+Tenma::serve(8080, function (Request $request) use (&$prices) {
+    $loaves = max(1, (int) ($request->query['loaves'] ?? 1));
+    // ten percent off every fifth loaf
+    return $prices[$loaves] ??= sprintf("%.2f EUR\n", 4.20 * ($loaves - 0.1 * intdiv($loaves, 5)));
 });
 ```
 
-Many requests run at the same time in one process, so never keep the state of *one* request in a global, a static or a singleton, because another request would see it. Pass it along as an argument, or use [`AsyncLocal`](async.md#values-that-follow-a-request) for values that should follow a request into its tasks. With `--workers N`, each worker has its own copy of the state: see [Command line and deployment](deployment.md#workers).
+Many requests run at the same time in one process, so never keep the state of *one* request in a global, a static or a singleton, because another request would see it. Pass it along as an argument, or use [`AsyncLocal`](async.md#values-that-follow-a-request) for values that should follow a request into its tasks. The bakery keeps the last weather forecast and the public holidays in memory this way, refreshed by timers: see [background work](async.md#background-work). With `--workers N`, each worker has its own copy of the state: see [Command line and deployment](deployment.md#workers).
 
 ## Errors and limits
 

@@ -9,12 +9,13 @@ Some problems only show up when the code runs: a template that fails to compile,
 ```php
 <?php
 
-$templates = __DIR__ . '/templates';
+// The shop's views: views/Shop/Product.php, views/Backoffice/Board.php, …
+$views = __DIR__ . '/views';
 
-function checkTemplates(string $dir): array
+function checkViews(string $dir): array
 {
     $problems = [];
-    foreach (glob("$dir/*.php") as $file) {
+    foreach (glob("$dir/*/*.php") as $file) {
         foreach (file($file) as $index => $line) {
             if (preg_match('/\{\{\s*\}\}/', $line, $match, PREG_OFFSET_CAPTURE)) {
                 $problems[] = [
@@ -30,7 +31,7 @@ function checkTemplates(string $dir): array
     return $problems;
 }
 
-Tenma::diagnostics('templates', checkTemplates($templates));
+Tenma::diagnostics('views', checkViews($views));
 
 Tenma::serve(8080, fn () => "ok\n");
 ```
@@ -45,7 +46,7 @@ Each entry has:
 | `severity` | optional: `error` (default), `warning` or `info` |
 | `column` | optional: in bytes, from 1 |
 
-The first argument names the reporter (`'templates'`, `'waypoint-live'`, `'my-app:routes'`). A call replaces everything that reporter said before; an empty list clears it. Several reporters keep their own lists.
+The first argument names the reporter (`'views'`, `'waypoint-live'`, `'bakery:routes'`). A call replaces everything that reporter said before; an empty list clears it. Several reporters keep their own lists.
 
 ## How it reaches the editor
 
@@ -65,9 +66,10 @@ Errors of real requests can be reported too, so the editor shows where the last 
 
 use Tenma\Http\{Request, Response};
 
+// The price of one slice of the plum cake: /slice?slices=0 fails
 function handle(Request $request): Response
 {
-    return Response::json(['total' => intdiv(100, (int) ($request->query['n'] ?? 0))]);
+    return Response::json(['sliceCents' => intdiv(1680, (int) ($request->query['slices'] ?? 0))]);
 }
 
 Tenma::serve(8080, function (Request $request) {

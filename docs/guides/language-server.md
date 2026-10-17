@@ -33,13 +33,13 @@ A provider that throws is logged on stderr and left out; one that takes longer t
 
 ## Writing a provider
 
-A package names its provider class in its `composer.json`:
+A package names its provider class in its `composer.json`, and so can the project itself. Here the bakery adds one of its own:
 
 ```json
 {
-    "name": "acme/views",
-    "autoload": { "psr-4": { "Acme\\Views\\": "src/" } },
-    "extra": { "tenma": { "lsp": "Acme\\Views\\Editor" } }
+    "name": "systonia/waypoint-bakery",
+    "autoload": { "psr-4": { "Bakery\\": "src/" } },
+    "extra": { "tenma": { "lsp": "Bakery\\Editor" } }
 }
 ```
 
@@ -48,44 +48,48 @@ Providers come from the project's own `composer.json` and from every installed p
 ```php
 <?php
 
-namespace Acme\Views;
+namespace Bakery;
 
 use Tenma\Lsp\Provider;
 
-/** Templates in views/ run bound to their view class: views/cart.php belongs to Acme\Views\Cart. */
+/**
+ * Component templates run bound to their class: src/Components/OrderBoard.Template.php belongs to
+ * Bakery\Components\OrderBoard. Product pictures in templates (/products/croissant.svg) complete, lead F12 to
+ * the file in public/products and are flagged when the file is missing.
+ */
 final class Editor implements Provider
 {
     public function __construct(private string $root) {}
 
     public function thisClass(string $file): ?string
     {
-        if (!str_starts_with($file, "$this->root/views/")) {
+        if (!str_starts_with($file, "$this->root/src/Components/") || !str_ends_with($file, '.Template.php')) {
             return null;
         }
-        $class = 'Acme\\Views\\' . ucfirst(basename($file, '.php'));
+        $class = 'Bakery\\Components\\' . basename($file, '.Template.php');
         return class_exists($class) ? $class : null;
     }
 
     public function completions(string $file, string $text, int $offset): array
     {
-        // After @include(' offer the template names
-        if (!preg_match("/@include\\('[\\w-]*$/", substr($text, 0, $offset))) {
+        // After /products/ offer the pictures
+        if (!preg_match('#/products/[\w-]*$#', substr($text, 0, $offset))) {
             return [];
         }
         return array_map(
-            fn (string $path) => ['label' => basename($path, '.php'), 'kind' => 'value', 'detail' => 'template'],
-            glob("$this->root/views/*.php"),
+            fn (string $path) => ['label' => basename($path), 'kind' => 'value', 'detail' => 'product picture'],
+            glob("$this->root/public/products/*.svg"),
         );
     }
 
     public function definition(string $file, string $text, int $offset): ?array
     {
-        // F12 on @include('name') opens views/name.php
-        $start = strrpos(substr($text, 0, $offset), "@include('");
-        if ($start === false || !preg_match("/\\G@include\\('([\\w-]+)'\\)/", $text, $match, 0, $start)) {
+        // F12 on /products/croissant.svg opens public/products/croissant.svg
+        $start = strrpos(substr($text, 0, $offset), '/products/');
+        if ($start === false || !preg_match('#\G/products/([\w-]+\.svg)#', $text, $match, 0, $start)) {
             return null;
         }
-        $target = "$this->root/views/$match[1].php";
+        $target = "$this->root/public/products/$match[1]";
         return is_file($target) ? ['file' => $target, 'line' => 1] : null;
     }
 
@@ -93,14 +97,19 @@ final class Editor implements Provider
     {
         $problems = [];
         foreach (explode("\n", $text) as $index => $line) {
-            if (preg_match("/@include\\('([\\w-]+)'\\)/", $line, $match) && !is_file("$this->root/views/$match[1].php")) {
-                $problems[] = ['line' => $index + 1, 'message' => "no template views/$match[1].php", 'severity' => 'error'];
+            preg_match_all('#/products/([\w-]+\.svg)#', $line, $found);
+            foreach ($found[1] as $picture) {
+                if (!is_file("$this->root/public/products/$picture")) {
+                    $problems[] = ['line' => $index + 1, 'message' => "no picture public/products/$picture", 'severity' => 'error'];
+                }
             }
         }
         return $problems;
     }
 }
 ```
+
+In the bakery itself, Waypoint Live's provider binds the component templates this way, and Waypoint's binds the views; a project only writes a provider for what no package knows.
 
 The methods get absolute file paths, and `$text` is the editor's content, saved or not. Offsets and lengths count bytes.
 
@@ -117,7 +126,7 @@ When a provider names the class of a template, Tenma does the rest by reflection
 
 - completes `$this->` and `$this->prop->`, private members included (the template runs bound to the object),
 - shows type and doc comment on hover and jumps to the declaration with F12,
-- gives the variable of `foreach ($this->items as $item)` (also `@foreach`) the element type from the PHPDoc of `items` (`list<Item>`, `array<int, Item>` or `Item[]`), resolved through the class's `use` statements.
+- gives the variable of `foreach ($this->orders as $order)` (also `@foreach`) the element type from the PHPDoc of `orders` (`list<Order>`, `array<int, Order>` or `Order[]`), resolved through the class's `use` statements.
 - gives a variable assigned in the file the type of what is assigned: `$order = $this->order();` the method's return type, `$order = $this->order;` the property's type, `$order = new Order(...);` the class. The last assignment or foreach above the cursor counts, not one in a comment or string; F12 on the variable leads to it. This works in plain `<?php $order = …; ?>` blocks as well as in a template syntax's own blocks.
 
 ## Semantic tokens
@@ -127,7 +136,7 @@ A provider that also implements [`Tenma\Lsp\Tokens`](../reference/Tenma/Lsp/Toke
 ```php
 <?php
 
-namespace Acme\Views;
+namespace Bakery;
 
 use Tenma\Lsp\{Provider, Tokens};
 
@@ -144,7 +153,7 @@ final class Highlighter implements Provider, Tokens
     {
         $tokens = [];
         foreach (explode("\n", $text) as $index => $line) {
-            preg_match_all('/@(?:if|else|endif|foreach|endforeach|include)\b/', $line, $found, PREG_OFFSET_CAPTURE);
+            preg_match_all('/@(?:if|elseif|else|endif|foreach|endforeach|code|endcode|section|endsection|yield|use|model)\b/', $line, $found, PREG_OFFSET_CAPTURE);
             foreach ($found[0] as [$word, $column]) {
                 $tokens[] = ['line' => $index + 1, 'column' => $column, 'length' => strlen($word), 'type' => 'keyword'];
             }
@@ -163,7 +172,7 @@ A template has no `use` statements of its own, so `OrderStatus::` in it would co
 ```php
 <?php
 
-namespace Acme\Views;
+namespace Bakery;
 
 use Tenma\Lsp\{Imports, Provider};
 
@@ -177,7 +186,7 @@ final class Editor implements Provider, Imports
         if ($class === null) {
             return [];
         }
-        // views/cart.php sees what src/Cart.php imports, and its namespace
+        // OrderBoard.Template.php sees what OrderBoard.php imports, and its namespace
         $source = (string) file_get_contents((new \ReflectionClass($class))->getFileName());
         preg_match_all('/^use\s+([\w\\\\]+)(?:\s+as\s+(\w+))?;/m', $source, $uses, PREG_SET_ORDER);
         $imports = ['' => (new \ReflectionClass($class))->getNamespaceName()];
@@ -200,7 +209,7 @@ A template often gets more than `$this`: a model, say, as `$model`. A provider t
 ```php
 <?php
 
-namespace Acme\Views;
+namespace Bakery;
 
 use Tenma\Lsp\{Provider, Variables};
 
@@ -210,26 +219,25 @@ final class Editor implements Provider, Variables
 
     public function variables(string $file, string $text): array
     {
-        // views/cart.php renders a Cart as $cart
-        return str_ends_with($file, '/views/cart.php') ? ['cart' => \Acme\Shop\Cart::class] : [];
+        // views/Shop/Product.php renders a ProductPage as $model
+        return str_ends_with($file, '/views/Shop/Product.php') ? ['model' => \Bakery\Models\ProductPage::class] : [];
     }
 }
 ```
 
-`variables($file, $text)` returns variable name (without `$`) => fully qualified class name; a class that does not exist is left out. Tenma then treats such a variable as it treats `$this`: it completes `$cart->`, `$cart->owner->` and `$cart->first()->` (public members), shows hover on the variable and its members, leads F12 to the declaration, gives `@foreach ($cart->items as $item)` the element type of `items` and `$owner = $cart->owner;` the type of `owner`. A file a provider types variables in counts as bound even without `thisClass()`. A `this` entry stands in for `thisClass()` when that returns `null`.
+`variables($file, $text)` returns variable name (without `$`) => fully qualified class name; a class that does not exist is left out. Tenma then treats such a variable as it treats `$this`: it completes `$model->` and `$model->product->` (public members), shows hover on the variable and its members, leads F12 to the declaration, gives `@foreach ($model->closed as $date => $holiday)` the element type of `closed` and `$product = $model->product;` the type of `product`. A file a provider types variables in counts as bound even without `thisClass()`. A `this` entry stands in for `thisClass()` when that returns `null`. Waypoint's provider does this for every view from its `@model` line.
 
 The rule when both type a name: below an assignment or a loop in the file that introduces it, the file's own typing wins; above, the provider's. When several providers name the same variable, the first one wins.
 
 ## Elements
 
-Tenma reads the element type of an array member from its PHPDoc (`@var list<Item>`, `@return Item[]`). A package that documents it another way, with attributes say, tells Tenma through [`Tenma\Lsp\Elements`](../reference/Tenma/Lsp/Elements.md):
+Tenma reads the element type of an array member from its PHPDoc (`@var list<OrderLine>`, `@return OrderLine[]`). A package that documents it another way, with attributes say, tells Tenma through [`Tenma\Lsp\Elements`](../reference/Tenma/Lsp/Elements.md). The bakery's `Order` names the class of its lines with Waypoint's `#[ListOf(OrderLine::class)]`, and Waypoint's provider reads it, shortened:
 
 ```php
 <?php
 
-namespace Acme\Views;
-
 use Tenma\Lsp\{Elements, Provider};
+use Waypoint\Attributes\ListOf;
 
 final class Editor implements Provider, Elements
 {
@@ -238,18 +246,13 @@ final class Editor implements Provider, Elements
     public function elements(string $class): array
     {
         $elements = [];
-        $reflection = new \ReflectionClass($class);
-        foreach ($reflection->getProperties() as $property) {
-            foreach ($property->getAttributes(\Acme\Of::class) as $of) {
-                $elements[$property->getName()] = $of->newInstance()->class;
+        foreach (new \ReflectionClass($class)->getProperties() as $property) {
+            foreach ($property->getAttributes(ListOf::class) as $listOf) {
+                $elements[$property->getName()] = $listOf->newInstance()->type;
             }
         }
-        foreach ($reflection->getMethods() as $method) {
-            foreach ($method->getAttributes(\Acme\Of::class) as $of) {
-                $elements[$method->getName() . '()'] = $of->newInstance()->class;
-            }
-        }
-        return $elements;
+        // int, string, …: no class to complete
+        return array_filter($elements, fn (string $type) => class_exists($type));
     }
 }
 ```

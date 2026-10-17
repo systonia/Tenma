@@ -13,7 +13,7 @@ final class Postgres
 
 Postgres, asynchronous: while a query runs, only this request's Fiber waits.
 Placeholders $1, $2, … as in Postgres; parameters are sent as text, the server determines the type.
-Only in Tenma::serve() handlers.
+Only in asynchronous code (handlers, tasks, timers); at script startup, wrap queries in Tenma::async().
 
 ## Methods
 

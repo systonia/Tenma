@@ -4,19 +4,18 @@
 
 PHP as a long-running process: one process runs the script once and then serves requests continuously on a thread with an event loop. In-memory state persists between requests.
 
-The [documentation](docs/index.md) has a [guide](docs/guides/index.md) per feature with runnable examples, and a [reference](docs/reference/index.md) of every class and method. This README is the overview.
+The [documentation](docs/index.md) has a [guide](docs/guides/index.md) per feature with runnable examples, and a [reference](docs/reference/index.md) of every class and method. This README is the overview. The examples come from Sonnenkorn, a made-up bakery whose online shop, [Waypoint-Bakery](https://github.com/systonia/Waypoint-Bakery), runs on Tenma.
 
 ```php
-Tenma::serve(8080, fn (Tenma\Http\Request $request) => "Hello World\n");
+Tenma::serve(8080, fn (Tenma\Http\Request $request) => "Sonnenkorn is open\n");
 ```
 
 Asynchronous without `await`: every request runs in its own fiber. `Tenma::sleep()` and `Tenma::fetch()` suspend only that fiber; meanwhile the event loop serves other requests.
 
 ```php
-
 Tenma::serve(8080, function () {
-    $weather = Tenma::fetch('https://wttr.in/München?format=3');   // does not block the server
-    Tenma::sleep(0.2);                                         // neither does this
+    $weather = Tenma::fetch('https://api.open-meteo.com/v1/forecast?latitude=47.99&longitude=7.85&current=temperature_2m');   // does not block the server
+    Tenma::sleep(0.2);                                                    // neither does this
     return $weather->body;
 });
 ```
@@ -24,20 +23,22 @@ Tenma::serve(8080, function () {
 Several things at once: `Tenma::all()` starts each function in its own fiber and returns the results under the same keys. `Tenma::async()` starts one and returns a `Task` whose `await()` later fetches the result or throws the error. If a function in `all()` fails, `all()` cancels the others (`Tenma\Cancelled` is thrown where they are currently waiting, and their `finally` and `catch` blocks run), waits until they have cleaned up, and then throws the first error: nothing is left running in the background. `$task->cancel()` cancels a specific task. Tasks, timers and subscriptions belong to their request: when the response is out (for a stream or WebSocket, when it ends), when the client leaves or when the request calls `exit()`, they are cancelled, a task that caught an earlier `cancel()` too; what their cleanup starts after that is cancelled at its first wait. Work that has to outlive the response goes in `Tenma::detach()`.
 
 ```php
-['user' => $user, 'weather' => $weather] = Tenma::all(
-    user: fn () => $db->first('SELECT * FROM users WHERE id = $1', [$id]),
-    weather: fn () => Tenma::fetch('https://wttr.in/?format=3')->body,
+// The product page: the product from Postgres and the forecast from a web service, at once
+['product' => $product, 'weather' => $weather] = Tenma::all(
+    product: fn () => $db->first('SELECT * FROM products WHERE slug = $1', [$slug]),
+    weather: fn () => Tenma::fetch($forecastUrl, timeout: 2.5)->json(),
 );
-$report = Tenma::async(fn () => Tenma::fetch($url));
+$holidays = Tenma::async(fn () => Tenma::fetch('https://date.nager.at/api/v3/NextPublicHolidays/DE'));
 // … do something else …
-$response = $report->await();
+$closed = $holidays->await()->json();
 ```
 
-Timers and background work: `Tenma::setTimeout()` and `Tenma::setInterval()` return a `Timer` with `cancel()`; their callback runs in its own fiber. Timers and `Tenma::async()` work scheduled at script startup start as soon as the event loop is running. A script without a server runs until no timers or ops are pending; an interval keeps it alive. `exit()` outside a request (in the script, in timers, in background work) terminates tenma with its status, including a server; a `die()` during startup prevents scheduled work from starting at all. A fatal error in startup work terminates tenma with 255. With several workers, each worker schedules its own timers and background work, including after every restart: shared jobs belong in a separate process or behind a lock in Redis.
+Timers and background work: `Tenma::setTimeout()` and `Tenma::setInterval()` return a `Timer` with `cancel()`; their callback runs in its own fiber. Timers and `Tenma::async()` work scheduled at script startup start as soon as the event loop is running. A script without a server runs until no timers or ops are pending; an interval keeps it alive. `exit()` outside a request (in the script, in timers, in background work) terminates tenma with its status, including a server; a `die()` during startup prevents scheduled work from starting at all. A fatal error in startup work terminates tenma with 255. With several workers, each worker schedules its own timers and background work, including after every restart: shared jobs belong in a separate process, behind a lock in Redis, or in one SQL statement that claims its run.
 
 ```php
-Tenma::setInterval(fn () => $cache->command('INCR', 'heartbeat'), 1.0);
-Tenma::async(fn () => warmUpCaches());   // runs in the background as soon as the server starts
+// From the bakery's index.php: the weather forecast in this worker's memory, so the product page never waits for it
+Tenma::async($lastKnown->refreshWeather(...));            // runs in the background as soon as the server starts
+Tenma::setInterval($lastKnown->refreshWeather(...), 900);  // then every 15 minutes
 ```
 
 Asynchronous files: `Tenma\Fs::readFile()`, `writeFile()`, `appendFile()`, `exists()`, `stat()`, `readDir()`, `mkdir()`, `rename()`, `copy()`, `remove()`, `removeDir()`. The work runs on background threads and only the fiber waits; `file_get_contents` and friends, by contrast, block the worker. Paths behave as with PHP's file functions: relative to `chdir()`, `open_basedir` applies, null bytes are rejected, bytes are passed through unchanged. Errors throw `RuntimeException` with errno as the code. A running file op cannot be cancelled; it runs to completion. As in PHP, `mkdir()` is only recursive with `recursive: true`, `rename()` also works across file system boundaries, and `copy()` onto itself is an error. Results that no longer fit within `memory_limit` become an error in the request instead of a fatal error.
@@ -47,16 +48,16 @@ Asynchronous databases in fiber mode: Postgres and Redis. While a query runs, on
 ```php
 use Tenma\Db\{Postgres, Redis};
 
-$db = Postgres::connect('postgres://app@localhost/app');
+$db = Postgres::connect('postgres://localhost/bakery');
 $cache = Redis::connect('redis://127.0.0.1:6379');
 
 Tenma::serve(8080, function ($request) use ($db, $cache) {
-    $user = $db->first('SELECT * FROM users WHERE id = $1', [$request->query['id']]);
-    $db->transaction(function (Postgres $tx) use ($user) {
-        $tx->execute('UPDATE users SET visits = visits + 1 WHERE id = $1', [$user['id']]);
+    $product = $db->first('SELECT * FROM products WHERE slug = $1', [$request->query['slug'] ?? 'croissant']);
+    $db->transaction(function (Postgres $tx) use ($product) {
+        $tx->execute('UPDATE products SET stock = stock - 1 WHERE id = $1 AND stock > 0', [$product['id']]);
     });
-    $cache->command('INCR', 'visits');
-    return Response::json($user);
+    $cache->command('INCR', 'orders:today');
+    return Response::json($product);
 });
 ```
 
@@ -68,9 +69,9 @@ Redis has one connection per worker and URL, shared by all its fibers, so `comma
 
 ```php
 Tenma::serve(8080, function (Request $request) {
-    $avatar = $request->files()['avatar'] ?? null;
-    $avatar?->moveTo('/srv/uploads/' . bin2hex(random_bytes(8)));
-    return Response::redirect('/profile', 303)->cookie('notice', 'saved', expires: time() + 60);
+    $picture = $request->files()['picture'] ?? null;
+    $picture?->moveTo(__DIR__ . '/public/products/' . bin2hex(random_bytes(8)) . '.svg');
+    return Response::redirect('/backoffice/stock', 303)->cookie('notice', 'saved', expires: time() + 60);
 });
 ```
 
@@ -78,8 +79,8 @@ tenma serves static files itself, without PHP:
 
 ```php
 Tenma::serve(8080, $handler, static: [
-    '/assets' => __DIR__ . '/public/assets',
-    '/favicon.ico' => __DIR__ . '/public/favicon.ico',
+    '/products' => __DIR__ . '/public/products',
+    '/favicon.svg' => __DIR__ . '/public/favicon.svg',
 ]);
 ```
 
@@ -104,20 +105,20 @@ Streaming, server-sent events and WebSockets in fiber mode: the headers go out i
 use Tenma\Http\{EventStream, Response, Stream, WebSocket};
 
 Tenma::serve(8080, fn ($request) => match ($request->path) {
-    '/download' => Response::stream(function (Stream $out) {
-        foreach (readRows() as $row) {
-            $out->write(json_encode($row) . "\n");
+    '/orders.ndjson' => Response::stream(function (Stream $out) use ($orders) {
+        foreach ($orders->open() as $order) {
+            $out->write(json_encode($order) . "\n");
         }
     }),
-    '/ticker' => Response::events(function (EventStream $events) {
+    '/stock' => Response::events(function (EventStream $events) use ($db) {
         while (true) {
-            $events->send(json_encode(['time' => date('H:i:s')]), event: 'tick');
+            $events->send(json_encode($db->query('SELECT slug, stock FROM products')), event: 'stock');
             Tenma::sleep(1);
         }
     }),
-    '/chat' => Response::websocket(function (WebSocket $socket) {
+    '/board' => Response::websocket(function (WebSocket $socket) {
         while (($message = $socket->receive()) !== null) {   // waits without blocking
-            $socket->send("echo: $message");
+            $socket->send("noted: $message");
         }
     }),
 });
@@ -134,26 +135,26 @@ Tenma::serveClassic(8080, fn () => $app->handleHttp());
 Waypoint itself no longer needs classic mode: the app is itself a handler, `Tenma::serve(8080, $app)` runs in fiber mode, with request ID and CSRF token in `Tenma\AsyncLocal`. The demo runs this way too, with the same throughput as via `serveClassic()` (about 43,000 requests per second with one worker, `ab -k`, 50 connections) and byte-for-byte identical responses.
 
 ```
-tenma app.php                    # one worker: one thread, one shared state
+tenma index.php                  # one worker: one thread, one shared state
 tenma --version                  # tenma 0.1.18 (PHP 8.5.9)
-tenma --watch app.php            # reload when a file the script loaded changes
-tenma --inspect app.php          # debugger (DAP) on 127.0.0.1:9229
-tenma --inspect-wait app.php     # wait until the debugger has set its breakpoints
-tenma --inspect-brk app.php      # wait for the debugger, stop at the script's first line
+tenma --watch index.php          # reload when a file the script loaded changes
+tenma --inspect index.php        # debugger (DAP) on 127.0.0.1:9229
+tenma --inspect-wait index.php   # wait until the debugger has set its breakpoints
+tenma --inspect-brk index.php    # wait for the debugger, stop at the script's first line
 tenma build                      # run the hooks of tenma.dev.php once (CI, Dockerfile)
 tenma lsp                        # language server for editors, on stdin and stdout
 tenma docs src/                  # Markdown reference pages for the classes in src/, into docs/reference
-tenma --workers 4 app.php        # four workers, each with its own PHP interpreter and its own state
-tenma --workers auto app.php     # one worker per core
-tenma --max-body 50m app.php     # largest request body, default 10m, 413 above that
-tenma --max-requests 10000 app.php  # worker restarts its interpreter after N requests
-tenma --db-pool 20 app.php       # at most 20 Postgres connections per worker and URL
-tenma --pubsub redis://cache app.php   # Tenma::publish() reaches every process on that Redis
-tenma tasks.php import --force   # everything after the script ends up in $argv, as with php
-tenma -d memory_limit=512M -c prod.ini app.php   # PHP settings as with php -d and php -c
-tenma --server-name shop.example app.php         # $_SERVER['SERVER_NAME'], never taken from the Host header
-tenma --request-timeout 10 app.php               # headers and body must arrive within 10 s (default 30)
-tenma --max-connections 4096 app.php             # open connections per worker, default 1024, 503 above that
+tenma --workers 4 index.php      # four workers, each with its own PHP interpreter and its own state
+tenma --workers auto index.php   # one worker per core
+tenma --max-body 50m index.php   # largest request body, default 10m, 413 above that
+tenma --max-requests 10000 index.php  # worker restarts its interpreter after N requests
+tenma --db-pool 20 index.php     # at most 20 Postgres connections per worker and URL
+tenma --pubsub redis://cache index.php   # Tenma::publish() reaches every process on that Redis
+tenma index.php db:migrate       # everything after the script ends up in $argv, as with php
+tenma -d memory_limit=512M -c prod.ini index.php   # PHP settings as with php -d and php -c
+tenma --server-name sonnenkorn.test index.php     # $_SERVER['SERVER_NAME'], never taken from the Host header
+tenma --request-timeout 10 index.php             # headers and body must arrive within 10 s (default 30)
+tenma --max-connections 4096 index.php           # open connections per worker, default 1024, 503 above that
 ```
 
 Limits: a request's headers and body must arrive within `--request-timeout` (otherwise disconnect or 408, against Slowloris), and a write to a client may stall no longer than that: a client that stops reading is disconnected, and a stream writer or `WebSocket::send()` waiting for it gets `ConnectionClosed`. Each worker holds at most `--max-connections` open connections; more get a 503 right away. Bodies and WebSocket messages are at most `--max-body` in size. A WebSocket client may send at most 256 messages, and at most `--max-body` bytes in all, that PHP has not read yet, then tenma disconnects it. `Tenma::fetch()` has a `timeout` (default 30 s); connections to Postgres, Redis and via `Tenma::fetch()` must be established within 10 s.
@@ -166,16 +167,21 @@ Build steps for `--watch` (CSS, bundles, caches) come from a `tenma.dev.php` nex
 
 ```php
 <?php
+// The bakery's tenma.dev.php, and a second hook
 return [
     // A command: its own process, no shell, in this directory; output prefixed with [css]
     new Tenma\Hook(
-        inputs: ['templates/**/*.php', 'assets/app.css'],
+        inputs: ['assets/app.css', 'views/**/*.php', 'src/**/*.php'],
         outputs: ['public/app.css'],
-        run: ['vendor/bin/tailwindcss', '-i', 'assets/app.css', '-o', 'public/app.css'],
+        run: ['tailwindcss', '-i', 'assets/app.css', '-o', 'public/app.css', '--minify'],
         name: 'css',
     ),
     // PHP: gets the changed paths (empty on the first run), may await Tenma's async functions
-    new Tenma\Hook(inputs: ['src/Routes/**/*.php'], outputs: ['var/routes.php'], run: fn (array $changed) => RouteCache::write()),
+    new Tenma\Hook(
+        inputs: ['public/products/*.svg'],
+        outputs: ['var/pictures.php'],
+        run: fn (array $changed) => PictureList::write(),
+    ),
 ];
 ```
 
@@ -183,7 +189,7 @@ A hook runs once at startup, before the first request, and again when a file mat
 
 `.tenma-ignore` next to `tenma.dev.php` lists what below the hooks' directories is no input, so a glob like `**/*.php` neither triggers on nor reads every file in `vendor/`. One entry per line, `#` for comments: with a slash a path in the project (`storage/cache`), without one any file or directory name (`node_modules`, `*.log`). Without the file, `.git`, `node_modules` and `vendor` are left out. A changed `.tenma-ignore` reloads the hooks.
 
-`--inspect` starts a debugger that speaks the Debug Adapter Protocol: connect Neovim (`nvim-dap`), Zed, Helix or Emacs (`dape`) as a DAP server on `127.0.0.1:9229` (`--inspect=9230` or `--inspect=host:port` for another address; one reachable from the network gets a warning, a debugger can run any code). VS Code needs the extension [Tenma-VSCode](https://github.com/systonia/Tenma-VSCode): it starts the script on F5 or attaches to a running `--inspect`. Line breakpoints (one on a line without its own statement, such as a method's head or inside a `return [` over several lines, moves to the next statement; one on a function's closing brace stops whenever it returns, with the return value among the variables, and a step stops there too), also with a condition, a hit count (`5`, `>= 5`, `% 3`) or as logpoints (`{expression}` in the message), and `Tenma::debugger()` in the code (without an editor it does nothing), continue, step over, in and out, the stack and the variables of each frame, arrays and objects expandable. Watch expressions, hovers and the debug console evaluate PHP in the selected frame of the stopped request, with its variables and `$this`; the console also runs statements. Variables, array elements and properties can be changed: a shared array is copied first, as PHP would, and property types and `readonly` apply. Evaluated code cannot wait (`Tenma::sleep()` throws a `FiberError` there), its exceptions come back as errors, and after a fatal error in it the worker restarts once it runs on. `echo` and the error log also appear in the debug console. Every request, timer and `Tenma::async()` task is a thread of its own: while stopped, the editor lists them, named after method and URI, and shows where each waiting one waits. A step stays in its request: stepping over `Tenma::sleep()` or a query lets other requests run meanwhile and stops at the next line of the same one. Exceptions the app does not catch stop where they are thrown, with the frames still alive (the filter "All exceptions" also stops at caught ones; a condition on either filter limits it to classes, e.g. `RuntimeException, App\NotFound`, subclasses included). A stopped request stops its worker, with its other requests and timers. `--inspect` runs one worker and without opcache; Tenma's standard library is never stepped into. With `--watch` the editor stays connected across reloads and the breakpoints keep applying; a change while stopped reloads after continuing. `--inspect-wait` waits until the editor has set its breakpoints, so they apply from the script's first statement on; `--inspect-brk` also stops there. The editor's `stopOnEntry` overrides both, as in a VS Code `launch.json`.
+`--inspect` starts a debugger that speaks the Debug Adapter Protocol: connect Neovim (`nvim-dap`), Zed, Helix or Emacs (`dape`) as a DAP server on `127.0.0.1:9229` (`--inspect=9230` or `--inspect=host:port` for another address; one reachable from the network gets a warning, a debugger can run any code). VS Code needs the extension [Tenma-VSCode](https://github.com/systonia/Tenma-VSCode): it starts the script on F5 or attaches to a running `--inspect`. Line breakpoints (one on a line without its own statement, such as a method's head or inside a `return [` over several lines, moves to the next statement; one on a function's closing brace stops whenever it returns, with the return value among the variables, and a step stops there too), also with a condition, a hit count (`5`, `>= 5`, `% 3`) or as logpoints (`{expression}` in the message), and `Tenma::debugger()` in the code (without an editor it does nothing), continue, step over, in and out, the stack and the variables of each frame, arrays and objects expandable. Watch expressions, hovers and the debug console evaluate PHP in the selected frame of the stopped request, with its variables and `$this`; the console also runs statements. Variables, array elements and properties can be changed: a shared array is copied first, as PHP would, and property types and `readonly` apply. Evaluated code cannot wait (`Tenma::sleep()` throws a `FiberError` there), its exceptions come back as errors, and after a fatal error in it the worker restarts once it runs on. `echo` and the error log also appear in the debug console. Every request, timer and `Tenma::async()` task is a thread of its own: while stopped, the editor lists them, named after method and URI, and shows where each waiting one waits. A step stays in its request: stepping over `Tenma::sleep()` or a query lets other requests run meanwhile and stops at the next line of the same one. Exceptions the app does not catch stop where they are thrown, with the frames still alive (the filter "All exceptions" also stops at caught ones; a condition on either filter limits it to classes, e.g. `DomainException, Bakery\Models\OutOfStock`, subclasses included). A stopped request stops its worker, with its other requests and timers. `--inspect` runs one worker and without opcache; Tenma's standard library is never stepped into. With `--watch` the editor stays connected across reloads and the breakpoints keep applying; a change while stopped reloads after continuing. `--inspect-wait` waits until the editor has set its breakpoints, so they apply from the script's first statement on; `--inspect-brk` also stops there. The editor's `stopOnEntry` overrides both, as in a VS Code `launch.json`.
 
 With several workers, the script runs once per worker, and each has its own memory: an in-memory counter or cache exists per worker. Shared state then belongs in a database or Redis.
 

@@ -26,7 +26,7 @@ Both keep the app booted between requests: the script runs once, so autoloading,
 
 require __DIR__ . '/vendor/autoload.php';
 
-$app = require __DIR__ . '/bootstrap/app.php';   // built once, at startup
+$app = require __DIR__ . '/app.php';   // built once, at startup
 
 Tenma::serveClassic(8080, function (string $rawBody) use ($app) {
     $app->handleHttp();   // reads the superglobals, calls header() and echo as usual
@@ -42,19 +42,19 @@ $started = date('H:i:s');
 
 Tenma::serveClassic(8080, function () use ($started) {
     session_start();
-    $_SESSION['visits'] = ($_SESSION['visits'] ?? 0) + 1;
+    $_SESSION['croissants'] = ($_SESSION['croissants'] ?? 0) + (int) ($_GET['add'] ?? 0);
 
     if (($_GET['format'] ?? '') === 'json') {
         header('Content-Type: application/json');
-        echo json_encode(['visits' => $_SESSION['visits'], 'booted' => $started]);
+        echo json_encode(['croissants' => $_SESSION['croissants'], 'booted' => $started]);
         return;
     }
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         http_response_code(201);
-        echo 'You sent: ', htmlspecialchars($_POST['name'] ?? ''), "\n";
+        echo 'Order for ', htmlspecialchars($_POST['name'] ?? ''), " reserved.\n";
         exit;   // ends only this request
     }
-    echo "Visit {$_SESSION['visits']} in this session; the app booted at $started.\n";
+    echo "{$_SESSION['croissants']} croissants in your cart; the shop booted at $started.\n";
 });
 ```
 
@@ -88,6 +88,6 @@ A PSR-15 app runs in fiber mode through [tenma/psr](https://github.com/systonia/
 Tenma::serve(3000, Tenma\Psr\Psr::handler($app, new Nyholm\Psr7\Factory\Psr17Factory()));
 ```
 
-A framework can also be a handler itself: [Waypoint](https://github.com/systonia/Waypoint) apps run with `Tenma::serve(8080, $app)`.
+A framework can also be a handler itself: [Waypoint](https://github.com/systonia/Waypoint) apps run with `Tenma::serve(8080, $app)`. The [bakery](https://github.com/systonia/Waypoint-Bakery) is one, in fiber mode: its product page waits for Postgres and two web services at once, and its order board is a WebSocket per tab.
 
 See also: [`Tenma::serveClassic()`](../reference/Tenma.md#serveclassic), [`Tenma::serve()`](../reference/Tenma.md#serve), [Serving HTTP](http.md).

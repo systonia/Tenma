@@ -29,24 +29,30 @@ Check it with `tenma --version`, which prints the Tenma and PHP versions.
 
 ## A first app
 
-Save this as `app.php`:
+Save this as `app.php`, a first sketch of Sonnenkorn, a made-up bakery that takes orders online:
 
 ```php
 <?php
 
 use Tenma\Http\{Request, Response};
 
-$visits = 0;   // lives as long as the process: shared by every request
+$croissants = 24;   // lives as long as the process: shared by every request
 
-Tenma::serve(8080, function (Request $request) use (&$visits) {
-    $visits++;
+Tenma::serve(8080, function (Request $request) use (&$croissants) {
     return match ($request->path) {
-        '/' => Response::html("<h1>Hello</h1><p>Visit number $visits.</p>"),
-        '/slow' => (function () {
-            Tenma::sleep(1);   // suspends this request only; others keep being served
-            return "done\n";
+        '/' => Response::html("<h1>Sonnenkorn</h1><p>$croissants croissants left today.</p>"),
+        '/reserve' => (function () use (&$croissants) {
+            if ($croissants === 0) {
+                return new Response("Sold out\n", 409);
+            }
+            $croissants--;
+            return "Reserved one. $croissants left.\n";
         })(),
-        '/api/time' => Response::json(['time' => date(DATE_ATOM)]),
+        '/oven' => (function () {
+            Tenma::sleep(1);   // suspends this request only; others keep being served
+            return "Fresh from the oven\n";
+        })(),
+        '/api/stock' => Response::json(['croissant' => $croissants]),
         default => new Response("Not found\n", 404),
     };
 });
@@ -60,7 +66,7 @@ Run it:
 tenma app.php
 ```
 
-The script runs once: it registers the server and prints the line, then Tenma opens the port. `curl localhost:8080` counts up on every call, because `$visits` lives in the process. Ten parallel calls to `/slow` all finish after about one second: each waits in its own fiber.
+The script runs once: it registers the server and prints the line, then Tenma opens the port. `curl localhost:8080/reserve` counts down on every call, because `$croissants` lives in the process. Ten parallel calls to `/oven` all finish after about one second: each waits in its own fiber.
 
 During development, `tenma --watch app.php` restarts the PHP side whenever a file the script loaded changes, without closing the port.
 
@@ -68,5 +74,7 @@ During development, `tenma --watch app.php` restarts the PHP side whenever a fil
 
 - **[Guides](guides/index.md)** explain one feature each, with code you can run: serving HTTP, asynchronous work, streams, WebSockets, databases, files, development tools, deployment.
 - **[Reference](reference/index.md)** has one page per class of Tenma's PHP API, generated from the code with `tenma docs`: every method with its signature, parameters and return value.
+
+The examples follow that bakery. Its complete shop, [Waypoint-Bakery](https://github.com/systonia/Waypoint-Bakery), runs on Tenma: the product page asks Postgres and two web services at once, timers keep the weather in the worker's memory, and the order board follows every change through `Tenma::publish()`. Where a guide quotes it, it names the file.
 
 Start with [Serving HTTP](guides/http.md) and [Fibers and asynchronous work](guides/async.md); they cover what every Tenma app uses. [Classic mode and fiber mode](guides/classic-mode.md) explains how to run an existing framework that relies on `$_GET`, `header()` and `echo`.

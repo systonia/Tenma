@@ -7,9 +7,10 @@ Run a script with `tenma app.php`. A script that calls `Tenma::serve()` becomes 
 ```php
 use Tenma\Http\{Request, Response};
 
+// A bakery's product page with the week's forecast
 Tenma::serve(8080, function (Request $request) {
-    $weather = Tenma::fetch('https://wttr.in/?format=3');   // suspends this request only
-    return Response::json(['path' => $request->path, 'weather' => $weather->body]);
+    $weather = Tenma::fetch('https://api.open-meteo.com/v1/forecast?latitude=47.99&longitude=7.85&daily=temperature_2m_max');   // suspends this request only
+    return Response::json(['path' => $request->path, 'weather' => $weather->json()]);
 });
 ```
 
@@ -61,6 +62,7 @@ CLI: `tenma app.php`, `--watch`, `--inspect` (a DAP debugger on 127.0.0.1:9229),
 - [tenma/psr](https://github.com/systonia/Tenma-PSR): runs any PSR-15 app under Tenma with `Tenma::serve(3000, Tenma\Psr\Psr::handler($app, new Psr17Factory()))`. WebSockets and streams go out through `Tenma\Psr\Upgrade`
 - [Waypoint](https://github.com/systonia/Waypoint): a PHP framework that is itself a Tenma handler, with `Tenma::serve(8080, $app)`, and that hands requests over to WebSockets and streams with `Response::upgrade()`
 - [Waypoint Live](https://github.com/systonia/Waypoint-Live): live components for Waypoint: state stays on the server, events and updates travel over one WebSocket, running under Tenma
+- [Waypoint-Bakery](https://github.com/systonia/Waypoint-Bakery): the example app the docs quote, a bakery's shop with `Tenma::all()` on the product page, timers that keep web service answers in worker memory, an order board across workers through `Tenma::publish()`, and Postgres migrations as `tenma index.php db:migrate`
 
 ## Optional
 

@@ -16,7 +16,7 @@ In order of precedence, the last one wins:
 4. `ini_set()` in the script. In classic mode, what a request changes with `ini_set()` or `set_time_limit()` is reset after the request to the state after script startup.
 
 ```bash
-tenma -c /etc/shop/php.ini -d memory_limit=512M -d date.timezone=Europe/Berlin app.php
+tenma -c /etc/bakery/php.ini -d memory_limit=512M -d date.timezone=Europe/Berlin index.php
 ```
 
 `php_ini_loaded_file()` tells which file was read.
@@ -66,16 +66,16 @@ Apart from `PHPRC` for the php.ini, Tenma's own behaviour is set by command-line
 <?php
 
 $port = (int) (getenv('PORT') ?: 8080);
-$db = Tenma\Db\Postgres::connect(getenv('DATABASE_URL') ?: 'postgres://app@localhost/app');
-$debug = getenv('APP_DEBUG') === '1';
+$db = Tenma\Db\Postgres::connect(getenv('DATABASE_URL') ?: 'postgres://localhost/bakery');
+$production = getenv('APP_ENV') === 'production';
 
-Tenma::serve($port, fn () => $debug ? "debug mode\n" : "ok\n");
+Tenma::serve($port, fn () => $production ? "Sonnenkorn\n" : "Sonnenkorn (development)\n");
 ```
 
 The script reads them once at startup; changing them needs a restart.
 
 ## Settings per request
 
-In fiber mode many requests share one interpreter at the same time, so `ini_set()` inside a handler changes the setting for every request of that worker. Set what you need at script startup. `date_default_timezone_set()`, `setlocale()` and `mb_internal_encoding()` are just as global.
+In fiber mode many requests share one interpreter at the same time, so `ini_set()` inside a handler changes the setting for every request of that worker. Set what you need at script startup. `date_default_timezone_set()`, `setlocale()` and `mb_internal_encoding()` are just as global: the bakery sets its time zone once in `app.php` (`date_default_timezone_set($env->string('BAKERY_TIMEZONE', 'Europe/Berlin'))`), and every pickup day is computed in it.
 
 See also: [Command line and deployment](deployment.md), [Classic mode](classic-mode.md).

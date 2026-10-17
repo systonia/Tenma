@@ -8,7 +8,7 @@ order: 105
 
 ```bash
 tenma docs src/                         # into docs/reference
-tenma docs src/ lib/Legacy.php --out site/api
+tenma docs src/ lib/Printer.php --out site/api
 tenma docs                              # Tenma's own built-in API
 ```
 
@@ -16,44 +16,44 @@ Paths are PHP files or directories; inside directories, `vendor`, `node_modules`
 
 ## What a page contains
 
-For `src/Shop/Cart.php` declaring `Acme\Shop\Cart`, the page is `docs/reference/Acme/Shop/Cart.md`:
+For `src/Services/Cart.php` declaring `Bakery\Services\Cart`, the page is `docs/reference/Bakery/Services/Cart.md`:
 
 ````markdown
 ---
 title: "Cart"
-description: "A shopping cart."
+description: "A browser's cart."
 order: 100
 generated: true
 ---
 
-`Acme\Shop\Cart` · final class · namespace [`Acme\Shop`](index.md)
+`Bakery\Services\Cart` · final class · namespace [`Bakery\Services`](index.md)
 
 ```php
-final class Cart implements \Acme\Shop\Priced, \Countable
+final class Cart implements \Countable
 ```
 
-Implements [`Priced`](Priced.md), [`Countable`](https://www.php.net/manual/en/class.countable.php)
+Implements [`Countable`](https://www.php.net/manual/en/class.countable.php)
 
-A shopping cart. It holds `Item`s and knows their total.
+A browser's cart. It holds products with their quantities and knows the total.
 
 ## Methods
 
 ### add()
 
 ```php
-public function add(\Acme\Shop\Item $item, int $quantity = 1): static
+public function add(\Bakery\Models\Product $product, int $quantity = 1): void
 ```
 
-Adds an item.
+Adds a product.
 
 **Parameters**
 
-- `$item` [`Item`](Item.md): the item to add
+- `$product` [`Product`](../Models/Product.md): the product to add
 - `$quantity` `int`
 
 **Throws**
 
-- [`InvalidArgumentException`](https://www.php.net/manual/en/class.invalidargumentexception.php): when the cart is full
+- [`OutOfStock`](../Models/OutOfStock.md): when the bakery has fewer left
 ````
 
 - **Front matter**: `title` is the short name, `description` the first sentence of the docblock, `generated: true` marks the page as written by `tenma docs`.
@@ -77,40 +77,42 @@ Every namespace folder gets an `index.md` listing its sub-namespaces and its typ
 
 ## Functions
 
-Functions declared at the top level of a file or of a namespace block are documented in a `## Functions` section of their namespace's `index.md` (functions without a namespace in the top `index.md`), sorted by name, each like a method: signature, text, parameters, return value, exceptions. A link to one is `index.md#name`, the heading's anchor. For `src/text.php`:
+Functions declared at the top level of a file or of a namespace block are documented in a `## Functions` section of their namespace's `index.md` (functions without a namespace in the top `index.md`), sorted by name, each like a method: signature, text, parameters, return value, exceptions. A link to one is `index.md#name`, the heading's anchor. For `src/Support/price.php`:
 
 ```php
 <?php
 
-namespace Acme\Text;
+namespace Bakery\Support;
 
 /**
- * Joins CSS classes, each once.
+ * Formats a price in the visitor's language.
  *
- * @param string|array<string, bool> ...$parts strings and arrays of class => condition
- * @return string the classes, separated by one space
+ * @param int $cents the price in euro cents
+ * @param 'en'|'de' $locale
+ * @return string such as "€1.80" or "1,80 €"
  */
-function classes(string|array ...$parts): string { /* … */ }
+function price(int $cents, string $locale): string { /* … */ }
 ```
 
-`docs/reference/Acme/Text/index.md` gets:
+`docs/reference/Bakery/Support/index.md` gets:
 
 ````markdown
 ## Functions
 
-### classes()
+### price()
 
 ```php
-function classes(array|string ...$parts): string
+function price(int $cents, string $locale): string
 ```
 
-Joins CSS classes, each once.
+Formats a price in the visitor's language.
 
 **Parameters**
 
-- `...$parts` `string|array<string, bool>`: strings and arrays of class => condition
+- `$cents` `int`: the price in euro cents
+- `$locale` `'en'|'de'`
 
-**Returns** `string`: the classes, separated by one space
+**Returns** `string`: such as "€1.80" or "1,80 €"
 ````
 
 A namespace with functions only still gets its `index.md`. Methods, closures and functions declared inside other functions are not listed, nor functions marked `@internal`. Functions do not autoload, so Tenma loads their files itself, except files whose functions the autoloader's `files` list already declared.
@@ -134,7 +136,7 @@ A run removes pages with `generated: true` whose type no longer exists, and fold
  * Amounts are immutable; arithmetic returns a new instance:
  *
  * ```php
- * $total = Money::of(1200, 'EUR')->plus(Money::of(300, 'EUR'));
+ * $total = Money::of(180, 'EUR')->plus(Money::of(95, 'EUR'));   // a croissant and a pretzel
  * ```
  *
  * @template TCurrency of string

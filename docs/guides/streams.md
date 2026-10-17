@@ -16,21 +16,21 @@ A streamed response sends its headers at once and every chunk right after it is 
 use Tenma\Http\{Request, Response, Stream};
 
 Tenma::serve(8080, fn (Request $request) => match ($request->path) {
-    '/export.csv' => Response::stream(function (Stream $out) {
-        $out->write("id,name\n");
-        foreach (range(1, 5) as $id) {
-            Tenma::sleep(0.2);                       // stands for fetching the next page of rows
-            $out->write("$id,customer $id\n");       // reaches the client right away
+    '/orders.csv' => Response::stream(function (Stream $out) {
+        $out->write("code,pickup,customer\n");
+        foreach (['Anna', 'Ben', 'Clara', 'David', 'Emma'] as $i => $customer) {
+            Tenma::sleep(0.2);                                      // stands for fetching the next page of orders
+            $out->write(sprintf("%05x,2026-10-%02d,%s\n", 0xa1f00 + $i, 19 + $i, $customer));   // reaches the client right away
         }
     }, headers: [
         'content-type' => 'text/csv',
-        'content-disposition' => 'attachment; filename="export.csv"',
+        'content-disposition' => 'attachment; filename="orders.csv"',
     ]),
-    default => "try /export.csv\n",
+    default => "try /orders.csv\n",
 });
 ```
 
-`curl -N localhost:8080/export.csv` shows the lines arriving one by one. The response ends when the writer returns. The default `Content-Type` is `application/octet-stream`; `$status` and `$headers` work as with `Response`.
+`curl -N localhost:8080/orders.csv` shows the lines arriving one by one. The response ends when the writer returns. The default `Content-Type` is `application/octet-stream`; `$status` and `$headers` work as with `Response`.
 
 Use streams for exports, logs, large generated files and anything where the first bytes should arrive before the last ones are computed.
 
@@ -45,27 +45,37 @@ use Tenma\Http\{EventStream, Request, Response};
 
 $page = <<<'HTML'
 <!doctype html>
+<p>Croissants left today:</p>
 <ul id="log"></ul>
 <script>
-  const source = new EventSource('/clock');
-  source.addEventListener('tick', (event) => {
+  const source = new EventSource('/stock');
+  source.addEventListener('stock', (event) => {
     const item = document.createElement('li');
-    item.textContent = JSON.parse(event.data).time;
+    const { time, croissants } = JSON.parse(event.data);
+    item.textContent = `${time}: ${croissants}`;
     document.getElementById('log').prepend(item);
   });
 </script>
 HTML;
 
-Tenma::serve(8080, fn (Request $request) => match ($request->path) {
-    '/' => Response::html($page),
-    '/clock' => Response::events(function (EventStream $events) {
-        $id = 0;
-        while (true) {
-            $events->send(json_encode(['time' => date('H:i:s')]), event: 'tick', id: (string) ++$id);
-            Tenma::sleep(1);
-        }
-    }),
-    default => new Response("Not found\n", 404),
+$croissants = 24;
+Tenma::setInterval(function () use (&$croissants) {
+    $croissants = max(0, $croissants - random_int(0, 2));   // stands for the orders coming in
+}, 1.0);
+
+// A closure with use (&$croissants): an arrow function (fn) would capture a copy
+Tenma::serve(8080, function (Request $request) use ($page, &$croissants) {
+    return match ($request->path) {
+        '/' => Response::html($page),
+        '/stock' => Response::events(function (EventStream $events) use (&$croissants) {
+            $id = 0;
+            while (true) {
+                $events->send(json_encode(['time' => date('H:i:s'), 'croissants' => $croissants]), event: 'stock', id: (string) ++$id);
+                Tenma::sleep(1);
+            }
+        }),
+        default => new Response("Not found\n", 404),
+    };
 });
 ```
 
@@ -83,20 +93,20 @@ A write to a connection the client has closed throws [`ConnectionClosed`](../ref
 
 use Tenma\Http\{ConnectionClosed, EventStream, Response};
 
-$listeners = 0;
+$watching = 0;
 
-Tenma::serve(8080, function () use (&$listeners) {
-    return Response::events(function (EventStream $events) use (&$listeners) {
-        $listeners++;
+Tenma::serve(8080, function () use (&$watching) {
+    return Response::events(function (EventStream $events) use (&$watching) {
+        $watching++;
         try {
             while (true) {
-                $events->send("listeners: $listeners");
+                $events->send("$watching customers are watching the oven");
                 Tenma::sleep(2);
             }
         } catch (ConnectionClosed) {
             // the browser tab is closed; nothing to send to anymore
         } finally {
-            $listeners--;
+            $watching--;
         }
     });
 });
@@ -108,7 +118,7 @@ A client that stops reading is disconnected once a write has stalled for longer 
 
 ## Events for many clients
 
-To push the same event to every open stream, subscribe each stream to a channel and publish to it. The subscription ends with the stream:
+To push the same event to every open stream, subscribe each stream to a channel and publish to it. Here every screen in the bakery hears of a new order; the subscription ends with the stream:
 
 ```php
 <?php
@@ -116,21 +126,21 @@ To push the same event to every open stream, subscribe each stream to a channel 
 use Tenma\Http\{EventStream, Request, Response};
 
 Tenma::serve(8080, fn (Request $request) => match ($request->path) {
-    '/events' => Response::events(function (EventStream $events) {
-        Tenma::subscribe('news', fn (string $message) => $events->send($message, event: 'news'));
+    '/board' => Response::events(function (EventStream $events) {
+        Tenma::subscribe('orders', fn (string $code) => $events->send($code, event: 'order'));
         while (true) {
             $events->comment('keep-alive');   // also notices when the client is gone
             Tenma::sleep(15);
         }
     }),
-    '/publish' => (function () use ($request) {
-        Tenma::publish('news', $request->query['text'] ?? 'hello');
-        return "sent\n";
+    '/orders' => (function () use ($request) {
+        Tenma::publish('orders', $request->query['code'] ?? bin2hex(random_bytes(5)));
+        return "order placed\n";
     })(),
     default => new Response("Not found\n", 404),
 });
 ```
 
-`curl -N localhost:8080/events` in one terminal and `curl 'localhost:8080/publish?text=hi'` in another. With several workers or processes, see [messages between workers](database.md#messages-between-workers).
+`curl -N localhost:8080/board` in one terminal and `curl 'localhost:8080/orders?code=a1f00'` in another. With several workers or processes, see [messages between workers](database.md#messages-between-workers).
 
 See also: [`Response`](../reference/Tenma/Http/Response.md), [`Stream`](../reference/Tenma/Http/Stream.md), [`EventStream`](../reference/Tenma/Http/EventStream.md), [`StreamedResponse`](../reference/Tenma/Http/StreamedResponse.md), [`ConnectionClosed`](../reference/Tenma/Http/ConnectionClosed.md).

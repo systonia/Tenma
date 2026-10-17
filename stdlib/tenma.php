@@ -951,7 +951,7 @@ namespace Tenma\Lsp {
     /**
      * What a package adds to `tenma lsp`, the language server that runs next to the editor's own
      * PHP server. A package names its provider in composer.json, `"extra": {"tenma": {"lsp":
-     * "Vendor\\Editor"}}`; tenma creates it with the project's directory, in a process that loads
+     * "Waypoint\\View\\Editor"}}`; tenma creates it with the project's directory, in a process that loads
      * the project's autoloader. Files are absolute paths, offsets and texts are bytes: `$text` is
      * the editor's content, saved or not.
      */
@@ -1405,7 +1405,7 @@ namespace Tenma\Db {
     /**
      * Postgres, asynchronous: while a query runs, only this request's Fiber waits.
      * Placeholders $1, $2, … as in Postgres; parameters are sent as text, the server determines the type.
-     * Only in Tenma::serve() handlers.
+     * Only in asynchronous code (handlers, tasks, timers); at script startup, wrap queries in Tenma::async().
      */
     final class Postgres
     {
@@ -1523,7 +1523,7 @@ namespace Tenma\Db {
             'BLPOP', 'BRPOP', 'BLMOVE', 'BRPOPLPUSH', 'BLMPOP', 'BZPOPMIN', 'BZPOPMAX', 'BZMPOP',
         ];
 
-        /** Any Redis command: $redis->command('INCR', 'counter'). */
+        /** Any Redis command: $redis->command('INCR', 'orders:today'). */
         public function command(string $name, string|int|float ...$args): mixed
         {
             $upper = strtoupper($name);
@@ -2337,8 +2337,8 @@ namespace {
         /**
          * Starts an HTTP server. It runs once the script has finished and keeps the process alive.
          * The handler gets every request and returns a Response or a string.
-         * With $static, Tenma serves files itself (GET/HEAD, without PHP): ['/assets' => __DIR__ . '/public',
-         * '/favicon.ico' => __DIR__ . '/favicon.ico']. Under a prefix it looks in the directory; for
+         * With $static, Tenma serves files itself (GET/HEAD, without PHP): ['/products' => __DIR__ . '/public/products',
+         * '/favicon.svg' => __DIR__ . '/public/favicon.svg']. Under a prefix it looks in the directory; for
          * a file only its exact path matches; the longest prefix wins. Anything not found and all paths
          * outside go to the handler, the latter without touching the file system. A string means ['/' => $path]:
          * then every request is looked up, which costs PHP routes throughput. Files and directories
@@ -2377,7 +2377,7 @@ namespace {
 
         /**
          * Runs everything concurrently and returns the results with the same keys:
-         * Tenma::all(user: fn () => …, weather: fn () => …). If one fails, all() cancels
+         * Tenma::all(product: fn () => …, weather: fn () => …). If one fails, all() cancels
          * the others, waits until they have cleaned up, and then throws the first error: nothing is left
          * behind in the background that still uses connections, transactions or the stream.
          *
@@ -2421,7 +2421,7 @@ namespace {
          * Replaces the problems $source reports: the editor shows them at their line (through `tenma lsp`), and new
          * ones go to stderr as `path:line:column: error: message`, the form problem matchers and quickfix read. An
          * empty list clears them. Only under --watch, which also clears the script's lists when it reloads it;
-         * otherwise it does nothing. $source names the reporter: 'waypoint-live', 'my-app:checks'. A relative file
+         * otherwise it does nothing. $source names the reporter: 'waypoint-live', 'bakery:checks'. A relative file
          * counts from the working directory.
          *
          * @param list<array{file: string, line: int, message: string, severity?: 'error'|'warning'|'info', column?: int}> $list

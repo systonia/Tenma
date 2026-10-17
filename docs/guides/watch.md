@@ -38,6 +38,24 @@ Tenma::serve(8080, fn () => "ok\n");
 
 Build steps such as Tailwind, a JavaScript bundle or a route cache come from a `tenma.dev.php` next to the script. It returns a list of [`Tenma\Hook`](../reference/Tenma/Hook.md). Production code never loads it.
 
+The bakery's has one hook, which rebuilds the stylesheet from every template that uses its classes:
+
+```php
+<?php
+// tenma.dev.php of the bakery: the stylesheet, from every template that uses its classes
+
+return [
+    new Tenma\Hook(
+        inputs: ['assets/app.css', 'views/**/*.php', 'src/**/*.php'],
+        outputs: ['public/app.css'],
+        run: ['tailwindcss', '-i', 'assets/app.css', '-o', 'public/app.css', '--minify'],
+        name: 'css',
+    ),
+];
+```
+
+A hook runs either a command, as its own process without a shell in this directory, or PHP. A PHP hook gets the changed paths (empty on the first run) and may use Tenma's async functions. Here a second one lists the product pictures for the catalog:
+
 ```php
 <?php
 // tenma.dev.php
@@ -45,25 +63,23 @@ Build steps such as Tailwind, a JavaScript bundle or a route cache come from a `
 use Tenma\Hook;
 
 return [
-    // A command: runs as its own process, without a shell, in this directory
     new Hook(
-        inputs: ['templates/**/*.php', 'assets/app.css'],
+        inputs: ['assets/app.css', 'views/**/*.php', 'src/**/*.php'],
         outputs: ['public/app.css'],
-        run: ['vendor/bin/tailwindcss', '-i', 'assets/app.css', '-o', 'public/app.css', '--minify'],
+        run: ['tailwindcss', '-i', 'assets/app.css', '-o', 'public/app.css', '--minify'],
         name: 'css',
     ),
-    // PHP: gets the changed paths (empty on the first run) and may use Tenma's async functions
     new Hook(
-        inputs: ['src/Routes/**/*.php'],
-        outputs: ['var/routes.php'],
+        inputs: ['public/products/*.svg'],
+        outputs: ['var/pictures.php'],
         run: function (array $changed): void {
-            $routes = [];
-            foreach (glob(__DIR__ . '/src/Routes/*.php') as $file) {
-                $routes[basename($file, '.php')] = $file;
+            $pictures = [];
+            foreach (glob(__DIR__ . '/public/products/*.svg') as $file) {
+                $pictures[basename($file, '.svg')] = '/products/' . basename($file);
             }
-            Tenma\Fs::writeFile(__DIR__ . '/var/routes.php', '<?php return ' . var_export($routes, true) . ';');
+            Tenma\Fs::writeFile(__DIR__ . '/var/pictures.php', '<?php return ' . var_export($pictures, true) . ';');
         },
-        name: 'routes',
+        name: 'pictures',
     ),
 ];
 ```

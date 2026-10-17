@@ -11,16 +11,17 @@ order: 60
 
 use Tenma\Http\Response;
 
+// The public holidays ahead in Germany, by date
 Tenma::serve(8080, function () {
-    $response = Tenma::fetch('https://api.github.com/repos/systonia/Tenma', headers: [
-        'accept' => 'application/vnd.github+json',
-        'user-agent' => 'tenma-example',
+    $response = Tenma::fetch('https://date.nager.at/api/v3/NextPublicHolidays/DE', headers: [
+        'accept' => 'application/json',
+        'user-agent' => 'sonnenkorn-bakery',
     ]);
     if ($response->status !== 200) {
-        return new Response("GitHub answered {$response->status}\n", 502);
+        return new Response("The holiday service answered {$response->status}\n", 502);
     }
-    $repo = $response->json();
-    return Response::json(['name' => $repo['full_name'], 'stars' => $repo['stargazers_count']]);
+    $closed = array_column($response->json(), 'localName', 'date');
+    return Response::json(['closed' => $closed]);
 });
 ```
 
@@ -38,20 +39,25 @@ The response has `status`, `headers` (a list of `Name: Value` lines), `body`, `h
 
 ## Errors
 
-HTTP error statuses are no exceptions: a 404 or 500 comes back as a response with that `status`. Network errors (DNS, refused connection, TLS), a connection that is not established within 10 seconds and a response that is not complete within `timeout` throw a `RuntimeException`:
+HTTP error statuses are no exceptions: a 404 or 500 comes back as a response with that `status`. Network errors (DNS, refused connection, TLS), a connection that is not established within 10 seconds and a response that is not complete within `timeout` throw a `RuntimeException`. The bakery asks its two web services with a short timeout and carries on without them when they fail:
 
 ```php
-<?php
-
-Tenma::serve(8080, function () {
-    try {
-        $response = Tenma::fetch('https://example.com/', timeout: 2.0);
-        return "upstream: {$response->status}\n";
-    } catch (RuntimeException $e) {
-        error_log('upstream failed: ' . $e->getMessage());
-        return "upstream unavailable\n";
+// from src/Services/Holidays.php of the bakery, upcoming(), shortened
+try {
+    $response = \Tenma::fetch($url, timeout: $this->env->float('API_TIMEOUT', 2.5));
+    if ($response->status !== 200) {
+        return null;
     }
-});
+    $holidays = [];
+    foreach (Row::each($response->json()) as $holiday) {
+        $holidays[$holiday->string('date')] = new Holiday($holiday->string('name'), $holiday->string('localName'));
+    }
+    return $holidays;
+} catch (RuntimeException|JsonException $e) {
+    // down, too slow, or an answer that is no JSON: the shop carries on without knowing the holidays
+    $this->logger->warning('holidays: ' . $e->getMessage());
+    return null;
+}
 ```
 
 ## Sending JSON
@@ -59,9 +65,10 @@ Tenma::serve(8080, function () {
 ```php
 <?php
 
-$response = Tenma::fetch('https://httpbin.org/post', method: 'POST',
+// A pickup slip for the label printer in the shop
+$response = Tenma::fetch('http://printer.sonnenkorn.test/slips', method: 'POST',
     headers: ['content-type' => 'application/json'],
-    body: json_encode(['name' => 'Tenma']),
+    body: json_encode(['order' => 'a1f00', 'customer' => 'Anna', 'pickup' => '2026-10-19']),
 );
 ```
 
@@ -75,13 +82,15 @@ Requests to independent services belong in [`Tenma::all()`](async.md#several-thi
 use Tenma\Http\Response;
 
 Tenma::serve(8080, function () {
-    $pages = Tenma::all(
-        example: fn () => Tenma::fetch('https://example.com/'),
-        php: fn () => Tenma::fetch('https://www.php.net/'),
+    $answers = Tenma::all(
+        holidays: fn () => Tenma::fetch('https://date.nager.at/api/v3/NextPublicHolidays/DE', timeout: 2.5),
+        weather: fn () => Tenma::fetch('https://api.open-meteo.com/v1/forecast?latitude=47.99&longitude=7.85&daily=weather_code', timeout: 2.5),
     );
-    return Response::json(array_map(fn ($page) => [$page->status, strlen($page->body)], $pages));
+    return Response::json(array_map(fn ($answer) => [$answer->status, strlen($answer->body)], $answers));
 });
 ```
+
+When a page needs such answers on every request, it can also keep the last ones in memory and refresh them with a timer, as the bakery's product page does: see [background work](async.md#background-work).
 
 If the client disconnects, running fetches are cancelled with the request. Redirects are followed. `fetch()` only works in asynchronous code: handlers, tasks, timers. At the top level of a script, wrap it in `Tenma::async()`. In classic mode it throws; use curl there.
 

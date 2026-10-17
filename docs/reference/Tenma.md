@@ -24,8 +24,8 @@ public static function serve(int $port, callable $handler, array|string|null $st
 
 Starts an HTTP server. It runs once the script has finished and keeps the process alive.
 The handler gets every request and returns a Response or a string.
-With $static, Tenma serves files itself (GET/HEAD, without PHP): ['/assets' => __DIR__ . '/public',
-'/favicon.ico' => __DIR__ . '/favicon.ico']. Under a prefix it looks in the directory; for
+With $static, Tenma serves files itself (GET/HEAD, without PHP): ['/products' => __DIR__ . '/public/products',
+'/favicon.svg' => __DIR__ . '/public/favicon.svg']. Under a prefix it looks in the directory; for
 a file only its exact path matches; the longest prefix wins. Anything not found and all paths
 outside go to the handler, the latter without touching the file system. A string means ['/' => $path]:
 then every request is looked up, which costs PHP routes throughput. Files and directories
@@ -75,7 +75,7 @@ public static function all(\Tenma\Task|callable ...$tasks): array
 ```
 
 Runs everything concurrently and returns the results with the same keys:
-Tenma::all(user: fn () => …, weather: fn () => …). If one fails, all() cancels
+Tenma::all(product: fn () => …, weather: fn () => …). If one fails, all() cancels
 the others, waits until they have cleaned up, and then throws the first error: nothing is left
 behind in the background that still uses connections, transactions or the stream.
 
@@ -130,7 +130,7 @@ public static function diagnostics(string $source, array $list): void
 Replaces the problems $source reports: the editor shows them at their line (through `tenma lsp`), and new
 ones go to stderr as `path:line:column: error: message`, the form problem matchers and quickfix read. An
 empty list clears them. Only under --watch, which also clears the script's lists when it reloads it;
-otherwise it does nothing. $source names the reporter: 'waypoint-live', 'my-app:checks'. A relative file
+otherwise it does nothing. $source names the reporter: 'waypoint-live', 'bakery:checks'. A relative file
 counts from the working directory.
 
 **Parameters**

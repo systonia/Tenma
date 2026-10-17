@@ -15,7 +15,7 @@ tenma --stubs
 tenma --version
 ```
 
-Everything after the script belongs to the script and ends up in `$argv`, as with `php`: `tenma tasks.php import --force`.
+Everything after the script belongs to the script and ends up in `$argv`, as with `php`: `tenma index.php db:migrate` runs the bakery's migrations as a CLI task instead of serving.
 
 | Option | Default | |
 |---|---|---|
@@ -47,10 +47,10 @@ A script that does not call `Tenma::serve()` is an ordinary script: it runs, the
 ## Workers
 
 ```bash
-tenma --workers auto app.php
+tenma --workers auto index.php
 ```
 
-Each worker is a thread with its own PHP interpreter and its own event loop. The script runs once per worker, so each worker has its own copy of everything in memory: an in-memory counter or cache exists per worker. Shared state belongs in Postgres or Redis, and changes to in-memory caches can be announced with [`Tenma::publish()`](database.md#messages-between-workers).
+Each worker is a thread with its own PHP interpreter and its own event loop. The script runs once per worker, so each worker has its own copy of everything in memory: an in-memory counter or cache exists per worker. Shared state belongs in Postgres or Redis, and changes to in-memory caches can be announced with [`Tenma::publish()`](database.md#messages-between-workers). The bakery runs with `tenma --workers 2 index.php` in production: each worker keeps its own copy of the weather forecast, which is fine, while orders and stock live in Postgres and the order board hears of every change through `Tenma::publish()`.
 
 The main thread accepts connections and hands them to the workers in turn; a connection stays with its worker. One worker already serves many concurrent requests in fiber mode, so start with one per core and measure. In [classic mode](classic-mode.md), where each worker serves one request at a time, more workers mean more parallel requests.
 
@@ -73,7 +73,7 @@ A handler that computes forever (an endless loop) is not interrupted and holds u
 Tenma speaks plain HTTP/1.1. Put a proxy such as Caddy or nginx in front for TLS, HTTP/2 and compression:
 
 ```caddyfile
-example.com {
+sonnenkorn.test {
     reverse_proxy 127.0.0.1:8080
 }
 ```
@@ -85,7 +85,7 @@ example.com {
 The image `ghcr.io/systonia/tenma` has `tenma` as its entrypoint, runs as the unprivileged user `tenma` (uid 1000), sets `PORT=8080` and stops with SIGTERM:
 
 ```bash
-docker run -p 8080:8080 -v "$PWD:/app" ghcr.io/systonia/tenma /app/app.php
+docker run -p 8080:8080 -v "$PWD:/app" ghcr.io/systonia/tenma /app/index.php
 ```
 
 A production image for an app:
@@ -100,27 +100,31 @@ FROM ghcr.io/systonia/tenma
 WORKDIR /app
 COPY --from=vendor /app/vendor vendor
 COPY . .
-CMD ["--workers", "auto", "/app/app.php"]
+CMD ["--workers", "auto", "/app/index.php"]
 ```
 
 With [build hooks](watch.md), run `tenma build` in a build stage so the image contains their outputs.
 
 ## systemd
 
-`/etc/systemd/system/shop.service`:
+`/etc/systemd/system/bakery.service`:
 
 ```ini
 [Unit]
-Description=Shop (tenma)
+Description=Sonnenkorn bakery (tenma)
 After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
-User=shop
-WorkingDirectory=/srv/shop/current
+User=bakery
+WorkingDirectory=/srv/bakery/current
 Environment=PORT=8080
-Environment=DATABASE_URL=postgres://shop@localhost/shop
-ExecStart=/usr/bin/tenma --workers auto -c /etc/shop/php.ini app.php
+Environment=APP_ENV=production
+Environment=DATABASE_URL=postgres://bakery@localhost/bakery
+# JWT_SECRET and CSRF_SECRET, readable by root only
+EnvironmentFile=/etc/bakery/secrets.env
+ExecStartPre=/usr/bin/tenma index.php db:migrate
+ExecStart=/usr/bin/tenma --workers auto -c /etc/bakery/php.ini index.php
 Restart=always
 KillSignal=SIGTERM
 TimeoutStopSec=15
@@ -129,7 +133,7 @@ TimeoutStopSec=15
 WantedBy=multi-user.target
 ```
 
-`systemctl enable --now shop`. Logs (stderr) go to the journal: `journalctl -u shop -f`. `TimeoutStopSec` is above Tenma's 10-second drain, so running requests can finish. The `.deb` installs the binary as `/usr/bin/tenma`; with the tarball, use its path in `~/.local/bin`.
+`systemctl enable --now bakery`. Logs (stderr) go to the journal: `journalctl -u bakery -f`. `ExecStartPre` applies new migrations before every start; the bakery's migrate task takes an advisory lock, so two starts at once wait for each other. `TimeoutStopSec` is above Tenma's 10-second drain, so running requests can finish. The `.deb` installs the binary as `/usr/bin/tenma`; with the tarball, use its path in `~/.local/bin`.
 
 To deploy without dropping requests, start the new release on another port, switch the proxy, then stop the old one.
 
