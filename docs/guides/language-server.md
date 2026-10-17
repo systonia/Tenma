@@ -1,6 +1,6 @@
 ---
 title: Language server
-description: Run tenma lsp next to the editor's PHP server, and extend it from a package with Tenma\Lsp\Provider, Tenma\Lsp\Tokens, Tenma\Lsp\Imports and Tenma\Lsp\Variables.
+description: Run tenma lsp next to the editor's PHP server, and extend it from a package with Tenma\Lsp\Provider, Tenma\Lsp\Tokens, Tenma\Lsp\Imports, Tenma\Lsp\Variables and Tenma\Lsp\Elements.
 order: 100
 ---
 
@@ -220,6 +220,44 @@ final class Editor implements Provider, Variables
 
 The rule when both type a name: below an assignment or a loop in the file that introduces it, the file's own typing wins; above, the provider's. When several providers name the same variable, the first one wins.
 
+## Elements
+
+Tenma reads the element type of an array member from its PHPDoc (`@var list<Item>`, `@return Item[]`). A package that documents it another way, with attributes say, tells Tenma through [`Tenma\Lsp\Elements`](../reference/Tenma/Lsp/Elements.md):
+
+```php
+<?php
+
+namespace Acme\Views;
+
+use Tenma\Lsp\{Elements, Provider};
+
+final class Editor implements Provider, Elements
+{
+    // thisClass(), completions(), definition() and diagnostics() as above
+
+    public function elements(string $class): array
+    {
+        $elements = [];
+        $reflection = new \ReflectionClass($class);
+        foreach ($reflection->getProperties() as $property) {
+            foreach ($property->getAttributes(\Acme\Of::class) as $of) {
+                $elements[$property->getName()] = $of->newInstance()->class;
+            }
+        }
+        foreach ($reflection->getMethods() as $method) {
+            foreach ($method->getAttributes(\Acme\Of::class) as $of) {
+                $elements[$method->getName() . '()'] = $of->newInstance()->class;
+            }
+        }
+        return $elements;
+    }
+}
+```
+
+`elements($class)` returns a property by its name and a method by its name followed by `()`, each => the fully qualified class of its elements; a class that does not exist is left out. Tenma then types the variable of `foreach ($order->lines as $line)` and `@foreach ($order->lines() as $line)`, also at the end of a chain (`$this->order->lines`).
+
+Tenma asks every provider that implements `Elements`, whatever file is open and whether or not the provider binds it: an element type belongs to the class. It asks once per class and keeps the answer until the worker restarts (a saved `.php` file). The rule when both name a type: the member's own `@var` or `@return` PHPDoc wins when it names a class; the providers fill in where it names none. When several providers name the same member, the first one wins.
+
 `extra.tenma.lsp` may also be a list of classes when a package has several providers.
 
-See also: [`Tenma\Lsp\Provider`](../reference/Tenma/Lsp/Provider.md), [`Tenma\Lsp\Tokens`](../reference/Tenma/Lsp/Tokens.md), [`Tenma\Lsp\Imports`](../reference/Tenma/Lsp/Imports.md), [`Tenma\Lsp\Variables`](../reference/Tenma/Lsp/Variables.md), [Diagnostics](diagnostics.md), [Debugger and editor setup](debugger.md).
+See also: [`Tenma\Lsp\Provider`](../reference/Tenma/Lsp/Provider.md), [`Tenma\Lsp\Tokens`](../reference/Tenma/Lsp/Tokens.md), [`Tenma\Lsp\Imports`](../reference/Tenma/Lsp/Imports.md), [`Tenma\Lsp\Variables`](../reference/Tenma/Lsp/Variables.md), [`Tenma\Lsp\Elements`](../reference/Tenma/Lsp/Elements.md), [Diagnostics](diagnostics.md), [Debugger and editor setup](debugger.md).

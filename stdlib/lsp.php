@@ -855,14 +855,15 @@ final class Answers
         return $root === null ? null : $this->follow($root, (string) $last[5][0]);
     }
 
-    /** The class of the elements a property or method holds, from `@var` or `@return`. */
+    /**
+     * The class of the elements a property or method holds: from `@var` or `@return`, else (no such PHPDoc, or
+     * one that names no class) from the providers' Tenma\Lsp\Elements for the class that declares it.
+     */
     private function elementClass(\ReflectionProperty|\ReflectionMethod $member): ?string
     {
         $tag = $member instanceof \ReflectionProperty ? '@var' : '@return';
-        if (preg_match('/' . $tag . '\s+((?:[^\s<>{}]|<(?:[^<>]|<[^<>]*>)*>|\{[^}]*\})+)/', (string) $member->getDocComment(), $m) !== 1) {
-            return null;
-        }
-        foreach (explode('|', ltrim($m[1], '?')) as $type) {
+        preg_match('/' . $tag . '\s+((?:[^\s<>{}]|<(?:[^<>]|<[^<>]*>)*>|\{[^}]*\})+)/', (string) $member->getDocComment(), $m);
+        foreach (isset($m[1]) ? explode('|', ltrim($m[1], '?')) : [] as $type) {
             $element = match (true) {
                 str_ends_with($type, '[]') => substr($type, 0, -2),
                 preg_match('/^[\w\\\\-]+<(.*)>$/', $type, $generic) === 1 => trim((string) preg_replace('/^(?:[^,<]|<[^>]*>)*,/', '', $generic[1])),
@@ -874,7 +875,35 @@ final class Answers
                 return $class;
             }
         }
-        return null;
+        $key = $member->getName() . ($member instanceof \ReflectionMethod ? '()' : '');
+        return $this->elements($member->getDeclaringClass()->getName())[$key] ?? null;
+    }
+
+    /** @var array<string, array<string, string>> class => its members' element classes from the providers */
+    private array $elements = [];
+
+    /**
+     * @return array<string, string> What the providers' Tenma\Lsp\Elements say about $class: a property by its name,
+     *     a method by its name and `()`, => the class of its elements (the first provider wins). Every provider is
+     *     asked, not only those that bind the file: the type belongs to the class. A saved class ends the worker,
+     *     so the cache cannot go stale.
+     */
+    private function elements(string $class): array
+    {
+        if (isset($this->elements[$class])) {
+            return $this->elements[$class];
+        }
+        $elements = [];
+        foreach ($this->providers as $provider) {
+            $given = $provider instanceof \Tenma\Lsp\Elements ? $this->guard(static fn () => $provider->elements($class)) : null;
+            foreach (is_array($given) ? $given : [] as $member => $element) {
+                $element = is_string($element) ? trim($element, '\\') : '';
+                if (class_exists($element) || interface_exists($element)) {
+                    $elements[(string) $member] ??= $element;
+                }
+            }
+        }
+        return $this->elements[$class] = $elements;
     }
 
     /** A class name written in $file, resolved like PHP does: `use` statements, then the namespace. */

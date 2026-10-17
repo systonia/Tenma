@@ -12,8 +12,16 @@ final class Cart
 
     private int $count = 0;
 
+    /** Typed by the provider's elements(), no PHPDoc */
+    public array $lines = [];
+
     public function first(): Author
     {
         return $this->owner;
+    }
+
+    public function extras(): array
+    {
+        return [];
     }
 }

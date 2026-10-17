@@ -419,7 +419,7 @@ fn a_provider_s_variables_get_their_class() {
     // The column after the n-th "->" of a line
     let after = |line: usize, n: usize| lines[line].match_indices("->").nth(n).unwrap().0 as u32 + 2;
     // Outside the class it binds: only public members
-    assert_eq!(lsp.labels(&template, 0, after(0, 0)), ["owner", "buyers", "first"]);
+    assert_eq!(lsp.labels(&template, 0, after(0, 0)), ["owner", "buyers", "lines", "first", "extras"]);
     // Chains through a property and a method, a loop over a property, an assignment from one
     assert_eq!(lsp.labels(&template, 1, after(1, 1)), ["name"]);
     assert_eq!(lsp.labels(&template, 1, after(1, 3)), ["name"]);
@@ -436,11 +436,29 @@ fn a_provider_s_variables_get_their_class() {
     assert_eq!(hover["contents"]["value"], "```php\npublic Fixture\\Author $owner\n```", "{hover}");
     let method = lsp.at("textDocument/definition", &template, 0, 32);
     assert_eq!(method["uri"], uri(&root.join("src/Cart.php")), "{method}");
-    assert_eq!(method["range"]["start"]["line"], 14, "{method}");
+    assert_eq!(method["range"]["start"]["line"], 17, "{method}");
     let property = lsp.at("textDocument/definition", &template, 0, 13);
     assert_eq!(property["range"]["start"]["line"], 7, "{property}");
     // A file no provider binds: nothing
     let other = root.join("other.php");
     lsp.open(&other, "<?php $model->");
     assert!(lsp.labels(&other, 0, 14).is_empty());
+}
+
+#[test]
+fn a_provider_s_elements_type_loops_without_phpdoc() {
+    let root = project("elements");
+    let template = root.join("page.tpl.php");
+    let mut lsp = Lsp::start(&root);
+    let lines = [
+        "@foreach ($model->lines as $line) {{ $line-> }} @endforeach",
+        "<?php foreach ($model->extras() as $k => $extra): ?><?= $extra-> ?>",
+        "@foreach ($model->buyers as $buyer) {{ $buyer-> }} @endforeach",
+    ];
+    lsp.open(&template, &lines.join("\n"));
+    let after = |line: usize| lines[line].match_indices("-> ").next().unwrap().0 as u32 + 2;
+    // A property and a method without PHPDoc; the PHPDoc of buyers (list<Author>) wins over the provider's Writer
+    assert_eq!(lsp.labels(&template, 0, after(0)), ["name"]);
+    assert_eq!(lsp.labels(&template, 1, after(1)), ["pen"]);
+    assert_eq!(lsp.labels(&template, 2, after(2)), ["name"]);
 }

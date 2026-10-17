@@ -2,13 +2,13 @@
 
 namespace Fixture;
 
-use Tenma\Lsp\{Imports, Provider, Tokens, Variables};
+use Tenma\Lsp\{Elements, Imports, Provider, Tokens, Variables};
 
 /**
  * Binds $this in page.tpl.php to Page, completes "data-on-" values, reports "TODO" lines, colours "@words", and gives
- * page.tpl.php the namespace Fixture and OrderStatus, and $model there a Cart.
+ * page.tpl.php the namespace Fixture and OrderStatus, and $model there a Cart, and types the elements of Cart's arrays.
  */
-final class Editor implements Provider, Tokens, Imports, Variables
+final class Editor implements Provider, Tokens, Imports, Variables, Elements
 {
     public function __construct(private string $root)
     {
@@ -70,5 +70,11 @@ final class Editor implements Provider, Tokens, Imports, Variables
     {
         // A class that does not exist types nothing
         return $file === $this->root . '/page.tpl.php' ? ['model' => Cart::class, '$gone' => 'Fixture\\Missing'] : [];
+    }
+
+    public function elements(string $class): array
+    {
+        // buyers has a PHPDoc, which wins
+        return $class === Cart::class ? ['lines' => Author::class, 'extras()' => People\Writer::class, 'buyers' => People\Writer::class] : [];
     }
 }
