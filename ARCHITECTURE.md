@@ -1,66 +1,134 @@
 # Architecture
 
-How tenma is built, what it measured, and what it does not do yet. The [README](README.md) has the commands, the [documentation](docs/index.md) the features.
+How tenma is built, what it measured, and what it does not do yet. The [README](README.md) has the
+commands, the [documentation](docs/index.md) the features.
+
+## Three layers
+
+- **Rust** (`src/`) runs the process: threads, event loops, HTTP, and every operation that waits.
+- **C** (`shim/tenma.c`) embeds PHP. It calls the PHP handlers, converts values between PHP and C, and
+  catches fatal errors. Rust never sees a PHP value directly.
+- **PHP** (`stdlib/`) is the API the scripts use: `Tenma`, `Request`, `Response`, `Tenma\Db`,
+  `Tenma\Fs`. It is embedded in the binary.
 
 ## Files
 
-| Path                 | Contents                                                                                                                                                                                                                                                                                                                                                                          |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/main.rs`        | CLI, worker threads each with their own event loop (tokio, current_thread), accepting connections in the main thread, HTTP server (hyper)                                                                                                                                                                                                                                         |
-| `src/php.rs`         | Safe Rust wrappers around the C layer. Rust never sees a zval. Pending requests and resuming fibers.                                                                                                                                                                                                                                                                              |
-| `src/ops.rs`         | Asynchronous ops for PHP: `sleep` (tokio timer), `fetch` (reqwest)                                                                                                                                                                                                                                                                                                                |
-| `src/db.rs`          | Postgres (tokio-postgres, pool per worker) and Redis (one shared connection per URL) as ops                                                                                                                                                                                                                                                                                       |
-| `src/fs.rs`          | File system ops for `Tenma\Fs`, on tokio's blocking threads                                                                                                                                                                                                                                                                                                                       |
-| `src/pubsub.rs`      | `Tenma::publish()` and `subscribe()`: channels between the workers of the process, through Redis with `--pubsub`                                                                                                                                                                                                                                                                  |
-| `src/files.rs`       | Static files for `Tenma::serve(..., static:)`: prefixes, ETag/304, ranges, checks on the opened file                                                                                                                                                                                                                                                                              |
-| `src/watch.rs`       | `--watch`: watches the files PHP loaded and the hooks' directories, reports real changes (content, not timestamps)                                                                                                                                                                                                                                                                |
-| `src/dev.rs`         | Hooks of `tenma.dev.php`: the dev thread's ops, command hooks as processes (`tokio::process`)                                                                                                                                                                                                                                                                                     |
-| `src/inspect.rs`     | `--inspect`: DAP server thread, breakpoints and steps; stops the worker inside PHP's statement handler                                                                                                                                                                                                                                                                            |
-| `src/streams.rs`     | Streaming responses (body from a channel with backpressure) and WebSockets (tokio-tungstenite after the HTTP upgrade)                                                                                                                                                                                                                                                             |
-| `shim/tenma.c`       | C layer: embed PHP, `tenma_listen()` for PHP, call handlers, convert PHP values to C values, catch fatal errors with `zend_try`                                                                                                                                                                                                                                                   |
-| `stdlib/tenma.php`   | Standard library in PHP, embedded in the binary: `Tenma::serve()`, `Tenma::serveClassic()`, `Request`, `Response`                                                                                                                                                                                                                                                                 |
-| `stdlib/stubs.php`   | `tenma --stubs`: prints the public API as stubs by reflection, for IDEs and PHPStan                                                                                                                                                                                                                                                                                               |
-| `stdlib/lsp.php`     | `tenma lsp`: the language server and its worker, in PHP; the providers' interface `Tenma\Lsp\Provider` is in `stdlib/tenma.php`                                                                                                                                                                                                                                                   |
-| `stdlib/docs.php`    | `tenma docs`: Markdown reference pages by reflection and docblocks                                                                                                                                                                                                                                                                                                                |
-| `php-build/build.sh` | Builds PHP 8.5 from source as `libphp.a` (embed SAPI, ZTS), linked statically. Extensions: PDO with MySQL, Postgres and SQLite, mysqli, pgsql, sqlite3, openssl, curl, sodium, intl, bcmath, gmp, gd, zip, mbstring, session, sockets, exif, XML, fileinfo, filter. The libraries for these come from the macOS SDK and Homebrew (list in the script) and are linked dynamically. |
-| `demo/waypoint/`     | Waypoint app (framework [Waypoint](https://github.com/systonia/Waypoint)) with a waypoint API; runs under tenma in fiber mode and unchanged under `php -S`                                                                                                                                                                                                                        |
-| `tests/http.rs`      | Starts the binary and sends real requests                                                                                                                                                                                                                                                                                                                                         |
-| `tests/lsp.rs`       | Speaks LSP to `tenma lsp` on the project in `tests/fixtures/lsp`                                                                                                                                                                                                                                                                                                                  |
-| `tests/docs.rs`      | Runs `tenma docs` on the package in `tests/fixtures/docs` and on Tenma's own API                                                                                                                                                                                                                                                                                                  |
+Rust:
 
-Flow: the main thread starts PHP (modules); each worker thread gets its own interpreter (ZTS, `tenma_thread_start`) and loads the standard library, then the script. The first worker starts alone; if the script registers no server, it was an ordinary script and tenma exits. Otherwise the remaining workers start, and the main thread opens the ports, accepts connections and distributes them round-robin across the workers. A connection stays with its worker. As with the CLI, `$_SERVER['SCRIPT_FILENAME']` points to the script. `Tenma::serve()` only registers a handler via `tenma_listen()`. Once the script has finished, Rust opens the ports. Each request calls the PHP handler synchronously on the loop thread. Asynchronously: the handler runs in a fiber. When it calls an op (`\tenma_op_sleep`, `\tenma_op_fetch`), Rust starts a task and returns an op ID, and the fiber suspends with `Fiber::suspend()`. When the task is done, Rust calls `Tenma\Internal\complete()`, which resumes the fiber with the result. Finished handlers respond via `\tenma_respond($rid, …)`, and Rust passes the response to the waiting HTTP request. Classic mode has no fibers, because superglobals, headers and output buffers exist only once; there, requests run one after another and asynchronous functions throw.
+| File             | Does                                                                     |
+| ---------------- | ------------------------------------------------------------------------ |
+| `src/main.rs`    | command line, worker threads, accepting connections, the HTTP server     |
+| `src/php.rs`     | safe wrappers around the C layer; pending requests, resuming fibers      |
+| `src/ops.rs`     | ops PHP waits for: `sleep`, `fetch`                                      |
+| `src/db.rs`      | Postgres (a pool per worker) and Redis (one connection per URL)          |
+| `src/fs.rs`      | file operations for `Tenma\Fs`, on background threads                    |
+| `src/pubsub.rs`  | `Tenma::publish()` and `subscribe()`, through Redis with `--pubsub`      |
+| `src/files.rs`   | static files: prefixes, ETag and 304, ranges                             |
+| `src/streams.rs` | streamed responses and WebSockets                                        |
+| `src/watch.rs`   | `--watch`: which loaded files really changed (content, not timestamps)   |
+| `src/dev.rs`     | the hooks of `tenma.dev.php`                                             |
+| `src/inspect.rs` | `--inspect`: the debugger, stops a worker inside PHP's statement handler |
 
-`exit()` and `die()` end in PHP with a `zend_bailout` as soon as the handler was called from outside, exactly like a fatal error. The C layer tells the two apart by the last PHP error: without a fatal error, PHP unwound cleanly, the request is answered and the worker keeps running.
+PHP:
 
-tenma collects the output of classic requests where PHP writes it (the SAPI's `ub_write`), not in an `ob_start()` buffer: frameworks that flush all output buffers when sending thus still write into the response. At the end, all buffers still open are flushed, including those that cannot be removed.
+| File               | Does                                                                 |
+| ------------------ | -------------------------------------------------------------------- |
+| `stdlib/tenma.php` | the API: `Tenma::serve()`, `Request`, `Response` and everything else |
+| `stdlib/stubs.php` | `tenma --stubs`                                                      |
+| `stdlib/lsp.php`   | `tenma lsp`, the language server and its worker                      |
+| `stdlib/docs.php`  | `tenma docs`, the reference pages                                    |
 
-Before every request, the C layer resets headers, status and the "headers already sent" state. An exception in the handler yields a 500 and the server keeps running. A fatal PHP error restarts only the worker's interpreter (see above). Errors and warnings go to stderr, never into a response.
+Everything else:
+
+| Path                 | Does                                                                     |
+| -------------------- | ------------------------------------------------------------------------ |
+| `php-build/build.sh` | builds PHP 8.5 as a static library (embed SAPI, ZTS) with its extensions |
+| `demo/waypoint/`     | a Waypoint app that runs under tenma and unchanged under `php -S`        |
+| `tests/http.rs`      | starts the binary and sends real requests                                |
+| `tests/lsp.rs`       | talks LSP to `tenma lsp` on `tests/fixtures/lsp`                         |
+| `tests/docs.rs`      | runs `tenma docs` on `tests/fixtures/docs` and on tenma's own API        |
+
+`build.sh` lists the extensions and the libraries they need. On macOS the libraries come from the SDK
+and Homebrew, on Linux from the distribution's `-dev` packages. They are linked dynamically.
+
+## Startup
+
+1. The main thread starts PHP.
+2. The first worker thread gets its own interpreter, loads the standard library and runs the script.
+3. If the script registered no server, it was an ordinary script and tenma ends.
+4. Otherwise the other workers start and run the script too. `Tenma::serve()` only registers the
+   handler.
+5. The main thread opens the ports, accepts connections and hands them to the workers in turn. A
+   connection stays with its worker.
+
+## A request
+
+1. The worker calls the PHP handler on its event loop thread. The handler runs in a fiber.
+2. When the handler waits, for example with `Tenma::sleep()`, PHP starts an op. Rust starts a task for it
+   and returns an op ID, and the fiber suspends.
+3. The event loop serves other requests meanwhile.
+4. When the task is done, Rust calls `Tenma\Internal\complete()`, which resumes the fiber with the
+   result.
+5. The finished handler answers with `tenma_respond()`, and Rust sends the response.
+
+Classic mode has no fibers. Superglobals, headers and output buffers exist once per interpreter, so
+requests run one after another, and functions that wait throw.
+
+## Errors and exit
+
+- An exception in a handler gives a 500. The server keeps running.
+- A fatal error restarts the interpreter of its worker only.
+- `exit()` and `die()` end PHP the same way a fatal error does. The C layer tells them apart by the last
+  PHP error: without a fatal error the request is answered and the worker keeps running.
+- Errors and warnings go to stderr, never into a response.
+
+## Classic mode output
+
+- tenma collects the output where PHP writes it, not in an `ob_start()` buffer. So a framework that
+  flushes every output buffer still writes into the response.
+- At the end of a request, every buffer still open is flushed, also those that cannot be removed.
+- Before every request, the C layer resets headers, status and the "headers already sent" state.
 
 ## Releases
 
-A tag `v*` builds the binaries for macOS arm64 and Linux x64 and arm64 as a GitHub release, and the image as `ghcr.io/systonia/tenma` (`.github/workflows/build.yml`). The Linux binaries link Debian 13's libraries: on another distribution, use the image.
+A tag `v*` builds the binaries for macOS arm64 and Linux x64 and arm64 as a GitHub release, and the
+image `ghcr.io/systonia/tenma` (`.github/workflows/build.yml`). The Linux binaries link the libraries of
+Debian 13. On another distribution, use the image.
 
 ## Measurements
 
-Databases on one worker: one Postgres query per request about 25,000 requests per second (35,000 without the cleanup), at 200 concurrent requests with 10 connections; four Redis commands per request about 42,000.
+Measured on an M-series Mac with `ab`.
 
-Streaming: 500 concurrent streams of 0.6 s each on one worker, about 780 per second, 58 MB. WebSocket echo: 46,000 round trips per second over one connection, about 118,000 over four.
+| What                                                  | Result                          |
+| ----------------------------------------------------- | ------------------------------- |
+| a simple handler, `ab -k`                             | about 100,000 requests/s        |
+| Waypoint demo `GET /waypoints/1`, `ab -k`, 1 worker   | 55,000 requests/s               |
+| the same with 4 workers                               | 165,000 requests/s              |
+| the same with 10 workers                              | 192,000 requests/s              |
+| the same, 4 × `ab` in parallel                        | 207,000 requests/s at 570 % CPU |
+| without keep-alive, any number of workers             | about 45,000 requests/s         |
+| one Postgres query per request, 200 at once, 10 conns | about 25,000 requests/s         |
+| four Redis commands per request                       | about 42,000 requests/s         |
+| `Tenma::sleep(0.5)` per request, 500 connections      | about 900 requests/s            |
+| `fetch` to the same server per request                | about 37,000 requests/s         |
+| 500 streams of 0.6 s each, 1 worker                   | about 780 streams/s, 58 MB      |
+| WebSocket echo, 1 connection                          | 46,000 round trips/s            |
+| WebSocket echo, 4 connections                         | about 118,000 round trips/s     |
+| 5 million requests against the Waypoint demo          | the process stays at 22.8 MB    |
+| 2.1 million requests with fibers and `fetch`          | 26.8 MB                         |
 
-Workers, Waypoint demo, `GET /waypoints/1`, `ab -k` with 50 connections: 1 worker 55,000, 4 workers 165,000, 10 workers 192,000 requests per second (4 × `ab` in parallel: 207,000, at about 570 % CPU). Without keep-alive it stays at about 45,000 regardless of the number of workers: connection setup and the single accepting thread are the limit then.
-
-Opcache is enabled (tenma does not count as CLI for opcache). It brings little for tenma, about 6 % throughput and some memory, because each worker compiles the code only once at startup anyway. PHP does not build the JIT with ZTS on Apple Silicon; on Linux it is built in and can be enabled with `-d opcache.jit=tracing`.
-
-Memory under sustained load: 5 million requests against the Waypoint demo, the process stays at 22.8 MB; 2.1 million `/proxy` requests with fibers and `fetch` at 26.8 MB.
-
-Fibers, measured with `ab -k`: a simple handler about 100,000 requests per second; `/slow` with `Tenma::sleep(0.5)` at 500 connections about 900 per second, i.e. all 500 awake at the same time; `/proxy`, which queries the same server via `fetch`, about 37,000.
-
-Measured with `ab` on an M-series Mac, Waypoint demo, `GET /waypoints/1`: tenma about 42,000 requests per second, `php -S` about 17. The comparison is unfair in tenma's favor: `php -S` has no opcache, and Waypoint without a route cache re-reads all attributes on every request. Under FPM with opcache and trust mode the gap would be smaller, but the core point stands: tenma boots the app once.
+- Without keep-alive, setting up connections and the single accepting thread are the limit.
+- With `Tenma::sleep(0.5)`, 900 requests per second means all 500 are awake at the same time.
+- Opcache is on. It adds about 6 % throughput, because each worker compiles the code only once anyway.
+- PHP builds no JIT with ZTS on Apple Silicon. On Linux it is built in: `-d opcache.jit=tracing`.
 
 ## Not yet
 
-- Asynchronous MySQL (`mysql_async`), TLS for Postgres connections.
-- More ops: sockets, DNS. Blocking PHP functions such as PDO or `file_get_contents` still hold up their worker.
-- Waiting at the top level of a script, outside `Tenma::async()` (`Tenma::sleep()` during startup throws; wrap it in `Tenma::async()`).
-- Streaming for large request bodies (up to the limit they are buffered completely in memory).
-- A timeout for handlers that compute instead of waiting: an infinite loop holds up its worker.
-- Multiple accepting threads (`SO_REUSEPORT`) for many short connections without keep-alive.
+- Asynchronous MySQL, and TLS for Postgres connections.
+- Ops for sockets and DNS. Blocking PHP functions such as PDO or `file_get_contents` hold up their
+  worker.
+- Waiting at the top level of a script. `Tenma::sleep()` during startup throws; wrap it in
+  `Tenma::async()`.
+- Streaming large request bodies. Up to `--max-body` they are held in memory.
+- A timeout for handlers that compute instead of wait. An endless loop holds up its worker.
+- Several accepting threads (`SO_REUSEPORT`) for many short connections without keep-alive.
