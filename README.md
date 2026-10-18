@@ -314,6 +314,19 @@ cargo test --release
 ./target/release/tenma demo/waypoint/index.php
 ```
 
+Formatting, before a commit; CI checks it, with long PHP lines only as warnings for now:
+
+```
+cargo fmt                              # Rust, rustfmt.toml
+prettier --write .                     # Markdown, JSON, YAML, .prettierrc.json
+php-cs-fixer fix                       # PHP in stdlib/ and demo/, PER-CS 2.0
+phpcs                                  # PHP lines longer than 100 characters
+```
+
+`prettier` comes from `npm install -g prettier`, `php-cs-fixer` and `phpcs` from
+`composer global require friendsofphp/php-cs-fixer squizlabs/php_codesniffer`; Composer puts them in
+`~/.composer/vendor/bin`.
+
 On Linux, `php-build/build.sh` takes the libraries from the distribution's `-dev` packages instead; the `Dockerfile` builds both on Debian 13 and keeps only the binary and the libraries it links (about 270 MB):
 
 ```

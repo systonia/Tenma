@@ -12,6 +12,20 @@ permissions:
   packages: write
 
 jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+          tools: php-cs-fixer:3.95.27, phpcs:4
+      - run: cargo fmt --check
+      - run: npx --yes prettier@3.9.10 --check .
+      - run: php-cs-fixer fix --dry-run --diff
+      # Long lines are warnings for now: they are shortened by hand, file by file
+      - run: phpcs --warning-severity=0
+
   macos:
     runs-on: macos-15
     steps:
