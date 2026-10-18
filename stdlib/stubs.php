@@ -1,4 +1,5 @@
 <?php
+
 // `tenma --stubs`: prints Tenma's public PHP API (the class Tenma and everything under Tenma\ except
 // Tenma\Internal and members marked @internal) as a stub file for IDEs and static analysis. Signatures
 // and doc comments come from reflection over the standard library this binary embeds; bodies are empty.

@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<!-- Checks the line length only; php-cs-fixer formats the rest -->
+<ruleset name="tenma">
+    <file>stdlib</file>
+    <file>demo</file>
+    <exclude-pattern>*/vendor/*</exclude-pattern>
+
+    <arg name="extensions" value="php"/>
+
+    <rule ref="Generic.Files.LineLength">
+        <properties>
+            <property name="lineLimit" value="100"/>
+            <property name="absoluteLineLimit" value="0"/>
+        </properties>
+    </rule>
+</ruleset>

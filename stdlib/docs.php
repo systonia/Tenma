@@ -1,4 +1,5 @@
 <?php
+
 // `tenma docs [<path>...] [--out <dir>]`: writes Markdown reference pages for PHP classes, interfaces,
 // traits and enums, one file per type at <out>/<Namespace path>/<ShortName>.md plus an index.md per
 // namespace folder, which also documents the namespace's functions. With paths it documents the types and
@@ -312,7 +313,9 @@ function value(mixed $value): string
         // Control characters escaped as in PHP source, so "\r\n" does not break the line
         is_string($value) && preg_match('/[\x00-\x1f\x7f]/', $value) => '"' . preg_replace_callback(
             '/[\x00-\x1f\x7f]/',
-            fn ($match) => match ($match[0]) { "\n" => '\n', "\r" => '\r', "\t" => '\t', "\v" => '\v', "\e" => '\e', "\f" => '\f', default => sprintf('\x%02X', ord($match[0])) },
+            fn ($match) => match ($match[0]) {
+                "\n" => '\n', "\r" => '\r', "\t" => '\t', "\v" => '\v', "\e" => '\e', "\f" => '\f', default => sprintf('\x%02X', ord($match[0]))
+            },
             addcslashes($value, '\\"$'),
         ) . '"',
         default => var_export($value, true),

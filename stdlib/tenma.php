@@ -1,4 +1,5 @@
 <?php
+
 // The standard library of Tenma, embedded in the binary and loaded before the script.
 // It builds on the raw functions of the C layer (tenma_listen, tenma_respond, tenma_op_*)
 // and gives them a PHP API.
@@ -313,9 +314,7 @@ namespace Tenma {
      * The task or request was cancelled, for example because a sibling in all() failed or exit()
      * ran. Deliberately not a RuntimeException: a catch for failed ops should not swallow it.
      */
-    class Cancelled extends \Exception
-    {
-    }
+    class Cancelled extends \Exception {}
 
     /**
      * Work that runs in its own Fiber while the caller carries on; await() fetches its result.
@@ -1053,9 +1052,7 @@ namespace Tenma\Internal {
         \Tenma\async(fn () => Dev::run($watch));
     }
 
-    final class DevError extends \RuntimeException
-    {
-    }
+    final class DevError extends \RuntimeException {}
 
     /** Tenma::diagnostics(): who publishes, and the project's directory for `tenma lsp`. */
     final class Diagnostics
@@ -1558,773 +1555,771 @@ namespace Tenma\Db {
 
 namespace Tenma\Http {
 
-/**
- * An HTTP request in fiber mode, the argument of the handler of Tenma::serve(). Query, headers and body
- * are read in full before the handler runs; form(), files() and cookies() parse them on demand.
- */
-final class Request
-{
-    public readonly string $method;
-    public readonly string $uri;
-    public readonly string $path;
-    /** @var array<string, string|array<mixed>> */
-    public readonly array $query;
-    /** @var array<string, string> names in lowercase */
-    public readonly array $headers;
-    public readonly string $body;
-    /** IP address and port of the client, or of the proxy in front of it. */
-    public readonly string $remoteAddress;
-    public readonly int $remotePort;
-    /** Address and port the connection arrived on. */
-    public readonly string $serverAddress;
-    public readonly int $serverPort;
-
-    /** @param array{method: string, uri: string, headers: array<string, string>, body: string, remote_addr: string, remote_port: int, server_addr: string, server_port: int} $raw */
-    public function __construct(array $raw)
-    {
-        $this->method = $raw['method'];
-        $this->uri = $raw['uri'];
-        // parse_url() would take "//host/admin" for a host and the path /admin
-        [$path, $queryString] = str_starts_with($raw['uri'], '/')
-            ? explode('?', $raw['uri'], 2) + [1 => '']
-            : [parse_url($raw['uri'], PHP_URL_PATH) ?: '/', parse_url($raw['uri'], PHP_URL_QUERY) ?? ''];
-        $this->path = $path;
-        parse_str($queryString, $query);
-        $this->query = $query;
-        $this->headers = $raw['headers'];
-        $this->body = $raw['body'];
-        $this->remoteAddress = $raw['remote_addr'];
-        $this->remotePort = $raw['remote_port'];
-        $this->serverAddress = $raw['server_addr'];
-        $this->serverPort = $raw['server_port'];
-    }
-
     /**
-     * The host from the Host header, without port; otherwise the address the connection arrived on. The
-     * client controls the Host header: for links in emails or for redirects, only use it checked against
-     * a list of allowed hosts.
+     * An HTTP request in fiber mode, the argument of the handler of Tenma::serve(). Query, headers and body
+     * are read in full before the handler runs; form(), files() and cookies() parse them on demand.
      */
-    public function host(): string
+    final class Request
     {
-        $host = $this->header('host') ?? '';
-        return $host === '' ? $this->serverAddress : (string) preg_replace('/:\d+$/', '', $host);
-    }
+        public readonly string $method;
+        public readonly string $uri;
+        public readonly string $path;
+        /** @var array<string, string|array<mixed>> */
+        public readonly array $query;
+        /** @var array<string, string> names in lowercase */
+        public readonly array $headers;
+        public readonly string $body;
+        /** IP address and port of the client, or of the proxy in front of it. */
+        public readonly string $remoteAddress;
+        public readonly int $remotePort;
+        /** Address and port the connection arrived on. */
+        public readonly string $serverAddress;
+        public readonly int $serverPort;
 
-    public function header(string $name): ?string
-    {
-        return $this->headers[strtolower($name)] ?? null;
-    }
-
-    /** The body as JSON; throws on invalid JSON. */
-    public function json(): mixed
-    {
-        return json_decode($this->body, true, flags: JSON_THROW_ON_ERROR);
-    }
-
-    /** @var array<string, mixed>|null */
-    private ?array $cookies = null;
-    /** @var array{array<string, mixed>, array<string, mixed>}|null */
-    private ?array $form = null;
-
-    /**
-     * The cookies like $_COOKIE under FPM, via PHP's own parser: the first of several with the same name
-     * wins, a[b] becomes an array, dots and spaces in names become underscores.
-     *
-     * @return array<string, mixed>
-     */
-    public function cookies(): array
-    {
-        return $this->cookies ??= \tenma_parse_cookies($this->header('cookie') ?? '', false);
-    }
-
-    public function cookie(string $name): ?string
-    {
-        $value = $this->cookies()[$name] ?? null;
-        return is_string($value) ? $value : null;
-    }
-
-    /**
-     * Form fields from application/x-www-form-urlencoded or multipart/form-data, with the same
-     * semantics as $_POST (a[] appends, a[b] nests, duplicates overwrite).
-     *
-     * @return array<string, mixed>
-     */
-    public function form(): array
-    {
-        return $this->parseForm()[0];
-    }
-
-    /**
-     * Uploaded files from multipart/form-data, by field name; names as with form() (name[] becomes
-     * a list, name[a] nests).
-     *
-     * @return array<string, mixed> UploadedFile or arrays of them
-     */
-    public function files(): array
-    {
-        return $this->parseForm()[1];
-    }
-
-    /** @return array{array<string, mixed>, array<string, mixed>} */
-    private function parseForm(): array
-    {
-        if ($this->form !== null) {
-            return $this->form;
+        /** @param array{method: string, uri: string, headers: array<string, string>, body: string, remote_addr: string, remote_port: int, server_addr: string, server_port: int} $raw */
+        public function __construct(array $raw)
+        {
+            $this->method = $raw['method'];
+            $this->uri = $raw['uri'];
+            // parse_url() would take "//host/admin" for a host and the path /admin
+            [$path, $queryString] = str_starts_with($raw['uri'], '/')
+                ? explode('?', $raw['uri'], 2) + [1 => '']
+                : [parse_url($raw['uri'], PHP_URL_PATH) ?: '/', parse_url($raw['uri'], PHP_URL_QUERY) ?? ''];
+            $this->path = $path;
+            parse_str($queryString, $query);
+            $this->query = $query;
+            $this->headers = $raw['headers'];
+            $this->body = $raw['body'];
+            $this->remoteAddress = $raw['remote_addr'];
+            $this->remotePort = $raw['remote_port'];
+            $this->serverAddress = $raw['server_addr'];
+            $this->serverPort = $raw['server_port'];
         }
-        $type = $this->header('content-type') ?? '';
-        if (stripos($type, 'application/x-www-form-urlencoded') === 0) {
-            parse_str($this->body, $fields);
-            return $this->form = [$fields, []];
+
+        /**
+         * The host from the Host header, without port; otherwise the address the connection arrived on. The
+         * client controls the Host header: for links in emails or for redirects, only use it checked against
+         * a list of allowed hosts.
+         */
+        public function host(): string
+        {
+            $host = $this->header('host') ?? '';
+            return $host === '' ? $this->serverAddress : (string) preg_replace('/:\d+$/', '', $host);
         }
-        if (stripos($type, 'multipart/form-data') === 0 && preg_match('/boundary=(?:"([^"]+)"|([^;\s]+))/i', $type, $match)) {
-            return $this->form = Multipart::parse($this->body, $match[1] !== '' ? $match[1] : $match[2]);
+
+        public function header(string $name): ?string
+        {
+            return $this->headers[strtolower($name)] ?? null;
         }
-        return $this->form = [[], []];
-    }
-}
 
-/** An uploaded file, entirely in memory (up to --max-body). */
-final class UploadedFile
-{
-    public function __construct(
-        /** The file name from the client, without directory; never use it unchecked as a path. */
-        public readonly string $name,
-        /** The type the client states; not trustworthy. */
-        public readonly string $type,
-        private readonly string $contents,
-    ) {}
-
-    public function size(): int
-    {
-        return strlen($this->contents);
-    }
-
-    public function contents(): string
-    {
-        return $this->contents;
-    }
-
-    /** Writes the file to $path without blocking the server. */
-    public function moveTo(string $path): void
-    {
-        \Tenma\Fs::writeFile($path, $this->contents);
-    }
-}
-
-/** @internal Splits multipart/form-data into fields and files, following the rules of PHP's rfc1867 parser. */
-final class Multipart
-{
-    /** Like max_input_vars: more parts are an attack or a bug, not forms. */
-    private const MAX_PARTS = 1000;
-
-    /** @return array{array<string, mixed>, array<string, mixed>} */
-    public static function parse(string $body, string $boundary): array
-    {
-        // Like PHP: lines end with CRLF or just LF. With a limit, so a hostile body does not first create
-        // millions of parts; the rest then ends up in the last element
-        $parts = preg_split('/\r?\n--' . preg_quote($boundary, '/') . '/', "\n" . $body, self::MAX_PARTS + 2);
-        // Nothing useful comes before the first boundary; nor after the last one (--)
-        array_shift($parts);
-        // The closing boundary (--) is no part of its own
-        if (count($parts) > self::MAX_PARTS && !(count($parts) === self::MAX_PARTS + 1 && str_starts_with(end($parts), '--'))) {
-            throw new \RuntimeException('Too many parts in the form');
+        /** The body as JSON; throws on invalid JSON. */
+        public function json(): mixed
+        {
+            return json_decode($this->body, true, flags: JSON_THROW_ON_ERROR);
         }
-        $fields = [];
-        $values = [];
-        $paths = [];
-        $uploads = [];
-        foreach ($parts as $part) {
-            if (str_starts_with($part, '--')) {
-                break;
+
+        /** @var array<string, mixed>|null */
+        private ?array $cookies = null;
+        /** @var array{array<string, mixed>, array<string, mixed>}|null */
+        private ?array $form = null;
+
+        /**
+         * The cookies like $_COOKIE under FPM, via PHP's own parser: the first of several with the same name
+         * wins, a[b] becomes an array, dots and spaces in names become underscores.
+         *
+         * @return array<string, mixed>
+         */
+        public function cookies(): array
+        {
+            return $this->cookies ??= \tenma_parse_cookies($this->header('cookie') ?? '', false);
+        }
+
+        public function cookie(string $name): ?string
+        {
+            $value = $this->cookies()[$name] ?? null;
+            return is_string($value) ? $value : null;
+        }
+
+        /**
+         * Form fields from application/x-www-form-urlencoded or multipart/form-data, with the same
+         * semantics as $_POST (a[] appends, a[b] nests, duplicates overwrite).
+         *
+         * @return array<string, mixed>
+         */
+        public function form(): array
+        {
+            return $this->parseForm()[0];
+        }
+
+        /**
+         * Uploaded files from multipart/form-data, by field name; names as with form() (name[] becomes
+         * a list, name[a] nests).
+         *
+         * @return array<string, mixed> UploadedFile or arrays of them
+         */
+        public function files(): array
+        {
+            return $this->parseForm()[1];
+        }
+
+        /** @return array{array<string, mixed>, array<string, mixed>} */
+        private function parseForm(): array
+        {
+            if ($this->form !== null) {
+                return $this->form;
             }
-            // The rest of the boundary line, then head and content, separated by an empty line
-            if (!preg_match('/\A[^\n]*\n(.*?)\r?\n\r?\n/s', $part, $match)) {
-                continue;
+            $type = $this->header('content-type') ?? '';
+            if (stripos($type, 'application/x-www-form-urlencoded') === 0) {
+                parse_str($this->body, $fields);
+                return $this->form = [$fields, []];
             }
-            $head = $match[1];
-            $content = substr($part, strlen($match[0]));
-            $disposition = self::parameters(self::header($head, 'content-disposition') ?? '');
-            $name = $disposition['name'] ?? null;
-            if ($name === null) {
-                continue;
+            if (stripos($type, 'multipart/form-data') === 0 && preg_match('/boundary=(?:"([^"]+)"|([^;\s]+))/i', $type, $match)) {
+                return $this->form = Multipart::parse($this->body, $match[1] !== '' ? $match[1] : $match[2]);
             }
-            $filename = $disposition['filename'] ?? null;
-            if ($filename === null) {
-                $values[] = $content;
-                $fields[] = self::encodeName($name) . '=' . (count($values) - 1);
-                continue;
+            return $this->form = [[], []];
+        }
+    }
+
+    /** An uploaded file, entirely in memory (up to --max-body). */
+    final class UploadedFile
+    {
+        public function __construct(
+            /** The file name from the client, without directory; never use it unchecked as a path. */
+            public readonly string $name,
+            /** The type the client states; not trustworthy. */
+            public readonly string $type,
+            private readonly string $contents,
+        ) {}
+
+        public function size(): int
+        {
+            return strlen($this->contents);
+        }
+
+        public function contents(): string
+        {
+            return $this->contents;
+        }
+
+        /** Writes the file to $path without blocking the server. */
+        public function moveTo(string $path): void
+        {
+            \Tenma\Fs::writeFile($path, $this->contents);
+        }
+    }
+
+    /** @internal Splits multipart/form-data into fields and files, following the rules of PHP's rfc1867 parser. */
+    final class Multipart
+    {
+        /** Like max_input_vars: more parts are an attack or a bug, not forms. */
+        private const MAX_PARTS = 1000;
+
+        /** @return array{array<string, mixed>, array<string, mixed>} */
+        public static function parse(string $body, string $boundary): array
+        {
+            // Like PHP: lines end with CRLF or just LF. With a limit, so a hostile body does not first create
+            // millions of parts; the rest then ends up in the last element
+            $parts = preg_split('/\r?\n--' . preg_quote($boundary, '/') . '/', "\n" . $body, self::MAX_PARTS + 2);
+            // Nothing useful comes before the first boundary; nor after the last one (--)
+            array_shift($parts);
+            // The closing boundary (--) is no part of its own
+            if (count($parts) > self::MAX_PARTS && !(count($parts) === self::MAX_PARTS + 1 && str_starts_with(end($parts), '--'))) {
+                throw new \RuntimeException('Too many parts in the form');
             }
-            if ($filename === '') {
-                // A file field with nothing selected, as the browser sends it; PHP drops one with content too
-                continue;
+            $fields = [];
+            $values = [];
+            $paths = [];
+            $uploads = [];
+            foreach ($parts as $part) {
+                if (str_starts_with($part, '--')) {
+                    break;
+                }
+                // The rest of the boundary line, then head and content, separated by an empty line
+                if (!preg_match('/\A[^\n]*\n(.*?)\r?\n\r?\n/s', $part, $match)) {
+                    continue;
+                }
+                $head = $match[1];
+                $content = substr($part, strlen($match[0]));
+                $disposition = self::parameters(self::header($head, 'content-disposition') ?? '');
+                $name = $disposition['name'] ?? null;
+                if ($name === null) {
+                    continue;
+                }
+                $filename = $disposition['filename'] ?? null;
+                if ($filename === null) {
+                    $values[] = $content;
+                    $fields[] = self::encodeName($name) . '=' . (count($values) - 1);
+                    continue;
+                }
+                if ($filename === '') {
+                    // A file field with nothing selected, as the browser sends it; PHP drops one with content too
+                    continue;
+                }
+                // Older clients send the full path, even with backslashes: only the name counts
+                $uploads[] = new UploadedFile(basename(str_replace('\\', '/', $filename)), self::header($head, 'content-type') ?? 'application/octet-stream', $content);
+                $paths[] = self::encodeName($name) . '=' . (count($uploads) - 1);
             }
-            // Older clients send the full path, even with backslashes: only the name counts
-            $uploads[] = new UploadedFile(basename(str_replace('\\', '/', $filename)), self::header($head, 'content-type') ?? 'application/octet-stream', $content);
-            $paths[] = self::encodeName($name) . '=' . (count($uploads) - 1);
+            // Names go through PHP's own parser: a[] appends, a[b] nests, a.b becomes a_b, later ones
+            // overwrite. It holds numbers first, then the values: a value never gets copied or encoded
+            parse_str(implode('&', $fields), $parsed);
+            parse_str(implode('&', $paths), $files);
+            array_walk_recursive($parsed, function (mixed &$index) use ($values): void {
+                $index = $values[(int) $index];
+            });
+            array_walk_recursive($files, function (mixed &$index) use ($uploads): void {
+                $index = $uploads[(int) $index];
+            });
+            return [$parsed, $files];
         }
-        // Names go through PHP's own parser: a[] appends, a[b] nests, a.b becomes a_b, later ones
-        // overwrite. It holds numbers first, then the values: a value never gets copied or encoded
-        parse_str(implode('&', $fields), $parsed);
-        parse_str(implode('&', $paths), $files);
-        array_walk_recursive($parsed, function (mixed &$index) use ($values): void {
-            $index = $values[(int) $index];
-        });
-        array_walk_recursive($files, function (mixed &$index) use ($uploads): void {
-            $index = $uploads[(int) $index];
-        });
-        return [$parsed, $files];
-    }
 
-    private static function header(string $head, string $name): ?string
-    {
-        foreach (preg_split('/\r?\n/', $head) as $line) {
-            [$key, $value] = explode(':', $line, 2) + [1 => ''];
-            if (strcasecmp(trim($key), $name) === 0) {
-                return trim($value);
+        private static function header(string $head, string $name): ?string
+        {
+            foreach (preg_split('/\r?\n/', $head) as $line) {
+                [$key, $value] = explode(':', $line, 2) + [1 => ''];
+                if (strcasecmp(trim($key), $name) === 0) {
+                    return trim($value);
+                }
             }
+            return null;
         }
-        return null;
+
+        /**
+         * The parameters of a header value like `form-data; name="x"; filename=y`, read from left to right
+         * so that a ; inside quotes does not start a new parameter. Inside quotes, as in PHP, only \" and
+         * \\ count as escapes; names in lowercase, the first one wins.
+         *
+         * @return array<string, string>
+         */
+        private static function parameters(string $value): array
+        {
+            preg_match_all('/;\s*([^\s=;]+)\s*=\s*(?:"((?:[^"\\\\]|\\\\.)*)"|([^;]*))/', $value, $matches, PREG_SET_ORDER);
+            $parameters = [];
+            foreach ($matches as $match) {
+                $parameters[strtolower($match[1])] ??= isset($match[3]) ? trim($match[3]) : preg_replace('/\\\\(["\\\\])/', '$1', $match[2]);
+            }
+            return $parameters;
+        }
+
+        /** Field names for parse_str: everything encoded except the brackets, which nest. */
+        private static function encodeName(string $name): string
+        {
+            return str_replace(['%5B', '%5D'], ['[', ']'], rawurlencode($name));
+        }
     }
 
     /**
-     * The parameters of a header value like `form-data; name="x"; filename=y`, read from left to right
-     * so that a ; inside quotes does not start a new parameter. Inside quotes, as in PHP, only \" and
-     * \\ count as escapes; names in lowercase, the first one wins.
-     *
-     * @return array<string, string>
+     * A complete response with status, headers and body. A handler may also return a string, which becomes a
+     * 200 with Content-Type text/plain. The static constructors build the usual kinds, header() and cookie()
+     * add to it.
      */
-    private static function parameters(string $value): array
+    final class Response
     {
-        preg_match_all('/;\s*([^\s=;]+)\s*=\s*(?:"((?:[^"\\\\]|\\\\.)*)"|([^;]*))/', $value, $matches, PREG_SET_ORDER);
-        $parameters = [];
-        foreach ($matches as $match) {
-            $parameters[strtolower($match[1])] ??= isset($match[3]) ? trim($match[3]) : preg_replace('/\\\\(["\\\\])/', '$1', $match[2]);
+        /** @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie */
+        public function __construct(
+            public string $body = '',
+            public int $status = 200,
+            public array $headers = ['content-type' => 'text/plain; charset=utf-8'],
+        ) {}
+
+        public static function json(mixed $data, int $status = 200): self
+        {
+            return new self(json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n", $status, ['content-type' => 'application/json']);
         }
-        return $parameters;
-    }
 
-    /** Field names for parse_str: everything encoded except the brackets, which nest. */
-    private static function encodeName(string $name): string
-    {
-        return str_replace(['%5B', '%5D'], ['[', ']'], rawurlencode($name));
-    }
-}
-
-/**
- * A complete response with status, headers and body. A handler may also return a string, which becomes a
- * 200 with Content-Type text/plain. The static constructors build the usual kinds, header() and cookie()
- * add to it.
- */
-final class Response
-{
-    /** @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie */
-    public function __construct(
-        public string $body = '',
-        public int $status = 200,
-        public array $headers = ['content-type' => 'text/plain; charset=utf-8'],
-    ) {}
-
-    public static function json(mixed $data, int $status = 200): self
-    {
-        return new self(json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n", $status, ['content-type' => 'application/json']);
-    }
-
-    public static function html(string $html, int $status = 200): self
-    {
-        return new self($html, $status, ['content-type' => 'text/html; charset=utf-8']);
-    }
-
-    /** Redirect; 302 (default), 303 after a POST, 301/308 for permanent ones. */
-    public static function redirect(string $location, int $status = 302): self
-    {
-        return (new self('', $status, []))->header('location', $location);
-    }
-
-    /** Sets a header; with $append another value is added instead of replacing the existing one. */
-    public function header(string $name, string $value, bool $append = false): self
-    {
-        checkHeader($name, $value);
-        $key = strtolower($name);
-        $this->headers[$key] = $append && isset($this->headers[$key]) ? [...(array) $this->headers[$key], $value] : $value;
-        return $this;
-    }
-
-    /**
-     * Sets a cookie like setcookie(): the value is encoded; without $expires (or with 0) it lasts until
-     * the browser session ends. Defaults as is common today: HttpOnly and SameSite=Lax.
-     */
-    public function cookie(
-        string $name,
-        string $value,
-        ?int $expires = null,
-        string $path = '/',
-        ?string $domain = null,
-        bool $secure = false,
-        bool $httpOnly = true,
-        string $sameSite = 'Lax',
-    ): self {
-        // The same forbidden characters as setcookie(), plus the null byte
-        $forbidden = "/[,; \t\r\n\013\014\0]/";
-        if ($name === '' || str_contains($name, '=') || preg_match($forbidden, $name)) {
-            throw new \ValueError("Invalid cookie name: $name");
+        public static function html(string $html, int $status = 200): self
+        {
+            return new self($html, $status, ['content-type' => 'text/html; charset=utf-8']);
         }
-        if (preg_match($forbidden, $path . ($domain ?? ''))) {
-            throw new \ValueError("Invalid path or domain in cookie $name");
+
+        /** Redirect; 302 (default), 303 after a POST, 301/308 for permanent ones. */
+        public static function redirect(string $location, int $status = 302): self
+        {
+            return (new self('', $status, []))->header('location', $location);
         }
-        if (!in_array($sameSite, ['', 'Lax', 'Strict', 'None'], true)) {
-            throw new \ValueError("SameSite must be Lax, Strict, None or empty, not $sameSite");
+
+        /** Sets a header; with $append another value is added instead of replacing the existing one. */
+        public function header(string $name, string $value, bool $append = false): self
+        {
+            checkHeader($name, $value);
+            $key = strtolower($name);
+            $this->headers[$key] = $append && isset($this->headers[$key]) ? [...(array) $this->headers[$key], $value] : $value;
+            return $this;
         }
-        // Browsers drop such a cookie without a word: say it here instead
-        if ($sameSite === 'None' && !$secure) {
-            throw new \ValueError("Cookie $name: SameSite=None needs secure: true, browsers drop it otherwise");
+
+        /**
+         * Sets a cookie like setcookie(): the value is encoded; without $expires (or with 0) it lasts until
+         * the browser session ends. Defaults as is common today: HttpOnly and SameSite=Lax.
+         */
+        public function cookie(
+            string $name,
+            string $value,
+            ?int $expires = null,
+            string $path = '/',
+            ?string $domain = null,
+            bool $secure = false,
+            bool $httpOnly = true,
+            string $sameSite = 'Lax',
+        ): self {
+            // The same forbidden characters as setcookie(), plus the null byte
+            $forbidden = "/[,; \t\r\n\013\014\0]/";
+            if ($name === '' || str_contains($name, '=') || preg_match($forbidden, $name)) {
+                throw new \ValueError("Invalid cookie name: $name");
+            }
+            if (preg_match($forbidden, $path . ($domain ?? ''))) {
+                throw new \ValueError("Invalid path or domain in cookie $name");
+            }
+            if (!in_array($sameSite, ['', 'Lax', 'Strict', 'None'], true)) {
+                throw new \ValueError("SameSite must be Lax, Strict, None or empty, not $sameSite");
+            }
+            // Browsers drop such a cookie without a word: say it here instead
+            if ($sameSite === 'None' && !$secure) {
+                throw new \ValueError("Cookie $name: SameSite=None needs secure: true, browsers drop it otherwise");
+            }
+            $cookie = "$name=" . rawurlencode($value);
+            if ($expires) {
+                $cookie .= '; Expires=' . gmdate('D, d M Y H:i:s', $expires) . ' GMT; Max-Age=' . max(0, $expires - time());
+            }
+            $cookie .= "; Path=$path";
+            $cookie .= $domain !== null ? "; Domain=$domain" : '';
+            $cookie .= $secure ? '; Secure' : '';
+            $cookie .= $httpOnly ? '; HttpOnly' : '';
+            $cookie .= $sameSite !== '' ? "; SameSite=$sameSite" : '';
+            return $this->header('set-cookie', $cookie, append: true);
         }
-        $cookie = "$name=" . rawurlencode($value);
-        if ($expires) {
-            $cookie .= '; Expires=' . gmdate('D, d M Y H:i:s', $expires) . ' GMT; Max-Age=' . max(0, $expires - time());
+
+        /**
+         * A response whose body is produced bit by bit: the head goes out right away, every write() right
+         * after it. The Fiber waits when the client cannot keep up.
+         *
+         * @param callable(Stream): void $writer
+         * @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie
+         */
+        public static function stream(callable $writer, int $status = 200, array $headers = ['content-type' => 'application/octet-stream']): StreamedResponse
+        {
+            return new StreamedResponse($writer(...), $status, $headers);
         }
-        $cookie .= "; Path=$path";
-        $cookie .= $domain !== null ? "; Domain=$domain" : '';
-        $cookie .= $secure ? '; Secure' : '';
-        $cookie .= $httpOnly ? '; HttpOnly' : '';
-        $cookie .= $sameSite !== '' ? "; SameSite=$sameSite" : '';
-        return $this->header('set-cookie', $cookie, append: true);
-    }
 
-    /**
-     * A response whose body is produced bit by bit: the head goes out right away, every write() right
-     * after it. The Fiber waits when the client cannot keep up.
-     *
-     * @param callable(Stream): void $writer
-     * @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie
-     */
-    public static function stream(callable $writer, int $status = 200, array $headers = ['content-type' => 'application/octet-stream']): StreamedResponse
-    {
-        return new StreamedResponse($writer(...), $status, $headers);
-    }
-
-    /**
-     * Server-Sent Events: the browser reads along with `new EventSource(url)`.
-     *
-     * @param callable(EventStream): void $writer
-     */
-    public static function events(callable $writer): StreamedResponse
-    {
-        return new StreamedResponse(
-            static fn (Stream $stream) => $writer(new EventStream($stream)),
-            200,
-            ['content-type' => 'text/event-stream', 'cache-control' => 'no-cache'],
-        );
-    }
-
-    /**
-     * Turns the connection into a WebSocket if the client asks for it; otherwise 426.
-     *
-     * @param callable(WebSocket): void $handler
-     */
-    public static function websocket(callable $handler): WebSocketResponse
-    {
-        return new WebSocketResponse($handler(...));
-    }
-}
-
-/** A response whose body a writer produces while it is sent, from Response::stream() and Response::events(). */
-final class StreamedResponse
-{
-    /** @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie */
-    public function __construct(
-        public readonly \Closure $writer,
-        public readonly int $status,
-        public readonly array $headers,
-    ) {}
-}
-
-/** Accepts the request as a WebSocket and runs the handler with the connection, from Response::websocket(). */
-final class WebSocketResponse
-{
-    public function __construct(public readonly \Closure $handler) {}
-}
-
-/** The client is gone: streams and WebSockets throw this on the next write. */
-final class ConnectionClosed extends \RuntimeException
-{
-}
-
-/** Body of a streaming response. */
-final class Stream
-{
-    public function __construct(private readonly int $rid) {}
-
-    public function write(string $chunk): void
-    {
-        \Tenma\Internal\requireFiber();
-        $result = \tenma_stream_write($this->rid, $chunk);
-        try {
-            $result > 0 && \Tenma\Internal\await($result);
-        } catch (\RuntimeException) {
-            $result = -1;
+        /**
+         * Server-Sent Events: the browser reads along with `new EventSource(url)`.
+         *
+         * @param callable(EventStream): void $writer
+         */
+        public static function events(callable $writer): StreamedResponse
+        {
+            return new StreamedResponse(
+                static fn (Stream $stream) => $writer(new EventStream($stream)),
+                200,
+                ['content-type' => 'text/event-stream', 'cache-control' => 'no-cache'],
+            );
         }
-        if ($result < 0) {
-            throw new ConnectionClosed('The client closed the connection');
-        }
-    }
-}
 
-/** Server-Sent Events on a stream. */
-final class EventStream
-{
-    public function __construct(private readonly Stream $stream) {}
-
-    public function send(string $data, ?string $event = null, ?string $id = null): void
-    {
-        // EventSource breaks lines at \r too: a line break in id or event would forge fields
-        if (strpbrk(($id ?? '') . ($event ?? ''), "\r\n") !== false) {
-            throw new \InvalidArgumentException('id and event must not contain line breaks');
-        }
-        $message = ($id !== null ? "id: $id\n" : '') . ($event !== null ? "event: $event\n" : '');
-        foreach (preg_split('/\r\n|\r|\n/', $data) as $line) {
-            $message .= "data: $line\n";
-        }
-        $this->stream->write("$message\n");
-    }
-
-    /** A comment keeps the connection alive through proxies; the browser ignores it. */
-    public function comment(string $text = ''): void
-    {
-        $this->stream->write(': ' . implode("\n: ", preg_split('/\r\n|\r|\n/', $text)) . "\n\n");
-    }
-}
-
-/** An accepted WebSocket connection, passed to the handler of Response::websocket(). */
-final class WebSocket
-{
-    public function __construct(private readonly int $rid) {}
-
-    /**
-     * Waits for the next message without blocking the server; null when the client has closed. Text and binary
-     * messages both arrive as a string of their bytes.
-     */
-    public function receive(): ?string
-    {
-        \Tenma\Internal\requireFiber();
-        $op = \tenma_ws_receive($this->rid);
-        return $op === 0 ? null : \Tenma\Internal\await($op);
-    }
-
-    /**
-     * Sends $data as a text message if it is valid UTF-8, otherwise as a binary one. Waits while the client
-     * is behind, like Stream::write().
-     */
-    public function send(string $data): void
-    {
-        $result = \tenma_ws_send($this->rid, $data);
-        try {
-            $result > 0 && \Tenma\Internal\await($result);
-        } catch (\RuntimeException) {
-            $result = -1;
-        }
-        if ($result < 0) {
-            throw new ConnectionClosed('The WebSocket is closed');
+        /**
+         * Turns the connection into a WebSocket if the client asks for it; otherwise 426.
+         *
+         * @param callable(WebSocket): void $handler
+         */
+        public static function websocket(callable $handler): WebSocketResponse
+        {
+            return new WebSocketResponse($handler(...));
         }
     }
 
-    public function close(): void
+    /** A response whose body a writer produces while it is sent, from Response::stream() and Response::events(). */
+    final class StreamedResponse
     {
-        \tenma_ws_close($this->rid, true);
+        /** @param array<string, string|list<string>> $headers several values as a list, for example for Set-Cookie */
+        public function __construct(
+            public readonly \Closure $writer,
+            public readonly int $status,
+            public readonly array $headers,
+        ) {}
     }
-}
 
-/**
- * The rules hyper checks only after the handler: a token as the name, no control character but tab
- * in the value. Line breaks would also start a header of their own (response splitting).
- */
-function checkHeader(string $name, string $value): void
-{
-    if (!preg_match('/\A[!#$%&\'*+.^_`|~0-9A-Za-z-]+\z/', $name) || preg_match('/[\x00-\x08\x0a-\x1f\x7f]/', $value)) {
-        throw new \ValueError("Invalid header: $name");
+    /** Accepts the request as a WebSocket and runs the handler with the connection, from Response::websocket(). */
+    final class WebSocketResponse
+    {
+        public function __construct(public readonly \Closure $handler) {}
     }
-}
 
-/**
- * @param array<string, string|list<string>> $headers
- * @return list<string>
- */
-function headerLines(array $headers): array
-{
-    $lines = [];
-    foreach ($headers as $name => $values) {
-        foreach ((array) $values as $value) {
-            checkHeader((string) $name, (string) $value);
-            $lines[] = "$name: $value";
-        }
-    }
-    return $lines;
-}
+    /** The client is gone: streams and WebSockets throw this on the next write. */
+    final class ConnectionClosed extends \RuntimeException {}
 
-/** @internal Behind Tenma::serve(). */
-function serve(int $port, callable $handler, string|array|null $static = null): void
-{
-    $mounts = [];
-    foreach (is_string($static) ? ['/' => $static] : $static ?? [] as $prefix => $path) {
-        if (!is_string($prefix) || !str_starts_with($prefix, '/') || str_contains($prefix, '?') || !is_string($path)) {
-            throw new \ValueError("static needs URL prefixes starting with / and paths, not $prefix");
-        }
-        $mounts[$prefix === '/' ? '/' : rtrim($prefix, '/')] = $path;
-    }
-    \tenma_listen($port, static function (array $raw, int $rid) use ($handler): void {
-        // Every request as its own task: it responds as soon as the handler is done, and can be
-        // cancelled together with all tasks it starts
-        \Tenma\Internal\Current::$request = $rid;
-        \Tenma\Task::start(static function () use ($handler, $raw, $rid): void {
+    /** Body of a streaming response. */
+    final class Stream
+    {
+        public function __construct(private readonly int $rid) {}
+
+        public function write(string $chunk): void
+        {
+            \Tenma\Internal\requireFiber();
+            $result = \tenma_stream_write($this->rid, $chunk);
             try {
-                respond($rid, new Request($raw), $handler);
-            } finally {
-                // The response is out: what the request started ends with it, only detach() outlives it
-                \Tenma\Internal\connectionEnded($rid);
+                $result > 0 && \Tenma\Internal\await($result);
+            } catch (\RuntimeException) {
+                $result = -1;
             }
-        }, false, null, $raw['method'] . ' ' . $raw['uri']);
-    }, $mounts);
-}
-
-/** Runs the handler and sends what it returns: a response, a stream or a WebSocket. */
-function respond(int $rid, Request $request, callable $handler): void
-{
-    // An exception in the handler ends only this request, not the server
-    try {
-        $response = $handler($request);
-    } catch (\Tenma\Cancelled) {
-        // Cancelled: after exit() or without a client the request is already answered, then this does nothing.
-        // Otherwise (a cancelled task the handler was waiting for) the client gets 500
-        \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
-        return;
-    } catch (\Throwable $error) {
-        error_log('Uncaught ' . $error);
-        $response = new Response("Internal Server Error\n", 500);
-    }
-    // A wrong response too (for example a forgotten return) ends only this request
-    try {
-        match (true) {
-            $response instanceof StreamedResponse => runStream($rid, $response),
-            $response instanceof WebSocketResponse => runWebSocket($rid, $request, $response),
-            $response instanceof Response => \tenma_respond($rid, [$response->status, headerLines($response->headers), $response->body]),
-            is_string($response) => \tenma_respond($rid, [200, headerLines((new Response())->headers), $response]),
-            default => throw new \TypeError('A Tenma::serve() handler must return Response, StreamedResponse, WebSocketResponse or string, not ' . get_debug_type($response)),
-        };
-    } catch (\Throwable $error) {
-        error_log('Uncaught ' . $error);
-        \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
-    }
-}
-
-function runStream(int $rid, StreamedResponse $response): void
-{
-    if (!\tenma_stream_start($rid, $response->status, headerLines($response->headers))) {
-        return;
-    }
-    // Only a writer that returns ends the stream normally; otherwise the client sees it cut off
-    $finished = false;
-    try {
-        ($response->writer)(new Stream($rid));
-        $finished = true;
-    } catch (ConnectionClosed | \Tenma\Cancelled) {
-        // The client left or the request was cancelled; not an error for the server
-    } catch (\Throwable $error) {
-        error_log('Uncaught ' . $error);
-    } finally {
-        \tenma_stream_end($rid, $finished);
-    }
-}
-
-function runWebSocket(int $rid, Request $request, WebSocketResponse $response): void
-{
-    if (strcasecmp($request->header('upgrade') ?? '', 'websocket') !== 0) {
-        \tenma_respond($rid, [426, ['Content-Type: text/plain; charset=utf-8', 'Upgrade: websocket'], "Upgrade Required\n"]);
-        return;
-    }
-    // RFC 6455 4.2: only a GET opens a WebSocket, and only version 13 exists
-    if ($request->method !== 'GET') {
-        \tenma_respond($rid, [405, ['Content-Type: text/plain; charset=utf-8', 'Allow: GET'], "Method Not Allowed\n"]);
-        return;
-    }
-    if ($request->header('sec-websocket-version') !== '13') {
-        \tenma_respond($rid, [426, ['Content-Type: text/plain; charset=utf-8', 'Sec-WebSocket-Version: 13'], "Upgrade Required\n"]);
-        return;
-    }
-    if (!\tenma_ws_accept($rid)) {
-        return;
-    }
-    $socket = new WebSocket($rid);
-    // An error in the handler closes with 1011 instead of a normal close
-    $finished = false;
-    try {
-        ($response->handler)($socket);
-        $finished = true;
-    } catch (ConnectionClosed | \Tenma\Cancelled) {
-        // The client left or the request was cancelled; not an error for the server
-    } catch (\Throwable $error) {
-        error_log('Uncaught ' . $error);
-    } finally {
-        \tenma_ws_close($rid, $finished);
-    }
-}
-
-/** Response from fetch(). */
-final class FetchResponse
-{
-    /** @param list<string> $headers header lines "Name: Value" */
-    public function __construct(
-        public readonly int $status,
-        public readonly array $headers,
-        public readonly string $body,
-    ) {}
-
-    public function header(string $name): ?string
-    {
-        foreach ($this->headers as $line) {
-            [$key, $value] = explode(':', $line, 2) + [1 => ''];
-            if (strcasecmp($key, $name) === 0) {
-                return trim($value);
+            if ($result < 0) {
+                throw new ConnectionClosed('The client closed the connection');
             }
         }
-        return null;
     }
 
-    public function json(): mixed
+    /** Server-Sent Events on a stream. */
+    final class EventStream
     {
-        return json_decode($this->body, true, flags: JSON_THROW_ON_ERROR);
+        public function __construct(private readonly Stream $stream) {}
+
+        public function send(string $data, ?string $event = null, ?string $id = null): void
+        {
+            // EventSource breaks lines at \r too: a line break in id or event would forge fields
+            if (strpbrk(($id ?? '') . ($event ?? ''), "\r\n") !== false) {
+                throw new \InvalidArgumentException('id and event must not contain line breaks');
+            }
+            $message = ($id !== null ? "id: $id\n" : '') . ($event !== null ? "event: $event\n" : '');
+            foreach (preg_split('/\r\n|\r|\n/', $data) as $line) {
+                $message .= "data: $line\n";
+            }
+            $this->stream->write("$message\n");
+        }
+
+        /** A comment keeps the connection alive through proxies; the browser ignores it. */
+        public function comment(string $text = ''): void
+        {
+            $this->stream->write(': ' . implode("\n: ", preg_split('/\r\n|\r|\n/', $text)) . "\n\n");
+        }
     }
-}
 
-/** @internal Behind Tenma::fetch(). */
-function fetch(string $url, string $method = 'GET', array $headers = [], string $body = '', float $timeout = 30.0): FetchResponse
-{
-    \Tenma\Internal\requireFiber();
-    $lines = headerLines($headers);
-    [$status, $responseHeaders, $responseBody] = \Tenma\Internal\await(\tenma_op_fetch($method, $url, $lines, $body, (int) ceil($timeout * 1000)));
-    return new FetchResponse($status, $responseHeaders, $responseBody);
-}
+    /** An accepted WebSocket connection, passed to the handler of Response::websocket(). */
+    final class WebSocket
+    {
+        public function __construct(private readonly int $rid) {}
 
-/** @internal Behind Tenma::serveClassic(). */
-function serveClassic(int $port, callable $app): void
-{
-    $server = $_SERVER;
-    // Superglobals, headers and output buffers exist only once: so classic code runs without a
-    // Fiber, one request after another, and asynchronous functions throw here
-    \tenma_listen($port, static function (array $raw, int $rid) use ($app, $server): void {
-        $request = new Request($raw);
-        startClassic($server, $request, $rid);
+        /**
+         * Waits for the next message without blocking the server; null when the client has closed. Text and binary
+         * messages both arrive as a string of their bytes.
+         */
+        public function receive(): ?string
+        {
+            \Tenma\Internal\requireFiber();
+            $op = \tenma_ws_receive($this->rid);
+            return $op === 0 ? null : \Tenma\Internal\await($op);
+        }
+
+        /**
+         * Sends $data as a text message if it is valid UTF-8, otherwise as a binary one. Waits while the client
+         * is behind, like Stream::write().
+         */
+        public function send(string $data): void
+        {
+            $result = \tenma_ws_send($this->rid, $data);
+            try {
+                $result > 0 && \Tenma\Internal\await($result);
+            } catch (\RuntimeException) {
+                $result = -1;
+            }
+            if ($result < 0) {
+                throw new ConnectionClosed('The WebSocket is closed');
+            }
+        }
+
+        public function close(): void
+        {
+            \tenma_ws_close($this->rid, true);
+        }
+    }
+
+    /**
+     * The rules hyper checks only after the handler: a token as the name, no control character but tab
+     * in the value. Line breaks would also start a header of their own (response splitting).
+     */
+    function checkHeader(string $name, string $value): void
+    {
+        if (!preg_match('/\A[!#$%&\'*+.^_`|~0-9A-Za-z-]+\z/', $name) || preg_match('/[\x00-\x08\x0a-\x1f\x7f]/', $value)) {
+            throw new \ValueError("Invalid header: $name");
+        }
+    }
+
+    /**
+     * @param array<string, string|list<string>> $headers
+     * @return list<string>
+     */
+    function headerLines(array $headers): array
+    {
+        $lines = [];
+        foreach ($headers as $name => $values) {
+            foreach ((array) $values as $value) {
+                checkHeader((string) $name, (string) $value);
+                $lines[] = "$name: $value";
+            }
+        }
+        return $lines;
+    }
+
+    /** @internal Behind Tenma::serve(). */
+    function serve(int $port, callable $handler, string|array|null $static = null): void
+    {
+        $mounts = [];
+        foreach (is_string($static) ? ['/' => $static] : $static ?? [] as $prefix => $path) {
+            if (!is_string($prefix) || !str_starts_with($prefix, '/') || str_contains($prefix, '?') || !is_string($path)) {
+                throw new \ValueError("static needs URL prefixes starting with / and paths, not $prefix");
+            }
+            $mounts[$prefix === '/' ? '/' : rtrim($prefix, '/')] = $path;
+        }
+        \tenma_listen($port, static function (array $raw, int $rid) use ($handler): void {
+            // Every request as its own task: it responds as soon as the handler is done, and can be
+            // cancelled together with all tasks it starts
+            \Tenma\Internal\Current::$request = $rid;
+            \Tenma\Task::start(static function () use ($handler, $raw, $rid): void {
+                try {
+                    respond($rid, new Request($raw), $handler);
+                } finally {
+                    // The response is out: what the request started ends with it, only detach() outlives it
+                    \Tenma\Internal\connectionEnded($rid);
+                }
+            }, false, null, $raw['method'] . ' ' . $raw['uri']);
+        }, $mounts);
+    }
+
+    /** Runs the handler and sends what it returns: a response, a stream or a WebSocket. */
+    function respond(int $rid, Request $request, callable $handler): void
+    {
+        // An exception in the handler ends only this request, not the server
         try {
-            $app($request->body);
+            $response = $handler($request);
+        } catch (\Tenma\Cancelled) {
+            // Cancelled: after exit() or without a client the request is already answered, then this does nothing.
+            // Otherwise (a cancelled task the handler was waiting for) the client gets 500
+            \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
+            return;
         } catch (\Throwable $error) {
             error_log('Uncaught ' . $error);
-            \Tenma\Internal\Current::$failed = true;
+            $response = new Response("Internal Server Error\n", 500);
         }
-        // Tenma takes over shutdown functions and the response once no PHP code is running: finishClassic()
-    });
-}
-
-/**
- * Prepares a classic request like FPM: superglobals, php://input, uploads, output buffers.
- *
- * @param array<string, mixed> $server
- */
-function startClassic(array $server, Request $request, int $rid): void
-{
-    \tenma_set_input($request->body);
-    $contentType = $request->header('content-type') ?? '';
-    $_GET = $request->query;
-    $_POST = [];
-    $_FILES = [];
-    // Media types ignore case, as in PHP's SAPI
-    if (stripos($contentType, 'application/x-www-form-urlencoded') === 0) {
-        parse_str($request->body, $_POST);
-    } elseif (stripos($contentType, 'multipart/form-data') === 0) {
-        [$_POST, $_FILES] = \tenma_parse_multipart($contentType, $request->body);
-    }
-    // As under FPM, $_SESSION exists only after session_start(), never from the previous request
-    unset($_SESSION);
-    $_COOKIE = \tenma_parse_cookies($request->header('cookie') ?? '', true);
-    // Like request_order=GP: POST overwrites GET, keys stay as they are
-    $_REQUEST = array_replace($_GET, $_POST);
-    $_SERVER = [
-        ...$server,
-        'REQUEST_METHOD' => $request->method,
-        'REQUEST_URI' => $request->uri,
-        'QUERY_STRING' => explode('?', $request->uri, 2)[1] ?? '',
-        'SERVER_PROTOCOL' => 'HTTP/1.1',
-        'SERVER_SOFTWARE' => 'tenma',
-        'REQUEST_SCHEME' => 'http',
-        'REMOTE_ADDR' => $request->remoteAddress,
-        'REMOTE_PORT' => (string) $request->remotePort,
-        'SERVER_ADDR' => $request->serverAddress,
-        'SERVER_PORT' => (string) $request->serverPort,
-        // The configured name (--server-name), never the Host header the client controls
-        'SERVER_NAME' => $server['SERVER_NAME'] ?? 'localhost',
-        // As under FPM with a front controller: the script sits in the site's root directory
-        'DOCUMENT_ROOT' => dirname($server['SCRIPT_FILENAME']),
-        'SCRIPT_NAME' => '/' . basename($server['SCRIPT_FILENAME']),
-        'PHP_SELF' => '/' . basename($server['SCRIPT_FILENAME']),
-        'REQUEST_TIME' => time(),
-        'REQUEST_TIME_FLOAT' => microtime(true),
-    ];
-    foreach ($request->headers as $name => $value) {
-        // Headers with an underscore are dropped, otherwise x_forwarded_for would overwrite X-Forwarded-For
-        if (str_contains($name, '_')) {
-            continue;
+        // A wrong response too (for example a forgotten return) ends only this request
+        try {
+            match (true) {
+                $response instanceof StreamedResponse => runStream($rid, $response),
+                $response instanceof WebSocketResponse => runWebSocket($rid, $request, $response),
+                $response instanceof Response => \tenma_respond($rid, [$response->status, headerLines($response->headers), $response->body]),
+                is_string($response) => \tenma_respond($rid, [200, headerLines((new Response())->headers), $response]),
+                default => throw new \TypeError('A Tenma::serve() handler must return Response, StreamedResponse, WebSocketResponse or string, not ' . get_debug_type($response)),
+            };
+        } catch (\Throwable $error) {
+            error_log('Uncaught ' . $error);
+            \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
         }
-        $key = strtoupper(str_replace('-', '_', $name));
-        $_SERVER[in_array($key, ['CONTENT_TYPE', 'CONTENT_LENGTH'], true) ? $key : "HTTP_$key"] = $value;
     }
 
-    \Tenma\Internal\Current::$classic = $rid;
-    // From here on Tenma collects everything PHP outputs, even through flushed output buffers
-    \tenma_classic_begin();
-}
+    function runStream(int $rid, StreamedResponse $response): void
+    {
+        if (!\tenma_stream_start($rid, $response->status, headerLines($response->headers))) {
+            return;
+        }
+        // Only a writer that returns ends the stream normally; otherwise the client sees it cut off
+        $finished = false;
+        try {
+            ($response->writer)(new Stream($rid));
+            $finished = true;
+        } catch (ConnectionClosed | \Tenma\Cancelled) {
+            // The client left or the request was cancelled; not an error for the server
+        } catch (\Throwable $error) {
+            error_log('Uncaught ' . $error);
+        } finally {
+            \tenma_stream_end($rid, $finished);
+        }
+    }
 
-/**
- * What PHP otherwise does at the end of every request: save and close the session. Then Tenma forgets
- * its ID, otherwise the next visitor would take it over.
- */
-function endSession(): void
-{
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        session_write_close();
+    function runWebSocket(int $rid, Request $request, WebSocketResponse $response): void
+    {
+        if (strcasecmp($request->header('upgrade') ?? '', 'websocket') !== 0) {
+            \tenma_respond($rid, [426, ['Content-Type: text/plain; charset=utf-8', 'Upgrade: websocket'], "Upgrade Required\n"]);
+            return;
+        }
+        // RFC 6455 4.2: only a GET opens a WebSocket, and only version 13 exists
+        if ($request->method !== 'GET') {
+            \tenma_respond($rid, [405, ['Content-Type: text/plain; charset=utf-8', 'Allow: GET'], "Method Not Allowed\n"]);
+            return;
+        }
+        if ($request->header('sec-websocket-version') !== '13') {
+            \tenma_respond($rid, [426, ['Content-Type: text/plain; charset=utf-8', 'Sec-WebSocket-Version: 13'], "Upgrade Required\n"]);
+            return;
+        }
+        if (!\tenma_ws_accept($rid)) {
+            return;
+        }
+        $socket = new WebSocket($rid);
+        // An error in the handler closes with 1011 instead of a normal close
+        $finished = false;
+        try {
+            ($response->handler)($socket);
+            $finished = true;
+        } catch (ConnectionClosed | \Tenma\Cancelled) {
+            // The client left or the request was cancelled; not an error for the server
+        } catch (\Throwable $error) {
+            error_log('Uncaught ' . $error);
+        } finally {
+            \tenma_ws_close($rid, $finished);
+        }
     }
-    \tenma_forget_session();
-}
 
-/**
- * Answers the current classic request. Tenma calls this when no PHP code is running anymore and
- * the request's shutdown functions are done; their output still belongs to the response, as under FPM.
- * After an exception there is a 500 without the output so far, after a fatal error the output with 500.
- */
-function finishClassic(bool $fatal): void
-{
-    $rid = \Tenma\Internal\Current::$classic;
-    if ($rid === null) {
-        return;
-    }
-    $failed = \Tenma\Internal\Current::$failed;
-    \Tenma\Internal\Current::$classic = null;
-    \Tenma\Internal\Current::$failed = false;
-    $body = \tenma_take_output();
-    endSession();
+    /** Response from fetch(). */
+    final class FetchResponse
+    {
+        /** @param list<string> $headers header lines "Name: Value" */
+        public function __construct(
+            public readonly int $status,
+            public readonly array $headers,
+            public readonly string $body,
+        ) {}
 
-    if ($failed) {
-        \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
-        return;
+        public function header(string $name): ?string
+        {
+            foreach ($this->headers as $line) {
+                [$key, $value] = explode(':', $line, 2) + [1 => ''];
+                if (strcasecmp($key, $name) === 0) {
+                    return trim($value);
+                }
+            }
+            return null;
+        }
+
+        public function json(): mixed
+        {
+            return json_decode($this->body, true, flags: JSON_THROW_ON_ERROR);
+        }
     }
-    $headers = headers_list();
-    if (!array_filter($headers, fn ($line) => stripos($line, 'content-type:') === 0)) {
-        $headers[] = 'Content-Type: text/html; charset=UTF-8';
+
+    /** @internal Behind Tenma::fetch(). */
+    function fetch(string $url, string $method = 'GET', array $headers = [], string $body = '', float $timeout = 30.0): FetchResponse
+    {
+        \Tenma\Internal\requireFiber();
+        $lines = headerLines($headers);
+        [$status, $responseHeaders, $responseBody] = \Tenma\Internal\await(\tenma_op_fetch($method, $url, $lines, $body, (int) ceil($timeout * 1000)));
+        return new FetchResponse($status, $responseHeaders, $responseBody);
     }
-    $status = http_response_code() ?: 200;
-    // tenma_respond() would throw here, outside the script: that would end the worker
-    if ($status < 100 || $status > 999) {
-        error_log("HTTP status $status is not between 100 and 999");
-        $status = 500;
+
+    /** @internal Behind Tenma::serveClassic(). */
+    function serveClassic(int $port, callable $app): void
+    {
+        $server = $_SERVER;
+        // Superglobals, headers and output buffers exist only once: so classic code runs without a
+        // Fiber, one request after another, and asynchronous functions throw here
+        \tenma_listen($port, static function (array $raw, int $rid) use ($app, $server): void {
+            $request = new Request($raw);
+            startClassic($server, $request, $rid);
+            try {
+                $app($request->body);
+            } catch (\Throwable $error) {
+                error_log('Uncaught ' . $error);
+                \Tenma\Internal\Current::$failed = true;
+            }
+            // Tenma takes over shutdown functions and the response once no PHP code is running: finishClassic()
+        });
     }
-    \tenma_respond($rid, [$fatal && $status === 200 ? 500 : $status, $headers, $body]);
-}
+
+    /**
+     * Prepares a classic request like FPM: superglobals, php://input, uploads, output buffers.
+     *
+     * @param array<string, mixed> $server
+     */
+    function startClassic(array $server, Request $request, int $rid): void
+    {
+        \tenma_set_input($request->body);
+        $contentType = $request->header('content-type') ?? '';
+        $_GET = $request->query;
+        $_POST = [];
+        $_FILES = [];
+        // Media types ignore case, as in PHP's SAPI
+        if (stripos($contentType, 'application/x-www-form-urlencoded') === 0) {
+            parse_str($request->body, $_POST);
+        } elseif (stripos($contentType, 'multipart/form-data') === 0) {
+            [$_POST, $_FILES] = \tenma_parse_multipart($contentType, $request->body);
+        }
+        // As under FPM, $_SESSION exists only after session_start(), never from the previous request
+        unset($_SESSION);
+        $_COOKIE = \tenma_parse_cookies($request->header('cookie') ?? '', true);
+        // Like request_order=GP: POST overwrites GET, keys stay as they are
+        $_REQUEST = array_replace($_GET, $_POST);
+        $_SERVER = [
+            ...$server,
+            'REQUEST_METHOD' => $request->method,
+            'REQUEST_URI' => $request->uri,
+            'QUERY_STRING' => explode('?', $request->uri, 2)[1] ?? '',
+            'SERVER_PROTOCOL' => 'HTTP/1.1',
+            'SERVER_SOFTWARE' => 'tenma',
+            'REQUEST_SCHEME' => 'http',
+            'REMOTE_ADDR' => $request->remoteAddress,
+            'REMOTE_PORT' => (string) $request->remotePort,
+            'SERVER_ADDR' => $request->serverAddress,
+            'SERVER_PORT' => (string) $request->serverPort,
+            // The configured name (--server-name), never the Host header the client controls
+            'SERVER_NAME' => $server['SERVER_NAME'] ?? 'localhost',
+            // As under FPM with a front controller: the script sits in the site's root directory
+            'DOCUMENT_ROOT' => dirname($server['SCRIPT_FILENAME']),
+            'SCRIPT_NAME' => '/' . basename($server['SCRIPT_FILENAME']),
+            'PHP_SELF' => '/' . basename($server['SCRIPT_FILENAME']),
+            'REQUEST_TIME' => time(),
+            'REQUEST_TIME_FLOAT' => microtime(true),
+        ];
+        foreach ($request->headers as $name => $value) {
+            // Headers with an underscore are dropped, otherwise x_forwarded_for would overwrite X-Forwarded-For
+            if (str_contains($name, '_')) {
+                continue;
+            }
+            $key = strtoupper(str_replace('-', '_', $name));
+            $_SERVER[in_array($key, ['CONTENT_TYPE', 'CONTENT_LENGTH'], true) ? $key : "HTTP_$key"] = $value;
+        }
+
+        \Tenma\Internal\Current::$classic = $rid;
+        // From here on Tenma collects everything PHP outputs, even through flushed output buffers
+        \tenma_classic_begin();
+    }
+
+    /**
+     * What PHP otherwise does at the end of every request: save and close the session. Then Tenma forgets
+     * its ID, otherwise the next visitor would take it over.
+     */
+    function endSession(): void
+    {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+        \tenma_forget_session();
+    }
+
+    /**
+     * Answers the current classic request. Tenma calls this when no PHP code is running anymore and
+     * the request's shutdown functions are done; their output still belongs to the response, as under FPM.
+     * After an exception there is a 500 without the output so far, after a fatal error the output with 500.
+     */
+    function finishClassic(bool $fatal): void
+    {
+        $rid = \Tenma\Internal\Current::$classic;
+        if ($rid === null) {
+            return;
+        }
+        $failed = \Tenma\Internal\Current::$failed;
+        \Tenma\Internal\Current::$classic = null;
+        \Tenma\Internal\Current::$failed = false;
+        $body = \tenma_take_output();
+        endSession();
+
+        if ($failed) {
+            \tenma_respond($rid, [500, ['Content-Type: text/plain; charset=utf-8'], "Internal Server Error\n"]);
+            return;
+        }
+        $headers = headers_list();
+        if (!array_filter($headers, fn ($line) => stripos($line, 'content-type:') === 0)) {
+            $headers[] = 'Content-Type: text/html; charset=UTF-8';
+        }
+        $status = http_response_code() ?: 200;
+        // tenma_respond() would throw here, outside the script: that would end the worker
+        if ($status < 100 || $status > 999) {
+            error_log("HTTP status $status is not between 100 and 999");
+            $status = 500;
+        }
+        \tenma_respond($rid, [$fatal && $status === 200 ? 500 : $status, $headers, $body]);
+    }
 }
 
 namespace {
