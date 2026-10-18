@@ -254,7 +254,7 @@ final class Server
                 $diagnostics[] = [
                     'range' => ['start' => ['line' => $line, 'character' => $character], 'end' => ['line' => $line, 'character' => utf16($lineText)]],
                     'severity' => match ($problem['severity'] ?? 'error') {
-                        'warning' => 2, 'info' => 3, default => 1
+                        'warning' => 2, 'info' => 3, default => 1,
                     },
                     'source' => (string) $problem['source'],
                     'message' => (string) ($problem['message'] ?? ''),
@@ -406,7 +406,7 @@ final class Server
             $diagnostics[] = [
                 'range' => ['start' => ['line' => $line, 'character' => 0], 'end' => ['line' => $line, 'character' => lineLength($text, $line)]],
                 'severity' => match ($problem['severity'] ?? 'error') {
-                    'warning' => 2, 'info' => 3, default => 1
+                    'warning' => 2, 'info' => 3, default => 1,
                 },
                 'source' => 'tenma',
                 'message' => (string) ($problem['message'] ?? ''),
@@ -436,7 +436,7 @@ final class Server
             $items[] = array_filter([
                 'label' => (string) ($item['label'] ?? ''),
                 'kind' => match ($item['kind'] ?? null) {
-                    'method' => 2, 'property' => 10, 'class' => 7, 'keyword' => 14, default => 12
+                    'method' => 2, 'property' => 10, 'class' => 7, 'keyword' => 14, default => 12,
                 },
                 'detail' => $item['detail'] ?? null,
                 'insertText' => $item['insert'] ?? null,

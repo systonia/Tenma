@@ -314,7 +314,7 @@ function value(mixed $value): string
         is_string($value) && preg_match('/[\x00-\x1f\x7f]/', $value) => '"' . preg_replace_callback(
             '/[\x00-\x1f\x7f]/',
             fn ($match) => match ($match[0]) {
-                "\n" => '\n', "\r" => '\r', "\t" => '\t', "\v" => '\v', "\e" => '\e', "\f" => '\f', default => sprintf('\x%02X', ord($match[0]))
+                "\n" => '\n', "\r" => '\r', "\t" => '\t', "\v" => '\v', "\e" => '\e', "\f" => '\f', default => sprintf('\x%02X', ord($match[0])),
             },
             addcslashes($value, '\\"$'),
         ) . '"',
