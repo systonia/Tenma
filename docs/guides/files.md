@@ -39,19 +39,19 @@ Tenma::serve(8080, function (Request $request) use ($dir) {
 });
 ```
 
-| Function | |
-|---|---|
-| `readFile($path)` | the whole file as a string |
-| `writeFile($path, $data)` | creates or replaces |
-| `appendFile($path, $data)` | creates or appends |
-| `exists($path)` | `true` for files and directories |
-| `stat($path)` | `['size' => …, 'modified' => float, 'isFile' => …, 'isDir' => …]` |
-| `readDir($path)` | names in the directory, sorted, without `.` and `..` |
-| `mkdir($path, recursive: false)` | without `recursive`, an error if it exists |
-| `rename($from, $to)` | also across file systems (then copy and delete) |
-| `copy($from, $to)` | returns the bytes copied; onto itself is an error |
-| `remove($path)` | a file |
-| `removeDir($path, recursive: false)` | an empty directory, with `recursive` also its contents |
+| Function                             |                                                                   |
+| ------------------------------------ | ----------------------------------------------------------------- |
+| `readFile($path)`                    | the whole file as a string                                        |
+| `writeFile($path, $data)`            | creates or replaces                                               |
+| `appendFile($path, $data)`           | creates or appends                                                |
+| `exists($path)`                      | `true` for files and directories                                  |
+| `stat($path)`                        | `['size' => …, 'modified' => float, 'isFile' => …, 'isDir' => …]` |
+| `readDir($path)`                     | names in the directory, sorted, without `.` and `..`              |
+| `mkdir($path, recursive: false)`     | without `recursive`, an error if it exists                        |
+| `rename($from, $to)`                 | also across file systems (then copy and delete)                   |
+| `copy($from, $to)`                   | returns the bytes copied; onto itself is an error                 |
+| `remove($path)`                      | a file                                                            |
+| `removeDir($path, recursive: false)` | an empty directory, with `recursive` also its contents            |
 
 Paths behave as with PHP's file functions: relative to the working directory (`chdir()`), `open_basedir` applies, bytes are passed through unchanged, and null bytes are rejected. Errors (missing file, no permission) throw a `RuntimeException` with the operation, the path and the reason in the message and `errno` as the code:
 

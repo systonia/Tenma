@@ -31,13 +31,13 @@ expose_php = Off
 
 ## Tenma's defaults
 
-| Setting | Tenma | Why |
-|---|---|---|
-| `display_errors` | `0` | errors go to the log (stderr), never into a response |
-| `log_errors` | `1` | |
-| `post_max_size`, `upload_max_filesize` | `0` (no limit) | Tenma limits bodies itself with `--max-body` |
-| `opcache.revalidate_freq` | `0` under `--watch` | a saved file is picked up at once |
-| `opcache.enable` | `0` under `--inspect` | the debugger needs the plain opcodes |
+| Setting                                | Tenma                 | Why                                                  |
+| -------------------------------------- | --------------------- | ---------------------------------------------------- |
+| `display_errors`                       | `0`                   | errors go to the log (stderr), never into a response |
+| `log_errors`                           | `1`                   |                                                      |
+| `post_max_size`, `upload_max_filesize` | `0` (no limit)        | Tenma limits bodies itself with `--max-body`         |
+| `opcache.revalidate_freq`              | `0` under `--watch`   | a saved file is picked up at once                    |
+| `opcache.enable`                       | `0` under `--inspect` | the debugger needs the plain opcodes                 |
 
 Opcache is on otherwise. It brings less than under FPM, since each worker compiles the code once at startup anyway, but saves some memory. The JIT is built on Linux and can be enabled with `-d opcache.jit=tracing`; PHP does not build it for thread-safe PHP on Apple Silicon.
 
@@ -47,14 +47,14 @@ Opcache is on otherwise. It brings less than under FPM, since each worker compil
 
 Core, date, json, pcre, SPL, Reflection, random, standard, hash, filter, ctype, tokenizer, uri, lexbor, as well as:
 
-| Area | Extensions |
-|---|---|
-| Databases | PDO with `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`; `mysqli`, `mysqlnd`, `pgsql`, `sqlite3` |
-| Text and data | `mbstring`, `intl`, `dom`, `xml`, `xmlreader`, `xmlwriter`, `SimpleXML`, `libxml` |
-| Crypto and network | `openssl`, `sodium`, `curl`, `sockets` |
-| Numbers | `bcmath`, `gmp`, `calendar` |
-| Files and images | `fileinfo`, `zip`, `zlib`, `gd`, `exif` |
-| Other | `session`, `posix`, `Zend OPcache` |
+| Area               | Extensions                                                                               |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| Databases          | PDO with `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`; `mysqli`, `mysqlnd`, `pgsql`, `sqlite3` |
+| Text and data      | `mbstring`, `intl`, `dom`, `xml`, `xmlreader`, `xmlwriter`, `SimpleXML`, `libxml`        |
+| Crypto and network | `openssl`, `sodium`, `curl`, `sockets`                                                   |
+| Numbers            | `bcmath`, `gmp`, `calendar`                                                              |
+| Files and images   | `fileinfo`, `zip`, `zlib`, `gd`, `exif`                                                  |
+| Other              | `session`, `posix`, `Zend OPcache`                                                       |
 
 `iconv` is not included; `mbstring` covers most of its uses. `get_loaded_extensions()` lists the extensions of the binary at hand. Tenma cannot load extensions from `.so` files; everything is linked in.
 

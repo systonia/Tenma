@@ -129,7 +129,7 @@ A run removes pages with `generated: true` whose type no longer exists, and fold
 
 ## Writing docblocks for it
 
-```php
+````php
 /**
  * Money in the smallest unit of a currency. Never a float.
  *
@@ -152,7 +152,7 @@ final readonly class Money
      */
     public function plus(Money $other): self { /* … */ }
 }
-```
+````
 
 - Start with one sentence that stands on its own: it becomes the description and the line in the index.
 - Write Markdown; fenced code blocks inside docblocks are kept.

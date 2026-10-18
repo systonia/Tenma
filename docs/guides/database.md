@@ -59,13 +59,13 @@ public function bySlug(string $slug): ?Product
 
 [`Postgres`](../reference/Tenma/Db/Postgres.md) has five methods:
 
-| Method | Returns |
-|---|---|
-| `query($sql, $params)` | all rows, a list of associative arrays |
-| `first($sql, $params)` | the first row, or `null` |
-| `execute($sql, $params)` | the number of affected rows |
-| `script($sql)` | nothing: several statements without parameters (migrations), run as one |
-| `transaction(fn (Postgres $tx) => …)` | what the function returns |
+| Method                                | Returns                                                                 |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `query($sql, $params)`                | all rows, a list of associative arrays                                  |
+| `first($sql, $params)`                | the first row, or `null`                                                |
+| `execute($sql, $params)`              | the number of affected rows                                             |
+| `script($sql)`                        | nothing: several statements without parameters (migrations), run as one |
+| `transaction(fn (Postgres $tx) => …)` | what the function returns                                               |
 
 Parameters are written `$1`, `$2`, … as in Postgres itself. They are sent as text and the server decides the type, as with PDO: `'42'` fits an `int` column, a date can be a string. Never build SQL from input; pass it as a parameter.
 

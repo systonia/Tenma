@@ -17,20 +17,20 @@ tenma --version
 
 Everything after the script belongs to the script and ends up in `$argv`, as with `php`: `tenma index.php db:migrate` runs the bakery's migrations as a CLI task instead of serving.
 
-| Option | Default | |
-|---|---|---|
-| `--workers N`, `-w N` | 1 | worker threads, each with its own PHP interpreter and state; `auto` = one per CPU core |
-| `--max-body SIZE` | `10m` | largest request body and WebSocket message (`k`, `m`, `g`); 413 above it |
-| `--max-requests N` | none | a worker restarts its interpreter after N requests (for leaking code) |
-| `--max-connections N` | 1024 | open connections per worker; more get a 503 at once |
-| `--request-timeout SECONDS` | 30 | headers and body must arrive in time (408 or disconnect), and a write to a client may stall no longer |
-| `--db-pool N` | 20 / workers, 2–10 | Postgres connections per worker and URL |
-| `--pubsub redis://HOST` | none | `Tenma::publish()` goes through Redis and reaches every process |
-| `--server-name NAME` | `localhost` | `$_SERVER['SERVER_NAME']` in classic mode |
-| `-d name=value` | | a PHP setting, as with `php -d` |
-| `-c FILE\|DIR` | | a `php.ini`, as with `php -c` |
-| `--watch` | | reload on changes, run the hooks of `tenma.dev.php` ([Watch mode](watch.md)) |
-| `--inspect[=[HOST:]PORT]` | `127.0.0.1:9229` | the debugger; `--inspect-wait`, `--inspect-brk` ([Debugger](debugger.md)) |
+| Option                      | Default            |                                                                                                       |
+| --------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------- |
+| `--workers N`, `-w N`       | 1                  | worker threads, each with its own PHP interpreter and state; `auto` = one per CPU core                |
+| `--max-body SIZE`           | `10m`              | largest request body and WebSocket message (`k`, `m`, `g`); 413 above it                              |
+| `--max-requests N`          | none               | a worker restarts its interpreter after N requests (for leaking code)                                 |
+| `--max-connections N`       | 1024               | open connections per worker; more get a 503 at once                                                   |
+| `--request-timeout SECONDS` | 30                 | headers and body must arrive in time (408 or disconnect), and a write to a client may stall no longer |
+| `--db-pool N`               | 20 / workers, 2–10 | Postgres connections per worker and URL                                                               |
+| `--pubsub redis://HOST`     | none               | `Tenma::publish()` goes through Redis and reaches every process                                       |
+| `--server-name NAME`        | `localhost`        | `$_SERVER['SERVER_NAME']` in classic mode                                                             |
+| `-d name=value`             |                    | a PHP setting, as with `php -d`                                                                       |
+| `-c FILE\|DIR`              |                    | a `php.ini`, as with `php -c`                                                                         |
+| `--watch`                   |                    | reload on changes, run the hooks of `tenma.dev.php` ([Watch mode](watch.md))                          |
+| `--inspect[=[HOST:]PORT]`   | `127.0.0.1:9229`   | the debugger; `--inspect-wait`, `--inspect-brk` ([Debugger](debugger.md))                             |
 
 `tenma build` runs the [build hooks](watch.md#tenma-build) once, `tenma lsp` is the [language server](language-server.md), `tenma docs` writes [reference pages](reference-docs.md), and `tenma --stubs` prints Tenma's PHP API as stubs for IDEs and PHPStan (also available as the Composer package `tenma/stubs`).
 

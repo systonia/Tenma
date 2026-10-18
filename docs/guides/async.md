@@ -18,14 +18,14 @@ Tenma::serve(8080, function () {
 
 What waits without blocking:
 
-| Call | Guide |
-|---|---|
-| `Tenma::sleep($seconds)` | this page |
-| `Tenma::fetch($url, …)` | [Outgoing HTTP](fetch.md) |
-| `Tenma\Db\Postgres`, `Tenma\Db\Redis` | [Databases and messages](database.md) |
-| `Tenma\Fs::readFile()` and the other file functions | [Files](files.md) |
+| Call                                                                          | Guide                                              |
+| ----------------------------------------------------------------------------- | -------------------------------------------------- |
+| `Tenma::sleep($seconds)`                                                      | this page                                          |
+| `Tenma::fetch($url, …)`                                                       | [Outgoing HTTP](fetch.md)                          |
+| `Tenma\Db\Postgres`, `Tenma\Db\Redis`                                         | [Databases and messages](database.md)              |
+| `Tenma\Fs::readFile()` and the other file functions                           | [Files](files.md)                                  |
 | `Stream::write()`, `EventStream::send()`, `WebSocket::receive()` and `send()` | [Streams](streams.md), [WebSockets](websockets.md) |
-| `Task::await()`, `Tenma::all()` | this page |
+| `Task::await()`, `Tenma::all()`                                               | this page                                          |
 
 PHP's own blocking functions (`sleep()`, `file_get_contents()`, PDO, mysqli, curl) still work, but they hold up the whole worker while they wait: no other request of that worker runs meanwhile. Use the Tenma functions in request code.
 

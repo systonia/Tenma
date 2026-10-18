@@ -1,0 +1,7 @@
+docs/reference/
+tests/fixtures/
+target/
+php-build/
+PLAN.md
+plans/
+**/vendor/

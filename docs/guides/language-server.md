@@ -37,9 +37,9 @@ A package names its provider class in its `composer.json`, and so can the projec
 
 ```json
 {
-    "name": "systonia/waypoint-bakery",
-    "autoload": { "psr-4": { "Bakery\\": "src/" } },
-    "extra": { "tenma": { "lsp": "Bakery\\Editor" } }
+  "name": "systonia/waypoint-bakery",
+  "autoload": { "psr-4": { "Bakery\\": "src/" } },
+  "extra": { "tenma": { "lsp": "Bakery\\Editor" } }
 }
 ```
 
@@ -113,12 +113,12 @@ In the bakery itself, Waypoint Live's provider binds the component templates thi
 
 The methods get absolute file paths, and `$text` is the editor's content, saved or not. Offsets and lengths count bytes.
 
-| Method | Returns |
-|---|---|
-| `thisClass($file)` | the class `$this` is bound to in a non-class file (a template), or `null` |
+| Method                               | Returns                                                                                                                                         |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `thisClass($file)`                   | the class `$this` is bound to in a non-class file (a template), or `null`                                                                       |
 | `completions($file, $text, $offset)` | a list of `['label' => …, 'kind' => 'method'\|'property'\|'class'\|'value'\|'keyword', 'detail' => …, 'insert' => …]`, all but `label` optional |
-| `definition($file, $text, $offset)` | `['file' => …, 'line' => …]` where the name at `$offset` is declared, or `null` |
-| `diagnostics($file, $text)` | a list of `['line' => …, 'message' => …, 'severity' => 'error'\|'warning'\|'info']`, lines from 1 |
+| `definition($file, $text, $offset)`  | `['file' => …, 'line' => …]` where the name at `$offset` is declared, or `null`                                                                 |
+| `diagnostics($file, $text)`          | a list of `['line' => …, 'message' => …, 'severity' => 'error'\|'warning'\|'info']`, lines from 1                                               |
 
 ### What thisClass() gives you
 

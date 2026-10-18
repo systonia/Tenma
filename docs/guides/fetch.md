@@ -27,13 +27,13 @@ Tenma::serve(8080, function () {
 
 Parameters, all but `$url` optional and best passed by name:
 
-| Parameter | Default | |
-|---|---|---|
-| `$url` | | `http://` or `https://` |
-| `method` | `'GET'` | any HTTP method |
-| `headers` | `[]` | `['name' => 'value']` |
-| `body` | `''` | the raw request body |
-| `timeout` | `30.0` | seconds for the whole request, response body included |
+| Parameter | Default |                                                       |
+| --------- | ------- | ----------------------------------------------------- |
+| `$url`    |         | `http://` or `https://`                               |
+| `method`  | `'GET'` | any HTTP method                                       |
+| `headers` | `[]`    | `['name' => 'value']`                                 |
+| `body`    | `''`    | the raw request body                                  |
+| `timeout` | `30.0`  | seconds for the whole request, response body included |
 
 The response has `status`, `headers` (a list of `Name: Value` lines), `body`, `header($name)` (case-insensitive, the first value) and `json()` (decoded to arrays, throws a `JsonException` on invalid JSON).
 

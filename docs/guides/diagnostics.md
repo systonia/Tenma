@@ -38,13 +38,13 @@ Tenma::serve(8080, fn () => "ok\n");
 
 Each entry has:
 
-| Key | |
-|---|---|
-| `file` | absolute, or relative to the working directory |
-| `line` | from 1 |
-| `message` | the text shown in the editor |
+| Key        |                                                  |
+| ---------- | ------------------------------------------------ |
+| `file`     | absolute, or relative to the working directory   |
+| `line`     | from 1                                           |
+| `message`  | the text shown in the editor                     |
 | `severity` | optional: `error` (default), `warning` or `info` |
-| `column` | optional: in bytes, from 1 |
+| `column`   | optional: in bytes, from 1                       |
 
 The first argument names the reporter (`'views'`, `'waypoint-live'`, `'bakery:routes'`). A call replaces everything that reporter said before; an empty list clears it. Several reporters keep their own lists.
 

@@ -6,14 +6,14 @@ order: 120
 
 Tenma has two ways to serve HTTP:
 
-| | Fiber mode: `Tenma::serve()` | Classic mode: `Tenma::serveClassic()` |
-|---|---|---|
-| Request | a `Tenma\Http\Request` argument | `$_GET`, `$_POST`, `$_SERVER`, `$_FILES`, `$_COOKIE`, `php://input` |
-| Response | the handler's return value | `header()`, `http_response_code()`, `echo` |
-| Concurrency | many requests at once, each in its own fiber | one request after another per worker |
-| Waiting | `Tenma::sleep()`, `fetch()`, Postgres, Redis, `Fs` suspend one request | asynchronous functions throw; PDO and curl block as under FPM |
-| Streams, SSE, WebSockets | yes | no |
-| Sessions | build your own (cookie + Redis/Postgres) | `session_start()` and `$_SESSION` as usual |
+|                          | Fiber mode: `Tenma::serve()`                                           | Classic mode: `Tenma::serveClassic()`                               |
+| ------------------------ | ---------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Request                  | a `Tenma\Http\Request` argument                                        | `$_GET`, `$_POST`, `$_SERVER`, `$_FILES`, `$_COOKIE`, `php://input` |
+| Response                 | the handler's return value                                             | `header()`, `http_response_code()`, `echo`                          |
+| Concurrency              | many requests at once, each in its own fiber                           | one request after another per worker                                |
+| Waiting                  | `Tenma::sleep()`, `fetch()`, Postgres, Redis, `Fs` suspend one request | asynchronous functions throw; PDO and curl block as under FPM       |
+| Streams, SSE, WebSockets | yes                                                                    | no                                                                  |
+| Sessions                 | build your own (cookie + Redis/Postgres)                               | `session_start()` and `$_SESSION` as usual                          |
 
 Both keep the app booted between requests: the script runs once, so autoloading, configuration and the container are paid for once.
 

@@ -1,0 +1,8 @@
+{
+  "overrides": [
+    {
+      "files": ["composer.json", "*.neon"],
+      "options": { "tabWidth": 4 }
+    }
+  ]
+}

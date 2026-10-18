@@ -18,12 +18,12 @@ curl -fsSL https://raw.githubusercontent.com/systonia/Tenma/main/packaging/insta
 
 The script installs the Homebrew formula on macOS (Apple Silicon), a `.deb` on Debian 13 and Ubuntu 24.04, and the plain binary in `~/.local/bin` on other Linux systems. By hand:
 
-| System | Command |
-|---|---|
-| macOS on Apple Silicon | `brew install systonia/tap/tenma` |
+| System                  | Command                                                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| macOS on Apple Silicon  | `brew install systonia/tap/tenma`                                                                        |
 | Debian 13, Ubuntu 24.04 | `apt install ./tenma_<version>_amd64.deb` from the [release](https://github.com/systonia/Tenma/releases) |
-| other Linux | `tenma-linux-x64.tar.gz` from the release, binary into `~/.local/bin` |
-| Docker | `docker run -p 8080:8080 -v "$PWD:/app" ghcr.io/systonia/tenma /app/index.php` |
+| other Linux             | `tenma-linux-x64.tar.gz` from the release, binary into `~/.local/bin`                                    |
+| Docker                  | `docker run -p 8080:8080 -v "$PWD:/app" ghcr.io/systonia/tenma /app/index.php`                           |
 
 Check it with `tenma --version`, which prints the Tenma and PHP versions.
 

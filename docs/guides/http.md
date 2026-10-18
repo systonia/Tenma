@@ -158,7 +158,7 @@ Tenma::serve(8080, function (Request $request) use (&$prices) {
 });
 ```
 
-Many requests run at the same time in one process, so never keep the state of *one* request in a global, a static or a singleton, because another request would see it. Pass it along as an argument, or use [`AsyncLocal`](async.md#values-that-follow-a-request) for values that should follow a request into its tasks. The bakery keeps the last weather forecast and the public holidays in memory this way, refreshed by timers: see [background work](async.md#background-work). With `--workers N`, each worker has its own copy of the state: see [Command line and deployment](deployment.md#workers).
+Many requests run at the same time in one process, so never keep the state of _one_ request in a global, a static or a singleton, because another request would see it. Pass it along as an argument, or use [`AsyncLocal`](async.md#values-that-follow-a-request) for values that should follow a request into its tasks. The bakery keeps the last weather forecast and the public holidays in memory this way, refreshed by timers: see [background work](async.md#background-work). With `--workers N`, each worker has its own copy of the state: see [Command line and deployment](deployment.md#workers).
 
 ## Errors and limits
 

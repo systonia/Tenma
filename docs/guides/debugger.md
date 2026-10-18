@@ -24,8 +24,19 @@ Install the [Tenma-VSCode](https://github.com/systonia/Tenma-VSCode) extension. 
 {
   "version": "0.2.0",
   "configurations": [
-    { "type": "tenma", "request": "launch", "name": "Tenma", "program": "${workspaceFolder}/index.php", "watch": true },
-    { "type": "tenma", "request": "attach", "name": "Attach to tenma --inspect", "port": 9229 }
+    {
+      "type": "tenma",
+      "request": "launch",
+      "name": "Tenma",
+      "program": "${workspaceFolder}/index.php",
+      "watch": true
+    },
+    {
+      "type": "tenma",
+      "request": "attach",
+      "name": "Attach to tenma --inspect",
+      "port": 9229
+    }
   ]
 }
 ```
