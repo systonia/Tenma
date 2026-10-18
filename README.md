@@ -53,7 +53,7 @@ tenma [options] <script.php> [arguments …]
 tenma build [tenma.dev.php]          # run the build hooks once
 tenma lsp                            # language server for editors
 tenma docs [<path>...] [--out <dir>] # Markdown reference pages
-tenma --stubs                        # the PHP API as stubs
+tenma --stubs [DIR]                  # the PHP API as stubs
 tenma --version
 ```
 

@@ -71,6 +71,47 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=shim/tenma.c");
     println!("cargo:rerun-if-changed=php-build/out/lib/libphp.a");
+
+    embed_stdlib(&root);
+}
+
+/// Lists every PHP file of stdlib/ for src/stdlib.rs, so the binary embeds them all.
+fn embed_stdlib(root: &std::path::Path) {
+    let stdlib = root.join("stdlib");
+    let mut files = Vec::new();
+    collect_php(&stdlib, &mut files);
+    files.sort();
+
+    let mut list = String::from("&[\n");
+    for file in &files {
+        let relative = file
+            .strip_prefix(&stdlib)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        list.push_str(&format!(
+            "    ({relative:?}, include_str!({:?})),\n",
+            file.display().to_string()
+        ));
+    }
+    list.push(']');
+
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("stdlib.rs");
+    std::fs::write(out, list).expect("cannot write stdlib.rs");
+    // A directory here is scanned as a whole: a new or removed file runs this again
+    println!("cargo:rerun-if-changed=stdlib");
+}
+
+fn collect_php(directory: &std::path::Path, files: &mut Vec<PathBuf>) {
+    let entries = std::fs::read_dir(directory).expect("cannot read stdlib/");
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_php(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "php") {
+            files.push(path);
+        }
+    }
 }
 
 /// pkg-config hands PHP Homebrew's versioned paths (/opt/homebrew/Cellar/libzip/1.11.4_1/lib), which are gone

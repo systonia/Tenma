@@ -153,11 +153,13 @@ jobs:
           eval "$(ssh-agent -s)"
           echo "$STUBS_DEPLOY_KEY" | ssh-add -
           git clone git@github.com:systonia/Tenma-Stubs.git stubs
-          docker run --rm ghcr.io/systonia/tenma:$version --stubs > stubs/tenma.php
+          # One file per class: the image writes into the checkout as the runner's user
+          rm -rf stubs/src stubs/tenma.php
+          docker run --rm --user "$(id -u)" -v "$PWD/stubs:/stubs" ghcr.io/systonia/tenma:$version --stubs /stubs/src
           cd stubs
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add tenma.php
+          git add -A .
           git commit -m "chore: regenerate the stubs for tenma $version"
           git tag -a "$version" -m "$version"
           git push origin main "$version"

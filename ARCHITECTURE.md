@@ -19,6 +19,7 @@ Rust:
 | ---------------- | ------------------------------------------------------------------------ |
 | `src/main.rs`    | command line, worker threads, accepting connections, the HTTP server     |
 | `src/php.rs`     | safe wrappers around the C layer; pending requests, resuming fibers      |
+| `src/stdlib.rs`  | loads the embedded PHP files of `stdlib/`                                |
 | `src/ops.rs`     | ops PHP waits for: `sleep`, `fetch`                                      |
 | `src/db.rs`      | Postgres (a pool per worker) and Redis (one connection per URL)          |
 | `src/fs.rs`      | file operations for `Tenma\Fs`, on background threads                    |
@@ -29,14 +30,17 @@ Rust:
 | `src/dev.rs`     | the hooks of `tenma.dev.php`                                             |
 | `src/inspect.rs` | `--inspect`: the debugger, stops a worker inside PHP's statement handler |
 
-PHP:
+PHP, in `stdlib/`: one file per class, folders by namespace, the functions of a namespace in its
+`functions.php`. `build.rs` embeds every file; `src/stdlib.rs` loads them.
 
-| File               | Does                                                                 |
-| ------------------ | -------------------------------------------------------------------- |
-| `stdlib/tenma.php` | the API: `Tenma::serve()`, `Request`, `Response` and everything else |
-| `stdlib/stubs.php` | `tenma --stubs`                                                      |
-| `stdlib/lsp.php`   | `tenma lsp`, the language server and its worker                      |
-| `stdlib/docs.php`  | `tenma docs`, the reference pages                                    |
+| Path                          | Does                                                    |
+| ----------------------------- | ------------------------------------------------------- |
+| `stdlib/Tenma.php`            | the class `Tenma`: `Tenma::serve()` and the other calls |
+| `stdlib/Tenma/`               | the public API: `Task`, `Fs`, `Http\`, `Db\`, `Lsp\`    |
+| `stdlib/Tenma/Internal/`      | the scheduler, the dev hooks, diagnostics               |
+| `stdlib/Tenma/Internal/Lsp`   | `tenma lsp`, loaded only for that command               |
+| `stdlib/Tenma/Internal/Docs`  | `tenma docs`, loaded only for that command              |
+| `stdlib/Tenma/Internal/Stubs` | `tenma --stubs`, loaded only for that command           |
 
 Everything else:
 

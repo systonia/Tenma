@@ -11,18 +11,18 @@ tenma [options] <script.php> [arguments …]
 tenma [options] build [tenma.dev.php]
 tenma lsp
 tenma docs [<path>...] [--out <dir>]
-tenma --stubs
+tenma --stubs [DIR]
 tenma --version
 ```
 
-| Command                            | Does                                                                                |
-| ---------------------------------- | ----------------------------------------------------------------------------------- |
-| `tenma script.php`                 | runs the script; it serves if it calls `Tenma::serve()`                             |
-| `tenma build [tenma.dev.php]`      | runs the [build hooks](watch.md#tenma-build) once, `./tenma.dev.php` by default     |
-| `tenma lsp`                        | the [language server](language-server.md), on stdin and stdout                      |
-| `tenma docs [paths] [--out <dir>]` | writes [reference pages](reference-docs.md), into `docs/reference` by default       |
-| `tenma --stubs`                    | prints Tenma's PHP API as stubs (see [Stubs for IDEs](#stubs-for-ides-and-phpstan)) |
-| `tenma --version`, `tenma -v`      | prints the Tenma and PHP versions, such as `tenma 0.1.18 (PHP 8.5.9)`               |
+| Command                            | Does                                                                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `tenma script.php`                 | runs the script; it serves if it calls `Tenma::serve()`                                                                  |
+| `tenma build [tenma.dev.php]`      | runs the [build hooks](watch.md#tenma-build) once, `./tenma.dev.php` by default                                          |
+| `tenma lsp`                        | the [language server](language-server.md), on stdin and stdout                                                           |
+| `tenma docs [paths] [--out <dir>]` | writes [reference pages](reference-docs.md), into `docs/reference` by default                                            |
+| `tenma --stubs [DIR]`              | prints Tenma's PHP API as stubs, or writes one file per class to DIR (see [Stubs for IDEs](#stubs-for-ides-and-phpstan)) |
+| `tenma --version`, `tenma -v`      | prints the Tenma and PHP versions, such as `tenma 0.1.18 (PHP 8.5.9)`                                                    |
 
 `lsp`, `docs`, `--stubs` and `--version` only count as the first argument. `build` comes after the options, so `tenma -d memory_limit=1G build` works.
 
@@ -102,13 +102,16 @@ Tenma::serve($port, fn () => "ok\n");
 
 ## Stubs for IDEs and PHPStan
 
-Tenma's classes exist only inside the binary, so an IDE or PHPStan does not know them. `tenma --stubs` prints them as a PHP file with every class, method and docblock:
+Tenma's classes exist only inside the binary, so an IDE or PHPStan does not know them. `tenma --stubs` prints them as a PHP file with every class, method and docblock. With a directory, it writes one file per class instead, in folders by namespace (`Tenma.php`, `Tenma/Http/Request.php`):
 
 ```bash
 tenma --stubs > tenma.php
+tenma --stubs stubs/
 ```
 
-The same file comes as the Composer package `tenma/stubs`, published for every release:
+The single file needs a namespace block per namespace. Some editors handle one class per file better.
+
+The same stubs come as the Composer package `tenma/stubs`, published for every release:
 
 ```bash
 composer require --dev tenma/stubs
