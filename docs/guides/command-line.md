@@ -1,0 +1,119 @@
+---
+title: Command line
+description: Every tenma subcommand and option with its default, the script's $argv, exit codes, and the PHP stubs for IDEs.
+order: 300
+---
+
+`tenma` runs a PHP script. The script may start servers with `Tenma::serve()` or simply run and exit. Subcommands build assets, run the language server, write reference pages and print stubs.
+
+```text
+tenma [options] <script.php> [arguments …]
+tenma [options] build [tenma.dev.php]
+tenma lsp
+tenma docs [<path>...] [--out <dir>]
+tenma --stubs
+tenma --version
+```
+
+| Command                            | Does                                                                                |
+| ---------------------------------- | ----------------------------------------------------------------------------------- |
+| `tenma script.php`                 | runs the script; it serves if it calls `Tenma::serve()`                             |
+| `tenma build [tenma.dev.php]`      | runs the [build hooks](watch.md#tenma-build) once, `./tenma.dev.php` by default     |
+| `tenma lsp`                        | the [language server](language-server.md), on stdin and stdout                      |
+| `tenma docs [paths] [--out <dir>]` | writes [reference pages](reference-docs.md), into `docs/reference` by default       |
+| `tenma --stubs`                    | prints Tenma's PHP API as stubs (see [Stubs for IDEs](#stubs-for-ides-and-phpstan)) |
+| `tenma --version`, `tenma -v`      | prints the Tenma and PHP versions, such as `tenma 0.1.18 (PHP 8.5.9)`               |
+
+`lsp`, `docs`, `--stubs` and `--version` only count as the first argument. `build` comes after the options, so `tenma -d memory_limit=1G build` works.
+
+## Options
+
+Options come before the script. Each takes its value as the next argument.
+
+| Option                         | Default            | Does                                                                                         |
+| ------------------------------ | ------------------ | -------------------------------------------------------------------------------------------- |
+| `--workers N`, `-w N`          | `1`                | worker threads, each with its own PHP interpreter and state; `auto` starts one per CPU core  |
+| `--max-body SIZE`              | `10m`              | largest request body and WebSocket message; bytes, or with `k`, `m`, `g`; 413 above it       |
+| `--max-requests N`             | none               | a worker restarts its interpreter after N requests                                           |
+| `--max-connections N`          | `1024`             | open connections per worker; more get a 503 at once                                          |
+| `--request-timeout SECONDS`    | `30`               | time for headers and body to arrive (408 or disconnect), and for a stalled write to a client |
+| `--db-pool N`                  | 20 / workers, 2–10 | Postgres connections per worker and URL                                                      |
+| `--pubsub redis://HOST`        | none               | `Tenma::publish()` goes through Redis and reaches every process                              |
+| `--server-name NAME`           | `localhost`        | `$_SERVER['SERVER_NAME']` in [classic mode](classic-mode.md)                                 |
+| `-d name=value`                |                    | a PHP setting, also written `-dname=value`; any number of times                              |
+| `-c FILE\|DIR`                 |                    | the `php.ini` to read, or the directory that holds it                                        |
+| `--watch`                      |                    | reloads on changes and runs the hooks of `tenma.dev.php` ([Watch mode](watch.md))            |
+| `--inspect[=[HOST:]PORT]`      | `127.0.0.1:9229`   | starts the [debugger](debugger.md)                                                           |
+| `--inspect-wait[=[HOST:]PORT]` | `127.0.0.1:9229`   | the debugger; the script waits until the editor has set its breakpoints                      |
+| `--inspect-brk[=[HOST:]PORT]`  | `127.0.0.1:9229`   | the debugger; the script waits, then stops at its first line                                 |
+
+Numbers must be above 0. `--request-timeout` also takes fractions such as `0.5`. With `--inspect` and more than one worker, Tenma prints `tenma: --inspect runs one worker` and runs one. [Configuration and php.ini](configuration.md) explains `-d` and `-c`.
+
+## Arguments for the script
+
+Everything after the script belongs to the script. Tenma does not read it, even when it starts with `-`. The script finds it in `$argv`, with its own path first:
+
+```php
+<?php
+
+var_dump($argv);
+```
+
+```bash
+tenma args.php migrate --force
+```
+
+```text
+array(3) {
+  [0]=>
+  string(8) "args.php"
+  [1]=>
+  string(7) "migrate"
+  [2]=>
+  string(7) "--force"
+}
+```
+
+One script can serve and run tasks this way: `tenma index.php db:migrate` runs a task, `tenma index.php` serves. See [Scripts without a server](process.md#scripts-without-a-server).
+
+## The port
+
+A server listens on every interface (`0.0.0.0`) on the port given to `Tenma::serve()`. No option sets it. Read it from the environment so the same script runs everywhere:
+
+```php
+<?php
+
+$port = (int) (getenv('PORT') ?: 8080);
+
+Tenma::serve($port, fn () => "ok\n");
+```
+
+## Exit codes
+
+| Status | When                                                                                                  |
+| ------ | ----------------------------------------------------------------------------------------------------- |
+| `0`    | the script ended, or a server stopped on Ctrl+C or SIGTERM                                            |
+| `N`    | `exit(N)` outside a request: in the script, a timer or background work; it also ends a running server |
+| `255`  | a fatal error or an uncaught exception while the script starts                                        |
+| `1`    | Tenma itself failed: the script does not exist, a build hook failed, a worker could not restart       |
+| `2`    | the command line is wrong: an unknown option, a missing value, no script; Tenma prints the usage      |
+
+`exit()` inside a request ends only that request.
+
+## Stubs for IDEs and PHPStan
+
+Tenma's classes exist only inside the binary, so an IDE or PHPStan does not know them. `tenma --stubs` prints them as a PHP file with every class, method and docblock:
+
+```bash
+tenma --stubs > tenma.php
+```
+
+The same file comes as the Composer package `tenma/stubs`, published for every release:
+
+```bash
+composer require --dev tenma/stubs
+```
+
+The stubs are never autoloaded. They only exist for tools that read the code.
+
+See also: [Deployment](deployment.md), [Configuration and php.ini](configuration.md), [Watch mode](watch.md), [Debugger](debugger.md).

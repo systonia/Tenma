@@ -1,37 +1,44 @@
 ---
-title: Serving HTTP
-description: Start a server with Tenma::serve(), read requests, build responses and serve static files.
-order: 10
+title: HTTP server
+description: Start a server with Tenma::serve(), read requests, build responses, set cookies, take uploads and serve static files.
+order: 200
 ---
 
-`Tenma::serve()` registers an HTTP server. It does not block: the script runs to its end, and then Tenma opens the port and calls the handler for every request. The handler runs in fiber mode, each request in its own fiber, and returns a response.
+`Tenma::serve()` starts an HTTP server on a port and calls a handler for every request. Each request runs in its own fiber. The handler gets a `Request` and returns a response.
+
+| Function or class                                                         | Does                                                                      |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| [`Tenma::serve($port, $handler, static: …)`](../reference/Tenma.md#serve) | registers a server; it starts once the script has run to its end          |
+| [`Request`](../reference/Tenma/Http/Request.md)                           | method, URI, path, query, headers, body, cookies, form fields and uploads |
+| [`Response`](../reference/Tenma/Http/Response.md)                         | status, headers and body; `json()`, `html()`, `redirect()`, `cookie()`    |
+| [`UploadedFile`](../reference/Tenma/Http/UploadedFile.md)                 | one uploaded file, held in memory                                         |
+| [`Response::stream()`, `Response::events()`](streams.md)                  | a body sent bit by bit, server-sent events                                |
+| [`Response::websocket()`](websockets.md)                                  | turns the request into a WebSocket                                        |
+
+## Starting a server
 
 ```php
 <?php
 
-use Tenma\Http\{Request, Response};
+use Tenma\Http\Request;
 
-Tenma::serve(8080, function (Request $request): Response|string {
-    return "Sonnenkorn bakery: {$request->method} {$request->path}\n";
+Tenma::serve(8080, function (Request $request): string {
+    return "{$request->method} {$request->path}\n";
 });
 ```
 
-A handler gets a [`Request`](../reference/Tenma/Http/Request.md) and returns one of:
+`tenma server.php` runs the script, then opens port 8080. The script itself does not block: `Tenma::serve()` only registers the server. A script may call it for several ports.
 
-- a string: status 200, `Content-Type: text/plain; charset=utf-8`
-- a [`Response`](../reference/Tenma/Http/Response.md): status, headers and body
-- a streamed response from [`Response::stream()` or `Response::events()`](streams.md)
-- a WebSocket from [`Response::websocket()`](websockets.md)
+Code outside the handler runs once, when the script starts. Put the expensive setup there: configuration, routes, templates, database connections.
 
-An exception that leaves the handler becomes a `500 Internal Server Error`; the message goes to the log on stderr, never to the client, and the server keeps running. `exit()` inside a handler ends only that request.
+The handler returns one of these:
 
-Everything outside the handler runs once, when the script starts. That is the place for the expensive setup: configuration, routes, templates, database connections. A script can call `Tenma::serve()` for several ports. The bakery's `index.php` builds its whole app once and hands it to Tenma; the app is itself a handler:
-
-```php
-// from index.php of the bakery, shortened: app.php builds the Waypoint app with its routes and services
-$app = require __DIR__ . '/app.php';
-$app->serve();   // Tenma::serve() with the app as handler
-```
+| Return value                                 | Sent as                                               |
+| -------------------------------------------- | ----------------------------------------------------- |
+| a string                                     | status 200, `Content-Type: text/plain; charset=utf-8` |
+| a `Response`                                 | its status, headers and body                          |
+| `Response::stream()` or `Response::events()` | a [streamed body](streams.md)                         |
+| `Response::websocket()`                      | a [WebSocket](websockets.md)                          |
 
 ## Reading the request
 
@@ -42,27 +49,33 @@ use Tenma\Http\{Request, Response};
 
 Tenma::serve(8080, function (Request $request): Response {
     return Response::json([
-        'method' => $request->method,            // GET, POST, …
-        'uri' => $request->uri,                  // path with query string: /products?category=bread
-        'path' => $request->path,                // /products
-        'query' => $request->query,              // ['category' => 'bread'], parsed like $_GET
-        'agent' => $request->header('user-agent'),   // case-insensitive, null if missing
-        'host' => $request->host(),              // Host header without port
-        'client' => $request->remoteAddress,     // IP of the client (or of the proxy in front)
-        'cart' => $request->cookie('cart'),      // the cart id, null on the first visit
+        'method' => $request->method,              // GET, POST, ...
+        'uri' => $request->uri,                    // /users?page=2
+        'path' => $request->path,                  // /users
+        'query' => $request->query,                // ['page' => '2']
+        'agent' => $request->header('user-agent'), // null if missing
+        'host' => $request->host(),                // Host header without port
+        'client' => $request->remoteAddress,       // IP of the client or proxy
+        'session' => $request->cookie('session'),  // null if not set
     ]);
 });
 ```
 
-The body is read completely before the handler runs (up to `--max-body`, default 10 MB, otherwise 413):
+| Property or method            | Holds                                                                                  |
+| ----------------------------- | -------------------------------------------------------------------------------------- |
+| `method`, `uri`, `path`       | the request line; `uri` includes the query string                                      |
+| `query`                       | the query string, parsed like `$_GET`                                                  |
+| `headers`, `header($name)`    | every header, names in lowercase; `header()` ignores case and returns null if missing  |
+| `host()`                      | the Host header without port, otherwise the server address                             |
+| `remoteAddress`, `remotePort` | the client, or the proxy in front of it                                                |
+| `serverAddress`, `serverPort` | the address and port the connection arrived on                                         |
+| `body`                        | the raw body                                                                           |
+| `json()`                      | the body decoded as JSON into arrays                                                   |
+| `form()`                      | fields of `application/x-www-form-urlencoded` and `multipart/form-data`, like `$_POST` |
+| `files()`                     | uploads from `multipart/form-data`, by field name                                      |
+| `cookies()`, `cookie($name)`  | the cookies, parsed like `$_COOKIE`                                                    |
 
-- `$request->body`: the raw bytes
-- `$request->json()`: the body decoded as JSON (arrays), throws on invalid JSON
-- `$request->form()`: fields of `application/x-www-form-urlencoded` and `multipart/form-data`, with the same rules as `$_POST` (`tags[]` appends, `address[city]` nests)
-- `$request->files()`: uploads from `multipart/form-data` as [`UploadedFile`](../reference/Tenma/Http/UploadedFile.md) objects, by field name
-- `$request->cookies()`: all cookies, parsed like `$_COOKIE`
-
-`$request->headers` holds every header with its name in lowercase. The Host header comes from the client: check it against a list of your hosts before you use it in links or redirects.
+`form()` follows the rules of `$_POST`: `tags[]` appends, `address[city]` nests. The client controls the Host header. Check `host()` against a list of your hosts before you use it in links or redirects.
 
 ## Building responses
 
@@ -71,24 +84,47 @@ The body is read completely before the handler runs (up to `--max-body`, default
 
 use Tenma\Http\{Request, Response};
 
-Tenma::serve(8080, fn (Request $request) => match ($request->path) {
-    '/checkout' => Response::html('<form method="post" action="/orders"><input name="name"><button>Reserve</button></form>'),
-    '/orders' => Response::redirect('/orders/thanks', 303)
-        ->cookie('customer', $request->form()['name'] ?? 'guest', expires: time() + 3600),
-    '/orders/thanks' => Response::html('<p>Thank you, ' . htmlspecialchars($request->cookie('customer') ?? 'guest') . '! Your order is reserved.</p>'),
-    '/v1/products' => Response::json([['slug' => 'croissant', 'priceCents' => 180]])
-        ->header('cache-control', 'no-store')
-        ->header('vary', 'cookie', append: true),
-    default => new Response("Not found\n", 404),
+Tenma::serve(8080, function (Request $request): Response {
+    if ($request->path === '/login' && $request->method === 'POST') {
+        $name = $request->form()['name'] ?? 'guest';
+        $response = Response::redirect('/', 303);
+
+        return $response->cookie('user', $name, expires: time() + 3600);
+    }
+
+    if ($request->path === '/users') {
+        $response = Response::json([['id' => 1, 'name' => 'Ada']]);
+        $response->header('cache-control', 'no-store');
+
+        return $response->header('vary', 'cookie', append: true);
+    }
+
+    if ($request->path === '/') {
+        $user = htmlspecialchars($request->cookie('user') ?? 'guest');
+
+        return Response::html("<p>Hello, $user</p>");
+    }
+
+    return new Response("Not found\n", 404);
 });
 ```
 
-- `Response::json($data, $status)` encodes with `JSON_PRETTY_PRINT` and `JSON_UNESCAPED_UNICODE` and sets `Content-Type: application/json`.
-- `Response::html($html, $status)` sets `text/html; charset=utf-8`.
-- `Response::redirect($location, $status)` uses 302 by default; 303 after a POST, 301 or 308 for permanent moves.
-- `new Response($body, $status, $headers)` for anything else.
-- `->header($name, $value)` replaces a header, with `append: true` it adds another value.
-- `->cookie($name, $value, ...)` works like `setcookie()`: `expires`, `path`, `domain`, `secure`, `httpOnly` (default `true`), `sameSite` (default `Lax`).
+| Method                                   | Does                                                                              |
+| ---------------------------------------- | --------------------------------------------------------------------------------- |
+| `new Response($body, $status, $headers)` | any response; the default `Content-Type` is `text/plain; charset=utf-8`           |
+| `Response::json($data, $status)`         | encodes with `JSON_PRETTY_PRINT` and `JSON_UNESCAPED_UNICODE`, `application/json` |
+| `Response::html($html, $status)`         | `text/html; charset=utf-8`                                                        |
+| `Response::redirect($location, $status)` | 302 by default; 303 after a POST, 301 or 308 for permanent moves                  |
+| `->header($name, $value, append: false)` | replaces a header; with `append: true` it adds another value                      |
+| `->cookie($name, $value, ...)`           | sets a cookie like `setcookie()`                                                  |
+
+`header()` and `cookie()` change the response and return it.
+
+## Cookies
+
+`cookie()` takes `expires`, `path` (default `/`), `domain`, `secure` (default `false`), `httpOnly` (default `true`) and `sameSite` (default `Lax`). The value is URL-encoded. Without `expires`, or with 0, the cookie lasts until the browser session ends.
+
+Reading works with `$request->cookie($name)` and `$request->cookies()`. Of several cookies with the same name, the first wins.
 
 ## Uploads
 
@@ -97,75 +133,106 @@ Tenma::serve(8080, fn (Request $request) => match ($request->path) {
 
 use Tenma\Http\{Request, Response};
 
-// The back office uploads a new picture for a product; they live in public/products
-$pictures = __DIR__ . '/public/products';
-@mkdir($pictures, recursive: true);
+$uploads = __DIR__ . '/uploads';
+@mkdir($uploads);
 
-Tenma::serve(8080, function (Request $request) use ($pictures) {
+$form = '<form method="post" enctype="multipart/form-data">'
+    . '<input type="file" name="file"><button>Upload</button></form>';
+
+Tenma::serve(8080, function (Request $request) use ($uploads, $form) {
     if ($request->method === 'GET') {
-        return Response::html('<form method="post" enctype="multipart/form-data">'
-            . '<input type="file" name="picture" accept="image/svg+xml"><button>Upload</button></form>');
+        return Response::html($form);
     }
-    $picture = $request->files()['picture'] ?? null;
-    if ($picture === null || $picture->size() === 0) {
+
+    $file = $request->files()['file'] ?? null;
+    if ($file === null || $file->size() === 0) {
         return new Response("No file\n", 422);
     }
-    $name = bin2hex(random_bytes(8)) . '.svg';
-    $picture->moveTo("$pictures/$name");   // writes without blocking the server
-    return Response::json(['stored' => $name, 'type' => $picture->type, 'bytes' => $picture->size()]);
+
+    $name = bin2hex(random_bytes(8));
+    $file->moveTo("$uploads/$name");
+
+    return Response::json(['stored' => $name, 'type' => $file->type, 'bytes' => $file->size()]);
 });
 ```
 
-An `UploadedFile` holds the file in memory: `name` and `type` as the client sent them, `size()`, `contents()` and `moveTo()`. Never trust `name` as a path.
+`curl -F file=@photo.jpg localhost:8080` uploads a file. An `UploadedFile` has:
+
+- `name`: the file name the client sent, without directory. Never use it unchecked as a path.
+- `type`: the type the client states. It is not trustworthy.
+- `size()` and `contents()`.
+- `moveTo($path)`: writes the file without blocking the server.
+
+`files()` names fields like `form()`: `files[]` becomes a list, `files[a]` nests.
 
 ## Static files
 
-Tenma serves files itself, without calling PHP, when `static:` names them:
+With `static:`, Tenma serves files itself, without calling PHP.
 
 ```php
 <?php
 
-Tenma::serve(8080, fn () => "the shop\n", static: [
-    '/products' => __DIR__ . '/public/products',
-    '/app.css' => __DIR__ . '/public/app.css',
-    '/favicon.svg' => __DIR__ . '/public/favicon.svg',
+Tenma::serve(8080, fn () => "from PHP\n", static: [
+    '/assets' => __DIR__ . '/public/assets',
+    '/favicon.ico' => __DIR__ . '/public/favicon.ico',
 ]);
 ```
 
-- Under a prefix (`/products`), Tenma looks in the directory: `/products/croissant.svg` is `public/products/croissant.svg`. A single file matches only its exact path. The longest prefix wins.
-- A request outside every prefix goes to the handler without touching the file system. A file that does not exist under a prefix goes to the handler too, so the app can answer the 404.
-- `static: __DIR__ . '/public'` is short for `['/' => __DIR__ . '/public']`. Then every GET is checked against the directory first, which costs PHP routes about a third of their throughput; prefixes are cheaper.
-- Files are sent with a `Content-Type` from their extension, `ETag` and `Last-Modified` (304 for a cached copy) and `Range` (206), in chunks. A directory answers with its `index.html`; one without a trailing `/` is redirected.
-- Only GET and HEAD. Hidden files and directories (`.env`, `.git`), PHP sources (`.php`, `.phtml`, `.phar`, …) and symlinks that point outside the directory are never served, so a front controller can sit next to the assets.
-- The directory is resolved per request: switching a `current` symlink during a deploy takes effect at once. `open_basedir` applies.
+- Under a directory prefix, Tenma looks in the directory: `/assets/app.css` is `public/assets/app.css`.
+- A single file matches only its exact path. The longest prefix wins.
+- A request outside every prefix goes to the handler without touching the file system.
+- A missing file under a prefix also goes to the handler, so the app can answer the 404.
+- `static: __DIR__ . '/public'` is short for `['/' => __DIR__ . '/public']`. Then every request is checked against the directory first. That costs PHP routes about a third of their throughput, so prefixes are cheaper.
+
+What Tenma sends:
+
+- `Content-Type` from the extension, `ETag` and `Last-Modified`. A cached copy gets 304.
+- A single `Range` gets 206. Files go out in chunks, not through memory.
+- A directory answers with its `index.html`. A directory path without a trailing `/` is redirected.
+- Only GET and HEAD are served.
+
+What Tenma never serves:
+
+- hidden files and directories (`.env`, `.git`),
+- PHP sources (`.php`, `.phtml`, `.phar`, `.phps`, `.pht`, `.php5`, `.php7`),
+- files that a symlink places outside the directory.
+
+So a front controller can sit next to the assets. The directory is resolved per request: switching a `current` symlink during a deploy takes effect at once. `open_basedir` applies.
 
 ## State between requests
 
-The script runs once, so variables, statics and objects live as long as the process. That makes in-memory caches cheap:
+The script runs once, so variables and objects live as long as the process. That makes in-memory caches cheap.
 
 ```php
 <?php
 
 use Tenma\Http\Request;
 
-// Computed once per worker, then answered from memory
-$prices = [];
+$squares = [];
 
-Tenma::serve(8080, function (Request $request) use (&$prices) {
-    $loaves = max(1, (int) ($request->query['loaves'] ?? 1));
-    // ten percent off every fifth loaf
-    return $prices[$loaves] ??= sprintf("%.2f EUR\n", 4.20 * ($loaves - 0.1 * intdiv($loaves, 5)));
+Tenma::serve(8080, function (Request $request) use (&$squares) {
+    $n = (int) ($request->query['n'] ?? 0);
+
+    return $squares[$n] ??= ($n * $n) . "\n";   // computed once per worker
 });
 ```
 
-Many requests run at the same time in one process, so never keep the state of _one_ request in a global, a static or a singleton, because another request would see it. Pass it along as an argument, or use [`AsyncLocal`](async.md#values-that-follow-a-request) for values that should follow a request into its tasks. The bakery keeps the last weather forecast and the public holidays in memory this way, refreshed by timers: see [background work](async.md#background-work). With `--workers N`, each worker has its own copy of the state: see [Command line and deployment](deployment.md#workers).
+Many requests run at the same time in one process. Never keep the state of one request in a global, a static or a singleton: another request would see it. Pass it along as an argument, or use [`AsyncLocal`](async.md#values-that-follow-a-request).
 
-## Errors and limits
+With `--workers N`, each worker has its own copy of the state: see [workers](deployment.md#workers).
 
-- An uncaught exception answers 500 and is logged; the server keeps running.
-- A fatal error (out of memory, stack overflow) answers 500 and restarts the interpreter of that worker, which runs the script again.
-- Headers and body must arrive within `--request-timeout` (default 30 s); slow clients are disconnected.
-- A worker accepts at most `--max-connections` connections (default 1024); more get a 503 at once.
-- When a client disconnects before the response is complete, the handler gets [`Tenma\Cancelled`](async.md#cancellation) where it waits.
+## Behaviour
 
-See also: [`Tenma::serve()`](../reference/Tenma.md#serve), [`Request`](../reference/Tenma/Http/Request.md), [`Response`](../reference/Tenma/Http/Response.md), [`UploadedFile`](../reference/Tenma/Http/UploadedFile.md).
+- `Tenma::serve()` does not block. The server starts once the script has run to its end and keeps the process alive.
+- The body is read completely before the handler runs. A body above `--max-body` (default 10 MB) gets 413.
+- Headers and body must arrive within `--request-timeout` (default 30 s), otherwise the client is disconnected.
+- A worker accepts at most `--max-connections` connections (default 1024). More get 503 at once.
+- An exception that leaves the handler becomes `500 Internal Server Error`. The message goes to stderr, never to the client. The server keeps running.
+- A handler that returns something else than the types above also gets 500, with a `TypeError` in the log.
+- A fatal error (out of memory, stack overflow) answers 500. The worker then restarts its interpreter and runs the script again.
+- `header()` and `cookie()` throw a `ValueError` for invalid names or values (line breaks, control characters). `cookie()` also throws for `sameSite: 'None'` without `secure: true`.
+- `json()` throws a `JsonException` on invalid JSON.
+- `exit()` in a handler ends only that request, with 500.
+- When the client disconnects, the request and its work are cancelled: see [Lifetime of a request](request-lifetime.md).
+
+See also: [`Tenma::serve()`](../reference/Tenma.md#serve), [`Request`](../reference/Tenma/Http/Request.md), [`Response`](../reference/Tenma/Http/Response.md), [`UploadedFile`](../reference/Tenma/Http/UploadedFile.md), [Classic mode](classic-mode.md).

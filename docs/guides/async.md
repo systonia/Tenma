@@ -1,225 +1,198 @@
 ---
-title: Fibers and asynchronous work
-description: Wait without blocking, run work in parallel with tasks and all(), use timers, cancel work and carry values with AsyncLocal.
-order: 20
+title: Tasks, timers and AsyncLocal
+description: Run work concurrently with Tenma::async() and Tenma::all(), wait with Tenma::sleep(), schedule timers and carry values with AsyncLocal.
+order: 220
 ---
 
-Every request, task and timer callback in Tenma runs in its own fiber. When code in a fiber waits for something Tenma does asynchronously, only that fiber is suspended; the event loop keeps serving everything else. There is no `await` keyword and no promise type: the call returns its result once it is there.
+These functions run work concurrently in one process. Each task and each timer callback runs in its own fiber. A call that waits suspends only its fiber and returns its result once it is there.
+
+How fibers and the event loop work: [Event loop and fibers](event-loop.md). How cancellation works: [Lifetime of a request](request-lifetime.md).
+
+| Function or class                                                              | Does                                                                                                |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| [`Tenma::async($work)`](../reference/Tenma.md#async)                           | starts `$work` in its own fiber and returns a `Task` at once                                        |
+| [`Tenma::all(...$work)`](../reference/Tenma.md#all)                            | runs functions or tasks concurrently and returns all results                                        |
+| [`Tenma::sleep($seconds)`](../reference/Tenma.md#sleep)                        | waits without blocking the server                                                                   |
+| [`Tenma::setTimeout($callback, $seconds)`](../reference/Tenma.md#settimeout)   | calls `$callback` once after `$seconds`                                                             |
+| [`Tenma::setInterval($callback, $seconds)`](../reference/Tenma.md#setinterval) | calls `$callback` every `$seconds` until cancelled                                                  |
+| [`Tenma::detach($work)`](../reference/Tenma.md#detach)                         | like `async()`, but the task outlives its request: see [Lifetime of a request](request-lifetime.md) |
+| [`Task`](../reference/Tenma/Task.md)                                           | `await()`, `cancel()`, `isDone()`                                                                   |
+| [`Timer`](../reference/Tenma/Timer.md)                                         | `cancel()`                                                                                          |
+| [`AsyncLocal`](../reference/Tenma/AsyncLocal.md)                               | a value that follows a request into its tasks: `get()`, `set()`                                     |
+| [`Cancelled`](../reference/Tenma/Cancelled.md)                                 | thrown where a cancelled fiber waits                                                                |
+
+## Waiting
+
+`Tenma::sleep()` suspends the calling fiber. Other requests and tasks run meanwhile.
 
 ```php
 <?php
 
 Tenma::serve(8080, function () {
-    Tenma::sleep(0.5);                                                      // other requests run meanwhile
-    $answer = Tenma::fetch('https://date.nager.at/api/v3/NextPublicHolidays/DE');   // so do they here
-    return "the holiday service answered {$answer->status}\n";
+    Tenma::sleep(0.5);
+
+    return "half a second later\n";
 });
 ```
 
-What waits without blocking:
-
-| Call                                                                          | Guide                                              |
-| ----------------------------------------------------------------------------- | -------------------------------------------------- |
-| `Tenma::sleep($seconds)`                                                      | this page                                          |
-| `Tenma::fetch($url, …)`                                                       | [Outgoing HTTP](fetch.md)                          |
-| `Tenma\Db\Postgres`, `Tenma\Db\Redis`                                         | [Databases and messages](database.md)              |
-| `Tenma\Fs::readFile()` and the other file functions                           | [Files](files.md)                                  |
-| `Stream::write()`, `EventStream::send()`, `WebSocket::receive()` and `send()` | [Streams](streams.md), [WebSockets](websockets.md) |
-| `Task::await()`, `Tenma::all()`                                               | this page                                          |
-
-PHP's own blocking functions (`sleep()`, `file_get_contents()`, PDO, mysqli, curl) still work, but they hold up the whole worker while they wait: no other request of that worker runs meanwhile. Use the Tenma functions in request code.
-
-## Several things at once
-
-`Tenma::all()` runs functions concurrently and returns their results under the same keys:
-
-```php
-<?php
-
-Tenma::serve(8080, function () {
-    $started = microtime(true);
-    ['holidays' => $holidays, 'weather' => $weather] = Tenma::all(
-        holidays: fn () => Tenma::fetch('https://date.nager.at/api/v3/NextPublicHolidays/DE')->json(),
-        weather: fn () => Tenma::fetch('https://api.open-meteo.com/v1/forecast?latitude=47.99&longitude=7.85&daily=temperature_2m_max')->json(),
-    );
-    return sprintf("%d holidays, %d days of forecast after %.2f s\n",   // as long as the slower one, not both
-        count($holidays), count($weather['daily']['time']), microtime(true) - $started);
-});
-```
-
-The bakery's product page asks four sources at once: the product and the opening hours from Postgres, the public holidays and the weather from two web services. Each closure fills its own variable; the page takes as long as the slowest source:
-
-```php
-// from src/Controllers/ShopController.php of the bakery, product(), shortened
-$product = $holidays = $weather = null;
-$hours = [];
-\Tenma::all(
-    function () use (&$product, $slug): void { $product = $this->products->bySlug($slug); },
-    function () use (&$hours): void { $hours = $this->hours->week(); },
-    function () use (&$holidays): void { $holidays = $this->holidays->upcoming(); },
-    function () use (&$weather): void { $weather = $this->weather->week(); },
-);
-```
-
-`all()` also takes a list (`Tenma::all(...$functions)`) and returns a list then. If one of the functions throws, `all()` cancels the others, waits until their `catch` and `finally` blocks have run, and then throws the first error. Nothing is left running in the background that still holds a connection or a transaction.
+PHP's own `sleep()` also works, but it holds up the whole worker. No other request of that worker runs while it waits.
 
 ## Tasks
 
-`Tenma::async()` starts one function in its own fiber and returns a [`Task`](../reference/Tenma/Task.md) at once. `await()` returns its result later, or throws its error:
+`Tenma::async()` starts a function in its own fiber and returns a [`Task`](../reference/Tenma/Task.md) at once. `await()` returns its result later, or throws its error.
 
 ```php
 <?php
 
-Tenma::serve(8080, function () {
-    $sales = Tenma::async(function () {
-        Tenma::sleep(0.2);   // stands for the query behind the sales report
-        return ['croissant' => 312, 'pretzel' => 287];
+Tenma::async(function () {
+    $task = Tenma::async(function () {
+        Tenma::sleep(0.2);   // stands for a slow query
+
+        return 42;
     });
 
-    $header = "Sales of the last 28 days\n";   // carries on while the task runs
-    $sold = $sales->await();                    // waits for it only now
-    return $header . "croissants: {$sold['croissant']}, pretzels: {$sold['pretzel']}\n";
+    echo "the task runs\n";       // the caller carries on meanwhile
+    echo $task->await(), "\n";    // waits only now: 42
+    var_dump($task->isDone());    // bool(true)
 });
 ```
 
-- `$task->isDone()` tells whether it has finished.
-- `$task->cancel()` cancels it (see below).
-- A task whose error nobody ever awaits logs the error when the task object goes away, so failures are not lost silently.
-- `Tenma::all()` accepts tasks as well as functions.
+- `await()` waits without blocking and returns the result, or throws the task's error.
+- `isDone()` tells whether the task has finished.
+- `cancel()` cancels it: see [Cancellation](#cancellation).
+- A task whose error nobody awaits logs the error when the task object goes away. Failures are not lost silently.
 
-## Timers
+## Several things at once
+
+`Tenma::all()` runs functions concurrently and returns their results under the same keys.
 
 ```php
 <?php
 
-$batches = 0;
-$oven = Tenma::setInterval(function () use (&$batches) {
-    echo "batch ", ++$batches, " of rolls is out\n";
-}, 0.5);
+Tenma::async(function () {
+    $started = microtime(true);
 
-Tenma::setTimeout(function () use ($oven) {
-    $oven->cancel();
-    echo "oven off\n";
-}, 2.2);
-```
+    $results = Tenma::all(
+        users: function () {
+            Tenma::sleep(0.3);
 
-This script prints four batches, then `oven off`, and exits: a script without a server runs until no timers and no work are pending. `setTimeout()` calls its callback once, `setInterval()` until `cancel()`. Both return a [`Timer`](../reference/Tenma/Timer.md), and every callback runs in its own fiber, so it may wait.
+            return ['ada', 'bob'];
+        },
+        count: function () {
+            Tenma::sleep(0.2);
 
-Timers set at script startup belong to the process (or the worker); timers set in a request belong to that request and end with it.
+            return 2;
+        },
+    );
 
-## Background work
-
-Work started at script startup with `Tenma::async()` runs as soon as the event loop starts, in the background. The bakery's product page needs the public holidays and the weather, and asking two web services on every request would make it as slow as they are. Timers keep their last good answers in the worker's memory instead, so the page only waits for Postgres:
-
-```php
-<?php
-
-use Tenma\Http\Response;
-
-// The last good answers; null until the first one arrived
-$lastKnown = ['holidays' => null, 'weather' => null];
-
-$refresh = function (string $name, string $url) use (&$lastKnown): void {
-    try {
-        $response = Tenma::fetch($url, timeout: 2.5);
-        if ($response->status === 200) {
-            $lastKnown[$name] = $response->json();
-        }
-    } catch (RuntimeException|JsonException $e) {
-        error_log("$name: {$e->getMessage()}");   // keeps what was there
-    }
-};
-
-// Once at start, then every interval: the holidays daily, the weather every 15 minutes
-$every = function (float $seconds, Closure $job): void {
-    Tenma::async($job);
-    Tenma::setInterval($job, $seconds);
-};
-$every(86400, fn () => $refresh('holidays', 'https://date.nager.at/api/v3/NextPublicHolidays/DE'));
-$every(900, fn () => $refresh('weather', 'https://api.open-meteo.com/v1/forecast?latitude=47.99&longitude=7.85&daily=weather_code,temperature_2m_max'));
-
-// A closure with use (&$lastKnown): an arrow function (fn) would capture a copy
-Tenma::serve(8080, function () use (&$lastKnown) {
-    return Response::json($lastKnown);   // answers from memory, without waiting for either service
+    printf("%d users after %.1f s\n", $results['count'], microtime(true) - $started);   // 0.3 s
 });
 ```
 
-The bakery does the same with a service object, `LastKnown`, whose refresh methods the timers in its `index.php` call:
-
-```php
-// from src/Services/LastKnown.php of the bakery: a failed refresh keeps what was there
-public function refreshWeather(): void
-{
-    $this->weather = $this->weatherService->week() ?? $this->weather;
-}
-```
-
-Waiting at the top level of the script is not possible: `Tenma::sleep()` there throws. Wrap startup work that has to wait in `Tenma::async()`.
-
-With several workers, each worker runs the script, so each schedules its own timers and background work, also after every restart. A cache like the one above then exists once per worker, which is fine for a forecast. A job that must run once for the whole app belongs in a separate process, behind a lock in Redis, or in a statement that claims its run in the database: the bakery's sales report moves a `last_run` timestamp only if it is older than the interval, in the same SQL statement that writes the sales, so a second worker at the same moment writes nothing (`SalesReport::aggregate()` in `src/Repositories/SalesReport.php`).
+- Named arguments give named results. A list (`Tenma::all(...$functions)`) gives a list.
+- `all()` accepts tasks as well as functions.
+- It takes as long as the slowest function, not the sum.
+- If one function throws, `all()` cancels the others and waits until their `catch` and `finally` blocks have run. Then it throws the first error. Nothing is left running in the background.
 
 ## Cancellation
 
-Work belongs to the request that started it. Tasks, timers and subscriptions of a request are cancelled when:
-
-- the response is out (for a stream or WebSocket: when the connection ends),
-- the client disconnects before the response is complete,
-- the request calls `exit()`,
-- or a sibling in `Tenma::all()` failed.
-
-Cancelling throws [`Tenma\Cancelled`](../reference/Tenma/Cancelled.md) where the fiber currently waits; `catch` and `finally` blocks run, and may even wait to clean up. `Cancelled` is deliberately no `RuntimeException`, so a `catch (RuntimeException $e)` around a failing query does not swallow it.
+`$task->cancel()` throws [`Tenma\Cancelled`](../reference/Tenma/Cancelled.md) where the task waits. Its `catch` and `finally` blocks run.
 
 ```php
 <?php
 
 use Tenma\Cancelled;
 
-Tenma::serve(8080, function () {
-    $forecast = Tenma::async(function () {
+Tenma::async(function () {
+    $task = Tenma::async(function () {
         try {
-            Tenma::sleep(10);   // stands for a weather service on a very bad day
-            return 'sunny';
-        } catch (Cancelled $e) {
-            error_log('forecast cancelled, cleaning up');
-            throw $e;
+            Tenma::sleep(10);
+        } finally {
+            echo "cleaning up\n";
         }
     });
+
     Tenma::sleep(0.1);
-    $forecast->cancel();               // throws Cancelled inside the task, where it sleeps
+    $task->cancel();
+
     try {
-        $forecast->await();
+        $task->await();
     } catch (Cancelled) {
-        return "no forecast today\n";
+        echo "cancelled\n";
     }
 });
 ```
 
-`$task->cancel($error)` throws `$error` instead of `Cancelled`, for example a timeout exception of your own.
+- `$task->cancel($error)` throws `$error` instead of `Cancelled`, for example a timeout exception of your own.
+- If the task is not waiting right now, its next wait throws.
+- Cancelling a task that is done does nothing.
+- `Cancelled` is no `RuntimeException`. A `catch (RuntimeException $e)` around a failing query does not swallow it.
 
-### Work that must finish: detach
+When a request's tasks and timers get cancelled on their own: [Lifetime of a request](request-lifetime.md).
 
-Some work must never stop halfway because the customer closed the tab: charging a card and storing the order, sending the confirmation mail. Start it with `Tenma::detach()`: the task belongs to no request and keeps running when the request ends.
+## Timers
 
 ```php
 <?php
 
-use Tenma\Http\{Request, Response};
+$ticks = 0;
 
-Tenma::serve(8080, function (Request $request) {
-    $order = $request->form();
-    Tenma::detach(function () use ($order) {
-        Tenma::sleep(1);   // stands for the payment provider and the database
-        error_log('order stored: ' . json_encode($order));
-    });
-    return Response::redirect('/orders/thanks', 303);   // answers at once; the order is stored anyway
+$interval = Tenma::setInterval(function () use (&$ticks) {
+    echo "tick ", ++$ticks, "\n";
+}, 0.5);
+
+Tenma::setTimeout(function () use ($interval) {
+    $interval->cancel();
+    echo "done\n";
+}, 2.2);
+```
+
+This prints four ticks, then `done`, and exits. A script without a server runs until no timers and no work are pending.
+
+- `setTimeout()` calls its callback once, `setInterval()` until `cancel()`.
+- Both return a [`Timer`](../reference/Tenma/Timer.md). `cancel()` stops it; a callback already running runs to completion.
+- Every callback runs in its own fiber, so it may wait.
+- Timers work at script startup and in asynchronous code.
+- A timer set in a request is cancelled when the request ends. A timer set at startup belongs to the worker.
+
+## Background work
+
+`Tenma::async()` at script startup starts its work once the event loop runs. Together with a timer, this keeps a value fresh in memory, so requests do not wait for it.
+
+```php
+<?php
+
+use Tenma\Http\Response;
+
+$lastKnown = null;   // null until the first answer arrived
+
+$refresh = function () use (&$lastKnown): void {
+    try {
+        $response = Tenma::fetch('https://httpbin.org/uuid', timeout: 2.5);
+        if ($response->status === 200) {
+            $lastKnown = $response->json()['uuid'];
+        }
+    } catch (RuntimeException|JsonException $e) {
+        error_log("refresh: {$e->getMessage()}");   // keeps the old value
+    }
+};
+
+Tenma::async($refresh);              // once at start
+Tenma::setInterval($refresh, 60);    // then every minute
+
+// use (&$lastKnown): an arrow function would capture a copy
+Tenma::serve(8080, function () use (&$lastKnown) {
+    return Response::json(['value' => $lastKnown]);
 });
 ```
 
-`COMMIT` and `ROLLBACK` of a Postgres transaction always run to completion, also in a cancelled request.
+With several workers, each worker runs the script. Each schedules its own timers and background work, also after every restart. A cache like the one above then exists once per worker.
+
+A job that must run once for the whole app needs more than a timer. Run it in a separate process, behind a lock in Redis, or in a database statement that claims the run.
 
 ## Values that follow a request
 
-Globals are shared by all requests, so they cannot carry per-request values such as a request ID. [`Tenma\AsyncLocal`](../reference/Tenma/AsyncLocal.md) can: every task, timer and `detach()` gets a copy of its creator's values when it starts, and `set()` inside a task changes only its own copy.
+Globals are shared by all requests, so they cannot carry a per-request value such as a request ID. [`Tenma\AsyncLocal`](../reference/Tenma/AsyncLocal.md) can.
 
 ```php
 <?php
@@ -229,29 +202,36 @@ use Tenma\Http\Request;
 
 $requestId = new AsyncLocal();
 
-function logLine(AsyncLocal $requestId, string $message): void
-{
+$log = function (string $message) use ($requestId): void {
     error_log("[{$requestId->get()}] $message");
-}
+};
 
-Tenma::serve(8080, function (Request $request) use ($requestId) {
+Tenma::serve(8080, function (Request $request) use ($requestId, $log) {
     $requestId->set($request->header('x-request-id') ?? bin2hex(random_bytes(4)));
-    logLine($requestId, "product page {$request->path}");
+    $log("start {$request->path}");
+
     Tenma::all(
-        fn () => logLine($requestId, 'asking for the holidays: same ID'),
-        fn () => logLine($requestId, 'asking for the weather: same ID'),
+        fn () => $log('first task: same ID'),
+        fn () => $log('second task: same ID'),
     );
+
     return "ok\n";
 });
 ```
 
-A request starts with the values the script set at startup.
+- `get()` returns the value, or null if none is set.
+- `set($value)` sets it; `set(null)` removes it.
+- Every task, timer and `detach()` gets a copy of its creator's values when it starts.
+- `set()` inside a task changes only its own copy and that of tasks it starts later.
+- A request starts with the values the script set at startup.
 
-## Rules of thumb
+## Behaviour
 
-- Start independent waits together (`Tenma::all()`), dependent ones one after another.
-- Keep CPU-heavy loops short: a fiber only gives way when it waits. An endless loop holds up its worker.
-- Use `Tenma::detach()` only for work that must outlive the request; everything else should end with it.
-- Waiting is possible in handlers, tasks, timers, subscriptions and hooks, but not at the top level of the script.
+- `sleep()`, `await()` and `all()` work only in asynchronous code: handlers, tasks, timers, subscriptions. At the top level of a script they throw a `LogicException`. Wrap startup work that waits in `Tenma::async()`.
+- `async()`, `setTimeout()` and `setInterval()` also work at script startup. Their work starts once the event loop runs.
+- A task that awaits itself throws a `LogicException`.
+- A fiber only gives way when it waits. A CPU-heavy loop holds up its worker until it ends.
+- An error in a timer callback or a task nobody awaits goes to the log.
+- Tasks, timers and subscriptions started in a request end with it. Only `detach()` outlives it: see [Lifetime of a request](request-lifetime.md).
 
-See also: [`Tenma`](../reference/Tenma.md) (`async`, `all`, `detach`, `sleep`, `setTimeout`, `setInterval`), [`Task`](../reference/Tenma/Task.md), [`Timer`](../reference/Tenma/Timer.md), [`Cancelled`](../reference/Tenma/Cancelled.md), [`AsyncLocal`](../reference/Tenma/AsyncLocal.md).
+See also: [`Tenma`](../reference/Tenma.md), [`Task`](../reference/Tenma/Task.md), [`Timer`](../reference/Tenma/Timer.md), [`Cancelled`](../reference/Tenma/Cancelled.md), [`AsyncLocal`](../reference/Tenma/AsyncLocal.md).

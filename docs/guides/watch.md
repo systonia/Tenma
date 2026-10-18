@@ -1,48 +1,63 @@
 ---
 title: Watch mode and build hooks
 description: Reload the app on every change with --watch, run build steps from tenma.dev.php, and run them once with tenma build.
-order: 80
+order: 310
 ---
 
-## --watch
+`tenma --watch` reloads the app whenever a file it loaded changes. Build steps such as a stylesheet or a cache come from a `tenma.dev.php` next to the script; watch mode runs them on every change, and `tenma build` runs them once.
 
 ```bash
-tenma --watch app.php
+tenma --watch app.php    # serve and reload on changes
+tenma build              # run the hooks of ./tenma.dev.php once
 ```
 
-Tenma watches every file the script loaded, including classes the autoloader loads later and templates read with `include`, and restarts the workers' interpreters when one of them changes. A change means different content, not just a new timestamp, so saving without changes or switching git branches back and forth does not reload.
+| Feature                                                   | Does                                                                      |
+| --------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `--watch`                                                 | reloads the workers when a loaded file changes                            |
+| [`Tenma::reloadedBy()`](../reference/Tenma.md#reloadedby) | the file whose change caused the current run, or `null` on the first run  |
+| `tenma.dev.php`                                           | returns a list of [`Tenma\Hook`](../reference/Tenma/Hook.md): build steps |
+| `.tenma-ignore`                                           | paths the hooks never look at                                             |
+| `tenma build [tenma.dev.php]`                             | runs every hook once, for CI and Docker                                   |
+| [`Tenma::diagnostics()`](diagnostics.md)                  | under `--watch`, problems the app reports appear in the editor            |
 
-During a reload:
+`--watch` is for development. In production, deploy and restart instead.
 
-- the port stays open; requests that arrive wait and are answered by the new code instead of failing,
-- running requests get 1 second to finish (instead of 10 at shutdown); open streams and WebSockets are closed after that,
-- in-memory state starts over, since the script runs again,
-- a script that fails to load after a change answers 503 until the next change fixes it,
-- a script whose ports changed restarts Tenma as a whole; a script without a server simply runs again.
+## Reloading
 
-`opcache.revalidate_freq` defaults to 0 under `--watch`, so opcache never serves the old code. `--watch` is for development; in production, deploy and restart instead.
+Tenma watches every file the script loaded. That includes classes the autoloader loads later and templates read with `include`. When one of them changes, the workers' interpreters restart and run the script again.
 
-`Tenma::reloadedBy()` returns the file whose change caused the current run (null on the first run). A framework can use it to rebuild only what that file affects:
+A change means different content, not just a new timestamp. Saving without changes does not reload, and neither does switching git branches back and forth.
+
+`Tenma::reloadedBy()` returns the file whose change caused the current run. A framework can use it to rebuild only what that file affects:
 
 ```php
 <?php
 
 $changed = Tenma::reloadedBy();
+
 if ($changed !== null) {
     error_log("reloaded because $changed changed");
 }
+
 Tenma::serve(8080, fn () => "ok\n");
 ```
 
 ## Build hooks: tenma.dev.php
 
-Build steps such as Tailwind, a JavaScript bundle or a route cache come from a `tenma.dev.php` next to the script. It returns a list of [`Tenma\Hook`](../reference/Tenma/Hook.md). Production code never loads it.
+A `tenma.dev.php` next to the script returns a list of [`Tenma\Hook`](../reference/Tenma/Hook.md). Production code never loads it.
 
-The bakery's has one hook, which rebuilds the stylesheet from every template that uses its classes:
+| Parameter | Does                                                                                  |
+| --------- | ------------------------------------------------------------------------------------- |
+| `inputs`  | globs relative to `tenma.dev.php`: `*` and `?` within a name, `**` across directories |
+| `run`     | a command as a list of strings, or a PHP callable that gets the changed paths         |
+| `outputs` | the files `run` writes; they never trigger this hook again                            |
+| `name`    | the prefix of its log lines; default: the program's file name, or `#N` (its position) |
+
+A command hook runs the program as its own process, without a shell, in the directory of `tenma.dev.php`. This one rebuilds a stylesheet from every template that uses its classes:
 
 ```php
 <?php
-// tenma.dev.php of the bakery: the stylesheet, from every template that uses its classes
+// tenma.dev.php
 
 return [
     new Tenma\Hook(
@@ -54,7 +69,7 @@ return [
 ];
 ```
 
-A hook runs either a command, as its own process without a shell in this directory, or PHP. A PHP hook gets the changed paths (empty on the first run) and may use Tenma's async functions. Here a second one lists the product pictures for the catalog:
+A PHP hook gets the changed paths, an empty list on the first run. It may use Tenma's async functions. This one writes a list of icons for the app to `include`:
 
 ```php
 <?php
@@ -62,41 +77,30 @@ A hook runs either a command, as its own process without a shell in this directo
 
 use Tenma\Hook;
 
+function listIcons(array $changed): void
+{
+    $icons = [];
+    foreach (glob(__DIR__ . '/public/icons/*.svg') as $file) {
+        $icons[basename($file, '.svg')] = '/icons/' . basename($file);
+    }
+
+    $code = '<?php return ' . var_export($icons, true) . ';';
+    Tenma\Fs::writeFile(__DIR__ . '/var/icons.php', $code);
+}
+
 return [
     new Hook(
-        inputs: ['assets/app.css', 'views/**/*.php', 'src/**/*.php'],
-        outputs: ['public/app.css'],
-        run: ['tailwindcss', '-i', 'assets/app.css', '-o', 'public/app.css', '--minify'],
-        name: 'css',
-    ),
-    new Hook(
-        inputs: ['public/products/*.svg'],
-        outputs: ['var/pictures.php'],
-        run: function (array $changed): void {
-            $pictures = [];
-            foreach (glob(__DIR__ . '/public/products/*.svg') as $file) {
-                $pictures[basename($file, '.svg')] = '/products/' . basename($file);
-            }
-            Tenma\Fs::writeFile(__DIR__ . '/var/pictures.php', '<?php return ' . var_export($pictures, true) . ';');
-        },
-        name: 'pictures',
+        inputs: ['public/icons/*.svg'],
+        outputs: ['var/icons.php'],
+        run: listIcons(...),
+        name: 'icons',
     ),
 ];
 ```
 
-How hooks run:
+## .tenma-ignore
 
-- Each hook runs once at startup, before the first request, and again whenever a file matching its `inputs` changes. The script starts once the first run is over, at the latest after 10 seconds (so a command with its own `--watch` that never ends does not block it).
-- Globs are relative to `tenma.dev.php`: `*` and `?` within a name, `**` across directories.
-- Tenma orders hooks by their files: a hook that reads another one's `outputs` runs after it, and only if that output really changed. A cycle is rejected at startup.
-- A hook's own outputs never trigger it again. One that writes files into its own inputs without declaring them is stopped after five runs in a row.
-- A failing hook (an exception, or an exit status other than 0) skips the hooks after it; the server keeps running.
-- A command's output is prefixed with its `name` (default: the program's file name, or `#N`). Its processes, including those it started itself, get SIGTERM when the hook ends or is reloaded and SIGKILL 2 seconds later.
-- Changing `tenma.dev.php` itself, or a file it or a PHP hook loaded, reloads the hooks. `exit()` in a hook ends Tenma.
-
-### .tenma-ignore
-
-A glob like `**/*.php` would otherwise look at every file in `vendor/`. A `.tenma-ignore` next to `tenma.dev.php` lists what is no input, one entry per line, `#` for comments:
+A glob like `**/*.php` would otherwise look at every file in `vendor/`. A `.tenma-ignore` next to `tenma.dev.php` lists what is no input. One entry per line, `#` starts a comment:
 
 ```text
 # a path in the project (has a slash)
@@ -111,11 +115,11 @@ Without the file, `.git`, `node_modules` and `vendor` are left out. Changing `.t
 ## tenma build
 
 ```bash
-tenma build                  # runs the hooks of ./tenma.dev.php once, in order
+tenma build                    # the hooks of ./tenma.dev.php
 tenma build path/tenma.dev.php
 ```
 
-`tenma build` runs every hook once, in dependency order, and exits with status 1 if one fails or the hooks form a cycle. Use it in CI and in a Dockerfile, so the production image contains the built CSS and caches without the hooks ever running there:
+`tenma build` runs every hook once, in dependency order, then exits. Use it in CI and in a Dockerfile, so the production image contains the built files without the hooks ever running there:
 
 ```dockerfile
 RUN tenma build
@@ -125,4 +129,27 @@ RUN tenma build
 
 Under `--watch`, problems the app reports with `Tenma::diagnostics()` appear in the editor next to the code. See [Diagnostics](diagnostics.md).
 
-See also: [`Tenma\Hook`](../reference/Tenma/Hook.md), [`Tenma::reloadedBy()`](../reference/Tenma.md#reloadedby), [Command line and deployment](deployment.md).
+## Behaviour
+
+During a reload:
+
+- The port stays open. Requests that arrive wait and get answered by the new code.
+- Running requests get 1 second to finish (10 at shutdown). Open streams and WebSockets close after that.
+- In-memory state starts over, since the script runs again.
+- A script that fails to load answers 503 until a change fixes it.
+- A script whose ports changed restarts Tenma as a whole. A script without a server simply runs again.
+- `opcache.revalidate_freq` defaults to 0, so opcache never serves the old code.
+
+Hooks:
+
+- Each hook runs once at startup, before the first request. It runs again whenever a file matching its `inputs` changes.
+- The script starts once the first run of the hooks is over, at the latest after 10 seconds. A command with its own watch mode, which never ends, therefore does not block it.
+- Tenma orders hooks by their files. A hook that reads another one's `outputs` runs after it, and only if that output really changed. A cycle is rejected at startup.
+- A hook that writes files into its own inputs without declaring them as `outputs` is stopped after five runs in a row.
+- A failing hook (an exception, or an exit status other than 0) skips the hooks after it. The server keeps running.
+- A command's processes, including those it started itself, get SIGTERM when the hook ends or reloads, and SIGKILL 2 seconds later.
+- Changing `tenma.dev.php`, or a file it or a PHP hook loaded, reloads the hooks.
+- `exit()` in a hook ends Tenma.
+- `tenma build` exits with status 1 if a hook fails or the hooks form a cycle.
+
+See also: [`Tenma\Hook`](../reference/Tenma/Hook.md), [`Tenma::reloadedBy()`](../reference/Tenma.md#reloadedby), [Command line](command-line.md), [Debugger](debugger.md).

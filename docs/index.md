@@ -4,9 +4,7 @@ description: PHP 8.5 as a long-running process with an event loop, fibers and a 
 order: 1
 ---
 
-Tenma runs a PHP script once and then keeps the process alive: the script registers an HTTP server with `Tenma::serve()`, and every request is answered by the same process, from an event loop. What the script built at startup (the router, the container, a cache, open database connections) stays in memory for every request.
-
-Every request runs in its own [fiber](https://www.php.net/manual/en/language.fibers.php). When it waits for `Tenma::sleep()`, an outgoing HTTP request, a Postgres query, a Redis command or a file, only that fiber is suspended, and the event loop serves other requests meanwhile. There is no `await` keyword and no promise type in the code: an asynchronous call simply returns its result.
+Tenma runs PHP 8.5 as one long-running process with a built-in HTTP server. The process has worker threads, and each worker has its own PHP interpreter and its own event loop. Every request runs in its own fiber, so a request that waits does not hold up the others.
 
 Tenma is a single binary with PHP 8.5 (ZTS) and its usual extensions built in. Its PHP API (`Tenma`, `Tenma\Http`, `Tenma\Db`, `Tenma\Fs`) is part of the binary, not a Composer package.
 
@@ -16,7 +14,7 @@ Tenma is a single binary with PHP 8.5 (ZTS) and its usual extensions built in. I
 curl -fsSL https://raw.githubusercontent.com/systonia/Tenma/main/packaging/install.sh | sh
 ```
 
-The script installs the Homebrew formula on macOS (Apple Silicon), a `.deb` on Debian 13 and Ubuntu 24.04, and the plain binary in `~/.local/bin` on other Linux systems. By hand:
+The script installs the Homebrew formula on macOS (Apple Silicon), a `.deb` on Debian 13 and Ubuntu 24.04, and the plain binary in `~/.local/bin` on other Linux systems. To install by hand:
 
 | System                  | Command                                                                                                  |
 | ----------------------- | -------------------------------------------------------------------------------------------------------- |
@@ -25,37 +23,16 @@ The script installs the Homebrew formula on macOS (Apple Silicon), a `.deb` on D
 | other Linux             | `tenma-linux-x64.tar.gz` from the release, binary into `~/.local/bin`                                    |
 | Docker                  | `docker run -p 8080:8080 -v "$PWD:/app" ghcr.io/systonia/tenma /app/index.php`                           |
 
-Check it with `tenma --version`, which prints the Tenma and PHP versions.
+`tenma --version` prints the Tenma and PHP versions.
 
-## A first app
+## Hello world
 
-Save this as `app.php`, a first sketch of Sonnenkorn, a made-up bakery that takes orders online:
+Save this as `app.php`:
 
 ```php
 <?php
 
-use Tenma\Http\{Request, Response};
-
-$croissants = 24;   // lives as long as the process: shared by every request
-
-Tenma::serve(8080, function (Request $request) use (&$croissants) {
-    return match ($request->path) {
-        '/' => Response::html("<h1>Sonnenkorn</h1><p>$croissants croissants left today.</p>"),
-        '/reserve' => (function () use (&$croissants) {
-            if ($croissants === 0) {
-                return new Response("Sold out\n", 409);
-            }
-            $croissants--;
-            return "Reserved one. $croissants left.\n";
-        })(),
-        '/oven' => (function () {
-            Tenma::sleep(1);   // suspends this request only; others keep being served
-            return "Fresh from the oven\n";
-        })(),
-        '/api/stock' => Response::json(['croissant' => $croissants]),
-        default => new Response("Not found\n", 404),
-    };
-});
+Tenma::serve(8080, fn () => "Hello, world\n");
 
 echo "Listening on http://localhost:8080\n";
 ```
@@ -66,15 +43,25 @@ Run it:
 tenma app.php
 ```
 
-The script runs once: it registers the server and prints the line, then Tenma opens the port. `curl localhost:8080/reserve` counts down on every call, because `$croissants` lives in the process. Ten parallel calls to `/oven` all finish after about one second: each waits in its own fiber.
+The script runs once. It registers the server and prints the line, then Tenma opens the port. `curl localhost:8080` answers `Hello, world`. During development, `tenma --watch app.php` reloads the script when a file it loaded changes.
 
-During development, `tenma --watch app.php` restarts the PHP side whenever a file the script loaded changes, without closing the port.
+## The model
+
+- **Process**: one `tenma` process serves the app. Its main thread accepts connections. See [Process and workers](guides/process.md).
+- **Worker**: a thread with its own PHP interpreter. The script runs once per worker, and what it builds stays in memory. See [State in memory](guides/state.md).
+- **Event loop**: each worker has one. It runs PHP code whenever something the code waits for is ready. See [Event loop and fibers](guides/event-loop.md).
+- **Fiber**: every request, task and timer callback runs in its own fiber. A fiber that waits is suspended, and the others keep running. See [Lifetime of a request](guides/request-lifetime.md).
+- **Op**: an operation Tenma runs outside PHP, such as a sleep, an HTTP request, a query or a file read. A fiber waits for its op without blocking the worker.
 
 ## How these docs are organised
 
-- **[Guides](guides/index.md)** explain one feature each, with code you can run: serving HTTP, asynchronous work, streams, WebSockets, databases, files, development tools, deployment.
-- **[Reference](reference/index.md)** has one page per class of Tenma's PHP API, generated from the code with `tenma docs`: every method with its signature, parameters and return value.
+The [guides](guides/index.md) come in four parts:
 
-The examples follow that bakery. Its complete shop, [Waypoint-Bakery](https://github.com/systonia/Waypoint-Bakery), runs on Tenma: the product page asks Postgres and two web services at once, timers keep the weather in the worker's memory, and the order board follows every change through `Tenma::publish()`. Where a guide quotes it, it names the file.
+- **Concepts**: the process, the event loop, the lifetime of a request, state in memory, fiber mode and classic mode.
+- **APIs**: one page per module, such as HTTP, outgoing requests, tasks and timers, streams, WebSockets, files and databases.
+- **Tooling**: watch mode, the debugger, the language server, diagnostics and reference pages.
+- **Operations**: the command line, workers, limits and deployment.
 
-Start with [Serving HTTP](guides/http.md) and [Fibers and asynchronous work](guides/async.md); they cover what every Tenma app uses. [Classic mode and fiber mode](guides/classic-mode.md) explains how to run an existing framework that relies on `$_GET`, `header()` and `echo`.
+The [reference](reference/index.md) has one page per class of the PHP API, generated from the code with `tenma docs`.
+
+A complete example app, [Waypoint-Bakery](https://github.com/systonia/Waypoint-Bakery), runs on Tenma.

@@ -1,10 +1,23 @@
 ---
 title: Configuration and php.ini
 description: PHP settings with -d, -c and php.ini, the defaults Tenma sets, built-in extensions and opcache.
-order: 140
+order: 400
 ---
 
-Tenma embeds PHP 8.5 (thread-safe build) and reads PHP settings the way the PHP command line does.
+Tenma embeds PHP 8.5 (thread-safe build) and reads PHP settings the way the PHP command line does. Tenma's own behaviour is set by [command-line options](command-line.md); the script reads its configuration from the environment.
+
+```bash
+tenma -c /etc/app/php.ini -d memory_limit=512M -d date.timezone=Europe/Berlin index.php
+```
+
+| Source                             | Does                                                     |
+| ---------------------------------- | -------------------------------------------------------- |
+| `-c FILE\|DIR`                     | reads this `php.ini`, or the `php.ini` in this directory |
+| `PHPRC`                            | the directory of the `php.ini`, when `-c` is not given   |
+| `php.ini` in the working directory | read when neither `-c` nor `PHPRC` names one             |
+| `-d name=value`                    | sets one setting; any number of times                    |
+| `ini_set()`                        | changes a setting from the script                        |
+| `php_ini_loaded_file()`            | tells which `php.ini` was read, or `false`               |
 
 ## Where settings come from
 
@@ -12,14 +25,8 @@ In order of precedence, the last one wins:
 
 1. PHP's built-in defaults, with the changes Tenma makes (below).
 2. A `php.ini`: the file or directory given with `-c`, otherwise the directory in `PHPRC`, otherwise a `php.ini` in the working directory.
-3. `-d name=value` on the command line, any number of times.
-4. `ini_set()` in the script. In classic mode, what a request changes with `ini_set()` or `set_time_limit()` is reset after the request to the state after script startup.
-
-```bash
-tenma -c /etc/bakery/php.ini -d memory_limit=512M -d date.timezone=Europe/Berlin index.php
-```
-
-`php_ini_loaded_file()` tells which file was read.
+3. `-d name=value` on the command line.
+4. `ini_set()` in the script.
 
 A `php.ini` for production:
 
@@ -38,10 +45,15 @@ expose_php = Off
 | `post_max_size`, `upload_max_filesize` | `0` (no limit)        | Tenma limits bodies itself with `--max-body`         |
 | `opcache.revalidate_freq`              | `0` under `--watch`   | a saved file is picked up at once                    |
 | `opcache.enable`                       | `0` under `--inspect` | the debugger needs the plain opcodes                 |
+| `max_execution_time`                   | `0`                   | as on the PHP command line                           |
 
-Opcache is on otherwise. It brings less than under FPM, since each worker compiles the code once at startup anyway, but saves some memory. The JIT is built on Linux and can be enabled with `-d opcache.jit=tracing`; PHP does not build it for thread-safe PHP on Apple Silicon.
+A `php.ini` or `-d` overrides each of them.
 
-`max_execution_time` is `0`, as on the PHP command line: a handler that computes forever holds up its worker.
+## Opcache and the JIT
+
+Opcache is on, except under `--inspect`. It brings less than under FPM, since each worker compiles the code once at startup anyway, but saves some memory.
+
+The JIT is built on Linux. Enable it with `-d opcache.jit=tracing`. PHP does not build it for thread-safe PHP on Apple Silicon.
 
 ## Built-in extensions
 
@@ -56,26 +68,32 @@ Core, date, json, pcre, SPL, Reflection, random, standard, hash, filter, ctype, 
 | Files and images   | `fileinfo`, `zip`, `zlib`, `gd`, `exif`                                                  |
 | Other              | `session`, `posix`, `Zend OPcache`                                                       |
 
-`iconv` is not included; `mbstring` covers most of its uses. `get_loaded_extensions()` lists the extensions of the binary at hand. Tenma cannot load extensions from `.so` files; everything is linked in.
+`iconv` is not included; `mbstring` covers most of its uses. `pcntl` is not included either: signals belong to Tenma. `get_loaded_extensions()` lists the extensions of the binary at hand.
 
 ## Environment variables
 
-Apart from `PHPRC` for the php.ini, Tenma's own behaviour is set by command-line options; the script reads what it needs with `getenv()`. A common set:
+Apart from `PHPRC`, Tenma reads no environment variables of its own. The script reads what it needs with `getenv()`:
 
 ```php
 <?php
 
 $port = (int) (getenv('PORT') ?: 8080);
-$db = Tenma\Db\Postgres::connect(getenv('DATABASE_URL') ?: 'postgres://localhost/bakery');
+$databaseUrl = getenv('DATABASE_URL') ?: 'postgres://localhost/app';
 $production = getenv('APP_ENV') === 'production';
 
-Tenma::serve($port, fn () => $production ? "Sonnenkorn\n" : "Sonnenkorn (development)\n");
+$mode = $production ? 'production' : 'development';
+
+Tenma::serve($port, fn () => "running in $mode\n");
 ```
 
-The script reads them once at startup; changing them needs a restart.
+The script reads them once at startup. Changing them needs a restart.
 
-## Settings per request
+## Behaviour
 
-In fiber mode many requests share one interpreter at the same time, so `ini_set()` inside a handler changes the setting for every request of that worker. Set what you need at script startup. `date_default_timezone_set()`, `setlocale()` and `mb_internal_encoding()` are just as global: the bakery sets its time zone once in `app.php` (`date_default_timezone_set($env->string('BAKERY_TIMEZONE', 'Europe/Berlin'))`), and every pickup day is computed in it.
+- Tenma cannot load extensions from `.so` files. Everything is linked in.
+- `max_execution_time` is `0`: a handler that computes forever holds up its worker.
+- In fiber mode many requests share one interpreter. `ini_set()` inside a handler changes the setting for every request of that worker. Set what you need at script startup.
+- `date_default_timezone_set()`, `setlocale()` and `mb_internal_encoding()` are just as global. Call them once at startup.
+- In [classic mode](classic-mode.md), what a request changes with `ini_set()` or `set_time_limit()` is reset after the request, to the state after script startup.
 
-See also: [Command line and deployment](deployment.md), [Classic mode](classic-mode.md).
+See also: [Command line](command-line.md), [Deployment](deployment.md), [Classic mode](classic-mode.md).

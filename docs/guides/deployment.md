@@ -1,88 +1,57 @@
 ---
-title: Command line and deployment
-description: Every tenma option, workers and limits, signals and restarts, and running Tenma with Docker, systemd or Homebrew.
-order: 130
+title: Deployment
+description: Run Tenma in production with Docker, systemd or Homebrew behind a reverse proxy, with signals, restarts, limits and logs.
+order: 410
 ---
 
-## The command line
-
-```text
-tenma [options] <script.php> [arguments …]
-tenma build [tenma.dev.php]
-tenma lsp
-tenma docs [<path>...] [--out <dir>]
-tenma --stubs
-tenma --version
-```
-
-Everything after the script belongs to the script and ends up in `$argv`, as with `php`: `tenma index.php db:migrate` runs the bakery's migrations as a CLI task instead of serving.
-
-| Option                      | Default            |                                                                                                       |
-| --------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------- |
-| `--workers N`, `-w N`       | 1                  | worker threads, each with its own PHP interpreter and state; `auto` = one per CPU core                |
-| `--max-body SIZE`           | `10m`              | largest request body and WebSocket message (`k`, `m`, `g`); 413 above it                              |
-| `--max-requests N`          | none               | a worker restarts its interpreter after N requests (for leaking code)                                 |
-| `--max-connections N`       | 1024               | open connections per worker; more get a 503 at once                                                   |
-| `--request-timeout SECONDS` | 30                 | headers and body must arrive in time (408 or disconnect), and a write to a client may stall no longer |
-| `--db-pool N`               | 20 / workers, 2–10 | Postgres connections per worker and URL                                                               |
-| `--pubsub redis://HOST`     | none               | `Tenma::publish()` goes through Redis and reaches every process                                       |
-| `--server-name NAME`        | `localhost`        | `$_SERVER['SERVER_NAME']` in classic mode                                                             |
-| `-d name=value`             |                    | a PHP setting, as with `php -d`                                                                       |
-| `-c FILE\|DIR`              |                    | a `php.ini`, as with `php -c`                                                                         |
-| `--watch`                   |                    | reload on changes, run the hooks of `tenma.dev.php` ([Watch mode](watch.md))                          |
-| `--inspect[=[HOST:]PORT]`   | `127.0.0.1:9229`   | the debugger; `--inspect-wait`, `--inspect-brk` ([Debugger](debugger.md))                             |
-
-`tenma build` runs the [build hooks](watch.md#tenma-build) once, `tenma lsp` is the [language server](language-server.md), `tenma docs` writes [reference pages](reference-docs.md), and `tenma --stubs` prints Tenma's PHP API as stubs for IDEs and PHPStan (also available as the Composer package `tenma/stubs`).
-
-A server listens on every interface (`0.0.0.0`) on the port given to `Tenma::serve()`. Read the port from the environment so the same script runs everywhere:
-
-```php
-Tenma::serve((int) (getenv('PORT') ?: 8080), $handler);
-```
-
-## Scripts without a server
-
-A script that does not call `Tenma::serve()` is an ordinary script: it runs, then keeps running while timers, tasks or subscriptions are pending, and exits. `exit($status)` outside a request (in the script, a timer or background work) ends Tenma with that status, including a running server. A fatal error during startup work ends Tenma with 255.
+In production Tenma is one process that serves the app with one or more workers. This page covers how to start it, stop it, put it behind a proxy, and what limits apply. Every option is on the [Command line](command-line.md) page.
 
 ## Workers
 
-```bash
-tenma --workers auto index.php
-```
-
-Each worker is a thread with its own PHP interpreter and its own event loop. The script runs once per worker, so each worker has its own copy of everything in memory: an in-memory counter or cache exists per worker. Shared state belongs in Postgres or Redis, and changes to in-memory caches can be announced with [`Tenma::publish()`](database.md#messages-between-workers). The bakery runs with `tenma --workers 2 index.php` in production: each worker keeps its own copy of the weather forecast, which is fine, while orders and stock live in Postgres and the order board hears of every change through `Tenma::publish()`.
-
-The main thread accepts connections and hands them to the workers in turn; a connection stays with its worker. One worker already serves many concurrent requests in fiber mode, so start with one per core and measure. In [classic mode](classic-mode.md), where each worker serves one request at a time, more workers mean more parallel requests.
+`--workers N` runs several workers, each with its own interpreter and memory. How they share work and state is on the [Process and workers](process.md#workers) page.
 
 ## Restarts and signals
 
-- **Ctrl+C or SIGTERM**: Tenma stops accepting connections and lets running requests finish for up to 10 seconds, then exits. A second signal ends it at once.
-- **A fatal PHP error** (out of memory, stack overflow) answers 500 and restarts only the interpreter of that worker, which runs the script again. The other workers keep serving.
-- **`--max-requests N`** restarts a worker's interpreter after N requests.
+- **Ctrl+C or SIGTERM**: Tenma stops accepting connections. Running requests get up to 10 seconds to finish, then Tenma exits with status 0. A second signal ends it at once.
+- **A fatal PHP error** (out of memory, stack overflow) answers 500. Only the interpreter of that worker restarts and runs the script again. The other workers keep serving.
+- **`--max-requests N`** restarts a worker's interpreter after N requests. It helps with code that leaks memory.
+- **A script that fails on a restart** ends Tenma with status 1, since a missing worker would drop connections.
 
-PHP's own signal handlers are disabled (and `pcntl` is not built in): signals belong to Tenma.
+PHP's own signal handlers are disabled, and `pcntl` is not built in. Signals belong to Tenma.
 
 ## Limits
 
-Requests whose headers and body do not arrive within `--request-timeout` are cut off (against slowloris clients). A client that stops reading a response is disconnected after the same time; a streaming writer or `WebSocket::send()` waiting for it gets `ConnectionClosed`. `Tenma::fetch()` has its own `timeout` (default 30 s), and connections to Postgres, Redis and through `fetch()` must be established within 10 seconds.
+| Limit                                    | Default | Set with                | Above it                                       |
+| ---------------------------------------- | ------- | ----------------------- | ---------------------------------------------- |
+| request body and WebSocket message       | 10 MB   | `--max-body`            | 413                                            |
+| headers and body arriving                | 30 s    | `--request-timeout`     | 408 or disconnect                              |
+| a client that stops reading              | 30 s    | `--request-timeout`     | disconnect; the writer gets `ConnectionClosed` |
+| open connections per worker              | 1024    | `--max-connections`     | 503 at once                                    |
+| `Tenma::fetch()` response                | 30 s    | its `timeout` parameter | the call fails                                 |
+| connecting to Postgres, Redis, `fetch()` | 10 s    | fixed                   | the call fails                                 |
+| draining on shutdown                     | 10 s    | fixed                   | running requests are cut off                   |
 
-A handler that computes forever (an endless loop) is not interrupted and holds up its worker; there is no execution timeout for CPU work.
+The request timeout protects against slowloris clients. A streaming writer or `WebSocket::send()` that waits for a client which stopped reading gets `ConnectionClosed`.
+
+There is no execution timeout for CPU work. A handler that computes forever (an endless loop) is not interrupted and holds up its worker.
 
 ## Behind a reverse proxy
 
-Tenma speaks plain HTTP/1.1. Put a proxy such as Caddy or nginx in front for TLS, HTTP/2 and compression:
+Tenma speaks plain HTTP/1.1. Put a proxy such as Caddy or nginx in front of it for TLS, HTTP/2 and compression. A Caddyfile:
 
 ```caddyfile
-sonnenkorn.test {
+example.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
 
-`$request->remoteAddress` is then the proxy's address; read the client's address from the header the proxy sets (`X-Forwarded-For`), and only trust it from your proxy.
+`$request->remoteAddress` is then the proxy's address. The client's address is in the header the proxy sets (`X-Forwarded-For`). Trust that header only when the request comes from your proxy.
+
+To deploy without dropping requests, start the new release on another port, switch the proxy, then stop the old one.
 
 ## Docker
 
-The image `ghcr.io/systonia/tenma` has `tenma` as its entrypoint, runs as the unprivileged user `tenma` (uid 1000), sets `PORT=8080` and stops with SIGTERM:
+The image `ghcr.io/systonia/tenma` runs `tenma` as its entrypoint. It runs as the unprivileged user `tenma` (uid 1000), sets `PORT=8080` and stops with SIGTERM:
 
 ```bash
 docker run -p 8080:8080 -v "$PWD:/app" ghcr.io/systonia/tenma /app/index.php
@@ -103,28 +72,28 @@ COPY . .
 CMD ["--workers", "auto", "/app/index.php"]
 ```
 
-With [build hooks](watch.md), run `tenma build` in a build stage so the image contains their outputs.
+With [build hooks](watch.md), run `tenma build` in a build stage, so the image contains their outputs.
 
 ## systemd
 
-`/etc/systemd/system/bakery.service`:
+`/etc/systemd/system/app.service`:
 
 ```ini
 [Unit]
-Description=Sonnenkorn bakery (tenma)
+Description=app (tenma)
 After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
-User=bakery
-WorkingDirectory=/srv/bakery/current
+User=app
+WorkingDirectory=/srv/app/current
 Environment=PORT=8080
 Environment=APP_ENV=production
-Environment=DATABASE_URL=postgres://bakery@localhost/bakery
-# JWT_SECRET and CSRF_SECRET, readable by root only
-EnvironmentFile=/etc/bakery/secrets.env
+Environment=DATABASE_URL=postgres://app@localhost/app
+# secrets, readable by root only
+EnvironmentFile=/etc/app/secrets.env
 ExecStartPre=/usr/bin/tenma index.php db:migrate
-ExecStart=/usr/bin/tenma --workers auto -c /etc/bakery/php.ini index.php
+ExecStart=/usr/bin/tenma --workers auto -c /etc/app/php.ini index.php
 Restart=always
 KillSignal=SIGTERM
 TimeoutStopSec=15
@@ -133,9 +102,10 @@ TimeoutStopSec=15
 WantedBy=multi-user.target
 ```
 
-`systemctl enable --now bakery`. Logs (stderr) go to the journal: `journalctl -u bakery -f`. `ExecStartPre` applies new migrations before every start; the bakery's migrate task takes an advisory lock, so two starts at once wait for each other. `TimeoutStopSec` is above Tenma's 10-second drain, so running requests can finish. The `.deb` installs the binary as `/usr/bin/tenma`; with the tarball, use its path in `~/.local/bin`.
-
-To deploy without dropping requests, start the new release on another port, switch the proxy, then stop the old one.
+- `systemctl enable --now app` starts it. Logs go to the journal: `journalctl -u app -f`.
+- `ExecStartPre` runs a task of the same script before every start, here the migrations.
+- `TimeoutStopSec` is above Tenma's 10-second drain, so running requests can finish.
+- The `.deb` installs the binary as `/usr/bin/tenma`. The tarball installs it into `~/.local/bin`; use that path instead.
 
 ## Homebrew
 
@@ -150,6 +120,8 @@ The formula installs the binary and the libraries it links. For a background ser
 
 ## Logs
 
-Tenma writes to stderr: PHP errors and warnings, uncaught exceptions with their stack trace, and `error_log()`. Nothing goes into responses. `echo` outside classic requests goes to stdout.
+- **stderr**: PHP errors and warnings, uncaught exceptions with their stack trace, `error_log()`, and Tenma's own messages (`tenma: shutting down`).
+- **stdout**: `echo`, except inside a request in [classic mode](classic-mode.md), where it becomes the response.
+- **Responses** never contain errors: `display_errors` is off.
 
-See also: [Configuration and php.ini](configuration.md), [Watch mode and build hooks](watch.md).
+See also: [Command line](command-line.md), [Process and workers](process.md), [Configuration and php.ini](configuration.md), [Watch mode and build hooks](watch.md).
