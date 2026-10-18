@@ -23,7 +23,8 @@ type Receiver = Rc<RefCell<Option<UnboundedReceiver<Vec<u8>>>>>;
 
 /// Every subscription of the process by channel: its ID and where its messages go.
 // ponytail: unbounded per subscription; a callback slower than the publishers lets its queue grow
-static CHANNELS: LazyLock<Mutex<HashMap<Vec<u8>, Vec<(u64, UnboundedSender<Vec<u8>>)>>>> = LazyLock::new(Mutex::default);
+static CHANNELS: LazyLock<Mutex<HashMap<Vec<u8>, Vec<(u64, UnboundedSender<Vec<u8>>)>>>> =
+    LazyLock::new(Mutex::default);
 /// Unique across workers: unsubscribe finds the subscription in CHANNELS by it.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -43,7 +44,9 @@ thread_local! {
 }
 
 fn channels() -> MutexGuard<'static, HashMap<Vec<u8>, Vec<(u64, UnboundedSender<Vec<u8>>)>>> {
-    CHANNELS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    CHANNELS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Sends a command to the Redis thread, if there is one. Called while CHANNELS is locked, so subscribe
@@ -87,12 +90,19 @@ fn subscribe(channel: &[u8]) -> u64 {
         }
         subscriptions.push((id, sender));
     }
-    SUBSCRIPTIONS.with_borrow_mut(|subscriptions| subscriptions.insert(id, (channel.to_vec(), Rc::new(RefCell::new(Some(receiver))))));
+    SUBSCRIPTIONS.with_borrow_mut(|subscriptions| {
+        subscriptions.insert(
+            id,
+            (channel.to_vec(), Rc::new(RefCell::new(Some(receiver)))),
+        )
+    });
     id
 }
 
 fn unsubscribe(id: u64) {
-    let Some((channel, _)) = SUBSCRIPTIONS.with_borrow_mut(|subscriptions| subscriptions.remove(&id)) else {
+    let Some((channel, _)) =
+        SUBSCRIPTIONS.with_borrow_mut(|subscriptions| subscriptions.remove(&id))
+    else {
         return;
     };
     let mut channels = channels();
@@ -107,16 +117,28 @@ fn unsubscribe(id: u64) {
 
 /// The next message of a subscription; an op, its result is the message.
 fn receive(id: u64) -> u64 {
-    let Some(slot) = SUBSCRIPTIONS.with_borrow(|subscriptions| subscriptions.get(&id).map(|(_, receiver)| Rc::clone(receiver))) else {
+    let Some(slot) = SUBSCRIPTIONS.with_borrow(|subscriptions| {
+        subscriptions
+            .get(&id)
+            .map(|(_, receiver)| Rc::clone(receiver))
+    }) else {
         return 0;
     };
     ops::spawn(async move {
         let Some(receiver) = slot.borrow_mut().take() else {
             return OpResult::Error("this subscription is already receiving".into());
         };
-        let mut lent = Lent { slot, receiver: Some(receiver) };
+        let mut lent = Lent {
+            slot,
+            receiver: Some(receiver),
+        };
         // None once unsubscribed: the sender is gone
-        lent.receiver.as_mut().unwrap().recv().await.map_or(OpResult::Null, OpResult::Text)
+        lent.receiver
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .map_or(OpResult::Null, OpResult::Text)
     })
 }
 
@@ -134,7 +156,8 @@ impl Drop for Lent {
 
 /// The worker's interpreter ends: its subscriptions end with it.
 pub fn clear() {
-    let ids: Vec<u64> = SUBSCRIPTIONS.with_borrow(|subscriptions| subscriptions.keys().copied().collect());
+    let ids: Vec<u64> =
+        SUBSCRIPTIONS.with_borrow(|subscriptions| subscriptions.keys().copied().collect());
     for id in ids {
         unsubscribe(id);
     }
@@ -144,7 +167,15 @@ pub fn clear() {
 /// "publish": 1. "subscribe": the subscription's ID. "receive": an op for the next message of
 /// subscription $id, 0 outside the event loop. "unsubscribe": 1.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_pubsub(op: *const u8, op_len: usize, id: u64, channel: *const u8, channel_len: usize, message: *const u8, message_len: usize) -> u64 {
+extern "C" fn tenma_rs_pubsub(
+    op: *const u8,
+    op_len: usize,
+    id: u64,
+    channel: *const u8,
+    channel_len: usize,
+    message: *const u8,
+    message_len: usize,
+) -> u64 {
     let channel = bytes(channel, channel_len);
     match bytes(op, op_len) {
         b"publish" => {
@@ -169,7 +200,10 @@ pub fn use_redis(url: &str) -> Result<(), String> {
     std::thread::Builder::new()
         .name("tenma-pubsub".into())
         .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio does not start");
             runtime.block_on(bridge(client, commands));
         })
         .map_err(|error| format!("--pubsub: {error}"))?;
@@ -239,7 +273,11 @@ async fn publish_to(
     message: Vec<u8>,
     unsent: &mut Option<(Vec<u8>, Vec<u8>)>,
 ) -> redis::RedisResult<()> {
-    let result = redis::cmd("PUBLISH").arg(&channel).arg(&message).exec_async(publisher).await;
+    let result = redis::cmd("PUBLISH")
+        .arg(&channel)
+        .arg(&message)
+        .exec_async(publisher)
+        .await;
     if result.is_err() {
         *unsent = Some((channel, message));
     }

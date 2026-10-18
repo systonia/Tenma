@@ -41,16 +41,30 @@ impl Mount {
     /// A prefix and what is served there; None if it is neither a directory nor a file.
     pub fn new(prefix: String, target: &Path) -> Option<Self> {
         if target.is_dir() {
-            return Some(Self { prefix, root: target.to_path_buf(), file: None });
+            return Some(Self {
+                prefix,
+                root: target.to_path_buf(),
+                file: None,
+            });
         }
         let name = target.file_name().filter(|_| target.is_file())?;
-        let file = percent_encoding::percent_encode(name.as_bytes(), percent_encoding::NON_ALPHANUMERIC).to_string();
-        Some(Self { prefix, root: target.parent()?.to_path_buf(), file: Some(file) })
+        let file =
+            percent_encoding::percent_encode(name.as_bytes(), percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
+        Some(Self {
+            prefix,
+            root: target.parent()?.to_path_buf(),
+            file: Some(file),
+        })
     }
 
     /// The path below the directory, if $path falls under this prefix.
     fn rest<'a>(&'a self, path: &'a str) -> Option<&'a str> {
-        let rest = if self.prefix == "/" { path } else { path.strip_prefix(self.prefix.as_str())? };
+        let rest = if self.prefix == "/" {
+            path
+        } else {
+            path.strip_prefix(self.prefix.as_str())?
+        };
         match &self.file {
             // A single file only matches its exact prefix
             Some(file) => rest.is_empty().then_some(file.as_str()),
@@ -91,11 +105,24 @@ const SOURCE_EXTENSIONS: [&str; 7] = ["php", "phtml", "phar", "phps", "pht", "ph
 /// Opens $candidate and checks that the opened file really is under $root, is not hidden and is no PHP source.
 fn open_inside(root: &Path, candidate: &Path) -> Option<(File, std::fs::Metadata, PathBuf)> {
     // O_NONBLOCK: a named pipe in the directory would otherwise make open() wait forever; files do not mind
-    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(candidate).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(candidate)
+        .ok()?;
     let real = fd_path(&file)?;
     let inside = real.strip_prefix(root).ok()?;
-    let hidden = inside.components().any(|part| !matches!(part, Component::Normal(name) if !name.as_bytes().starts_with(b".")));
-    let source = real.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| SOURCE_EXTENSIONS.iter().any(|php| ext.eq_ignore_ascii_case(php)));
+    let hidden = inside
+        .components()
+        .any(|part| !matches!(part, Component::Normal(name) if !name.as_bytes().starts_with(b".")));
+    let source = real
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            SOURCE_EXTENSIONS
+                .iter()
+                .any(|php| ext.eq_ignore_ascii_case(php))
+        });
     let meta = file.metadata().ok()?;
     (!hidden && !source).then_some((file, meta, real))
 }
@@ -107,7 +134,10 @@ fn resolve(root: &Path, path: &str) -> Option<Found> {
     let root = std::fs::canonicalize(root).ok()?;
     let decoded: Vec<u8> = percent_encoding::percent_decode_str(path).collect();
     let mut candidate = root.clone();
-    for segment in decoded.split(|&byte| byte == b'/').filter(|segment| !segment.is_empty()) {
+    for segment in decoded
+        .split(|&byte| byte == b'/')
+        .filter(|segment| !segment.is_empty())
+    {
         if segment.starts_with(b".") || segment.contains(&0) || segment.contains(&b'\\') {
             return None;
         }
@@ -133,7 +163,13 @@ fn range(value: &str, size: u64) -> Option<Result<(u64, u64), ()>> {
     let value = value.strip_prefix("bytes=")?;
     // Multiple ranges would be multipart/byteranges: send the whole file instead
     let (start, end) = value.split_once('-').filter(|_| !value.contains(','))?;
-    let number = |text: &str| text.trim().bytes().all(|byte| byte.is_ascii_digit()).then(|| text.trim().parse::<u64>().ok()).flatten();
+    let number = |text: &str| {
+        text.trim()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| text.trim().parse::<u64>().ok())
+            .flatten()
+    };
     if size == 0 {
         return None;
     }
@@ -145,14 +181,22 @@ fn range(value: &str, size: u64) -> Option<Result<(u64, u64), ()>> {
         }
         (false, true) => {
             let start = number(start)?;
-            if start > last { Err(()) } else { Ok((start, last)) }
+            if start > last {
+                Err(())
+            } else {
+                Ok((start, last))
+            }
         }
         (false, false) => {
             let (start, end) = (number(start)?, number(end)?);
             if start > end {
                 return None;
             }
-            if start > last { Err(()) } else { Ok((start, end.min(last))) }
+            if start > last {
+                Err(())
+            } else {
+                Ok((start, end.min(last)))
+            }
         }
         (true, true) => return None,
     })
@@ -170,14 +214,30 @@ fn text(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
 
 /// Serves the file if there is one for the request; None if the handler should take over.
 /// $mounts are sorted by prefix length, longest first: it wins.
-pub async fn serve(mounts: &[Mount], method: &Method, uri: &hyper::Uri, headers: &HeaderMap) -> Option<Response<ResponseBody>> {
+pub async fn serve(
+    mounts: &[Mount],
+    method: &Method,
+    uri: &hyper::Uri,
+    headers: &HeaderMap,
+) -> Option<Response<ResponseBody>> {
     if method != Method::GET && method != Method::HEAD {
         return None;
     }
-    let (mount, rest) = mounts.iter().find_map(|mount| Some((mount, mount.rest(uri.path())?)))?;
+    let (mount, rest) = mounts
+        .iter()
+        .find_map(|mount| Some((mount, mount.rest(uri.path())?)))?;
     // A directory prefix without / ("/assets") counts as a directory without a trailing /: redirect
-    let (root, rest) = (mount.root.clone(), if mount.file.is_some() { format!("/{rest}") } else { rest.to_owned() });
-    let found = tokio::task::spawn_blocking(move || resolve(&root, &rest)).await.ok()??;
+    let (root, rest) = (
+        mount.root.clone(),
+        if mount.file.is_some() {
+            format!("/{rest}")
+        } else {
+            rest.to_owned()
+        },
+    );
+    let found = tokio::task::spawn_blocking(move || resolve(&root, &rest))
+        .await
+        .ok()??;
     let (file, meta, real) = match found {
         Found::File(file, meta, real) => (file, meta, real),
         Found::Directory => {
@@ -188,7 +248,9 @@ pub async fn serve(mounts: &[Mount], method: &Method, uri: &hyper::Uri, headers:
                 Some(query) => format!("/{path}/?{query}"),
                 None => format!("/{path}/"),
             };
-            response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&location).ok()?);
+            response
+                .headers_mut()
+                .insert(header::LOCATION, HeaderValue::from_str(&location).ok()?);
             return Some(response);
         }
     };
@@ -199,50 +261,95 @@ pub async fn serve(mounts: &[Mount], method: &Method, uri: &hyper::Uri, headers:
     let last_modified = httpdate::fmt_http_date(modified);
 
     // If-None-Match takes precedence; If-Modified-Since only without it (RFC 9110 13.2.2)
-    let not_modified = match (text(headers, header::IF_NONE_MATCH), text(headers, header::IF_MODIFIED_SINCE)) {
-        (Some(tags), _) => tags.split(',').any(|tag| tag.trim() == "*" || tag.trim().trim_start_matches("W/") == etag),
-        (None, Some(since)) => httpdate::parse_http_date(since).is_ok_and(|since| since.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() >= since_epoch.as_secs()),
+    let not_modified = match (
+        text(headers, header::IF_NONE_MATCH),
+        text(headers, header::IF_MODIFIED_SINCE),
+    ) {
+        (Some(tags), _) => tags
+            .split(',')
+            .any(|tag| tag.trim() == "*" || tag.trim().trim_start_matches("W/") == etag),
+        (None, Some(since)) => httpdate::parse_http_date(since).is_ok_and(|since| {
+            since
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                >= since_epoch.as_secs()
+        }),
         (None, None) => false,
     };
 
     let mime = mime_guess::from_path(&real).first_or_octet_stream();
-    let content_type = if mime.type_() == mime_guess::mime::TEXT || matches!(mime.essence_str(), "application/javascript" | "application/json") { format!("{mime}; charset=utf-8") } else { mime.to_string() };
+    let content_type = if mime.type_() == mime_guess::mime::TEXT
+        || matches!(
+            mime.essence_str(),
+            "application/javascript" | "application/json"
+        ) {
+        format!("{mime}; charset=utf-8")
+    } else {
+        mime.to_string()
+    };
 
     let mut response = if not_modified {
         empty(StatusCode::NOT_MODIFIED)
     } else {
         // Range only if If-Range is missing or still matches this version of the file; otherwise the whole file
-        let current = text(headers, header::IF_RANGE).is_none_or(|validator| validator == etag || validator == last_modified);
-        let requested = text(headers, header::RANGE).filter(|_| current).and_then(|value| range(value, size));
+        let current = text(headers, header::IF_RANGE)
+            .is_none_or(|validator| validator == etag || validator == last_modified);
+        let requested = text(headers, header::RANGE)
+            .filter(|_| current)
+            .and_then(|value| range(value, size));
         let (status, start, length) = match requested {
             Some(Ok((start, end))) => (StatusCode::PARTIAL_CONTENT, start, end - start + 1),
             Some(Err(())) => {
                 let mut response = empty(StatusCode::RANGE_NOT_SATISFIABLE);
-                response.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes */{size}")).ok()?);
+                response.headers_mut().insert(
+                    header::CONTENT_RANGE,
+                    HeaderValue::from_str(&format!("bytes */{size}")).ok()?,
+                );
                 return Some(response);
             }
             None => (StatusCode::OK, 0, size),
         };
-        let mut response = if method == Method::HEAD { empty(status) } else { Response::new(Either::Right(stream(file, start, length))) };
+        let mut response = if method == Method::HEAD {
+            empty(status)
+        } else {
+            Response::new(Either::Right(stream(file, start, length)))
+        };
         *response.status_mut() = status;
         let headers = response.headers_mut();
         headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
         if status == StatusCode::PARTIAL_CONTENT {
-            headers.insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes {start}-{}/{size}", start + length - 1)).ok()?);
+            headers.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {start}-{}/{size}", start + length - 1))
+                    .ok()?,
+            );
         }
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(&content_type).ok()?);
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(&content_type).ok()?,
+        );
         response
     };
     let headers = response.headers_mut();
     headers.insert(header::ETAG, HeaderValue::from_str(&etag).ok()?);
-    headers.insert(header::LAST_MODIFIED, HeaderValue::from_str(&last_modified).ok()?);
+    headers.insert(
+        header::LAST_MODIFIED,
+        HeaderValue::from_str(&last_modified).ok()?,
+    );
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     // The type stays the one the extension says: an upload can't pass itself off as a script
-    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     // An SVG can carry scripts; opened directly (an upload under a mount) it runs none on this origin.
     // As <img> it is unaffected. HTML files stay as they are: a static site needs their scripts
     if mime.essence_str() == "image/svg+xml" {
-        headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("sandbox"),
+        );
     }
     Some(response)
 }

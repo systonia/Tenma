@@ -15,7 +15,10 @@ struct Str {
 
 impl Str {
     fn of(bytes: &[u8]) -> Self {
-        Str { ptr: bytes.as_ptr(), len: bytes.len() }
+        Str {
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
+        }
     }
 }
 
@@ -65,7 +68,14 @@ unsafe extern "C" {
     fn tenma_request_gone(rid: u64) -> c_int;
     fn tenma_complete_string(op: u64, text: *const u8, len: usize) -> c_int;
     fn tenma_complete_error(op: u64, message: *const u8, len: usize, code: c_int) -> c_int;
-    fn tenma_complete_http(op: u64, status: u16, headers: *const u8, headers_len: usize, body: *const u8, body_len: usize) -> c_int;
+    fn tenma_complete_http(
+        op: u64,
+        status: u16,
+        headers: *const u8,
+        headers_len: usize,
+        body: *const u8,
+        body_len: usize,
+    ) -> c_int;
 }
 
 /// A server the script registered with `tenma_listen`.
@@ -86,7 +96,11 @@ thread_local! {
 
 /// Bytes from C as a slice; null or length 0 give an empty slice.
 pub fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
-    if ptr.is_null() || len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len) } }
+    if ptr.is_null() || len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
 }
 
 /// Bytes from C as text, invalid UTF-8 replaced.
@@ -110,14 +124,20 @@ extern "C" fn tenma_rs_respond(rid: u64, raw: *mut RawResponse) {
 pub enum Reply {
     Full(Response),
     /// Head right away, the body follows piece by piece from the channel (Response::stream, Response::events).
-    Stream { status: u16, headers: Vec<(Vec<u8>, Vec<u8>)>, body: crate::streams::ChannelBody },
+    Stream {
+        status: u16,
+        headers: Vec<(Vec<u8>, Vec<u8>)>,
+        body: crate::streams::ChannelBody,
+    },
     /// The connection becomes a WebSocket (Response::websocket).
     Upgrade(crate::streams::Pipes),
 }
 
 /// Gives a waiting request its response. False if it is not (or no longer) waiting.
 pub fn reply(rid: u64, reply: Reply) -> bool {
-    WAITING.with_borrow_mut(|waiting| waiting.remove(&rid)).is_some_and(|sender| sender.send(reply).is_ok())
+    WAITING
+        .with_borrow_mut(|waiting| waiting.remove(&rid))
+        .is_some_and(|sender| sender.send(reply).is_ok())
 }
 
 /// Header lines "Name: Value", separated by null bytes, as pairs.
@@ -126,7 +146,10 @@ pub fn parse_header_lines(packed: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
         .split(|&byte| byte == 0)
         .filter_map(|line| {
             let colon = line.iter().position(|&byte| byte == b':')?;
-            Some((line[..colon].trim_ascii().to_vec(), line[colon + 1..].trim_ascii().to_vec()))
+            Some((
+                line[..colon].trim_ascii().to_vec(),
+                line[colon + 1..].trim_ascii().to_vec(),
+            ))
         })
         .collect()
 }
@@ -138,14 +161,23 @@ unsafe fn take_response(raw: *mut RawResponse) -> Response {
     let headers = parse_header_lines(bytes(raw_ref.headers, raw_ref.headers_len));
     let status = raw_ref.status;
     unsafe { tenma_response_free(raw) };
-    Response { status, headers, body }
+    Response {
+        status,
+        headers,
+        body,
+    }
 }
 
 /// Called from PHP via `tenma_listen`. Only records the server; it starts after the script.
 /// 1: registered. 0: invalid port. -1: a target for static files is neither a directory nor a
 /// file. $mounts: prefix and absolute path alternating, each terminated by a null byte.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_listen(port: i64, handler: u32, mounts: *const u8, mounts_len: usize) -> c_int {
+extern "C" fn tenma_rs_listen(
+    port: i64,
+    handler: u32,
+    mounts: *const u8,
+    mounts_len: usize,
+) -> c_int {
     let Ok(port @ 1..) = u16::try_from(port) else {
         return 0;
     };
@@ -155,14 +187,24 @@ extern "C" fn tenma_rs_listen(port: i64, handler: u32, mounts: *const u8, mounts
     // Not stored canonicalized: files::serve resolves the paths per request, so a deploy by
     // swapping a symlink takes effect without a restart
     for pair in fields.chunks_exact(2) {
-        let target = std::path::Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(pair[1]));
-        let Some(mount) = crate::files::Mount::new(String::from_utf8_lossy(pair[0]).into_owned(), target) else {
+        let target = std::path::Path::new(
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(pair[1]),
+        );
+        let Some(mount) =
+            crate::files::Mount::new(String::from_utf8_lossy(pair[0]).into_owned(), target)
+        else {
             return -1;
         };
         parsed.push(mount);
     }
     parsed.sort_by_key(|mount| std::cmp::Reverse(mount.prefix.len()));
-    LISTENERS.with_borrow_mut(|listeners| listeners.push(Listener { port, handler, mounts: std::sync::Arc::new(parsed) }));
+    LISTENERS.with_borrow_mut(|listeners| {
+        listeners.push(Listener {
+            port,
+            handler,
+            mounts: std::sync::Arc::new(parsed),
+        })
+    });
     1
 }
 
@@ -203,9 +245,16 @@ pub enum OpResult {
     Null,
     Text(Vec<u8>),
     /// An error with a code (e.g. errno) for the exception code in PHP.
-    Failure { message: String, code: i32 },
+    Failure {
+        message: String,
+        code: i32,
+    },
     Error(String),
-    Http { status: u16, headers: Vec<String>, body: Vec<u8> },
+    Http {
+        status: u16,
+        headers: Vec<String>,
+        body: Vec<u8>,
+    },
 }
 
 /// Resumes the fiber waiting on `op`. After a fatal error PHP is unusable.
@@ -213,18 +262,42 @@ pub fn complete(op: u64, result: OpResult) -> Result<(), ()> {
     let code = match result {
         OpResult::Null => unsafe { tenma_complete_null(op) },
         OpResult::Text(text) => unsafe { tenma_complete_string(op, text.as_ptr(), text.len()) },
-        OpResult::Error(message) => unsafe { tenma_complete_error(op, message.as_ptr(), message.len(), 0) },
-        OpResult::Failure { message, code } => unsafe { tenma_complete_error(op, message.as_ptr(), message.len(), code) },
-        OpResult::Http { status, headers, body } => {
-            let packed: Vec<u8> = headers.iter().flat_map(|line| line.bytes().chain([0])).collect();
-            unsafe { tenma_complete_http(op, status, packed.as_ptr(), packed.len(), body.as_ptr(), body.len()) }
+        OpResult::Error(message) => unsafe {
+            tenma_complete_error(op, message.as_ptr(), message.len(), 0)
+        },
+        OpResult::Failure { message, code } => unsafe {
+            tenma_complete_error(op, message.as_ptr(), message.len(), code)
+        },
+        OpResult::Http {
+            status,
+            headers,
+            body,
+        } => {
+            let packed: Vec<u8> = headers
+                .iter()
+                .flat_map(|line| line.bytes().chain([0]))
+                .collect();
+            unsafe {
+                tenma_complete_http(
+                    op,
+                    status,
+                    packed.as_ptr(),
+                    packed.len(),
+                    body.as_ptr(),
+                    body.len(),
+                )
+            }
         }
     };
     if code < 0 { Err(()) } else { Ok(()) }
 }
 
 pub fn start() -> Result<(), String> {
-    if unsafe { tenma_start() } == 0 { Ok(()) } else { Err("PHP does not start".into()) }
+    if unsafe { tenma_start() } == 0 {
+        Ok(())
+    } else {
+        Err("PHP does not start".into())
+    }
 }
 
 /// A setting like `php -d name=value`. Only before `start`.
@@ -254,7 +327,11 @@ pub fn stop() {
 
 /// Own PHP interpreter for this thread. Only after `start` in the main thread.
 pub fn thread_start() -> Result<(), String> {
-    if unsafe { tenma_thread_start() } == 0 { Ok(()) } else { Err("PHP does not start in the worker".into()) }
+    if unsafe { tenma_thread_start() } == 0 {
+        Ok(())
+    } else {
+        Err("PHP does not start in the worker".into())
+    }
 }
 
 /// Did the last executed script end with exit() or die()? Then tenma starts nothing it scheduled.
@@ -264,7 +341,8 @@ pub fn script_exited() -> bool {
 
 /// exit() outside a request (timer, background, script): tenma ends with this status.
 pub static EXIT_STATUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
-pub static EXIT: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
+pub static EXIT: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
 
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_exit(status: c_int) {
@@ -294,7 +372,11 @@ pub fn exit_status() -> Option<u8> {
 /// The event loop is running: PHP starts what the script scheduled at startup (timers, Tenma::async()).
 /// Err if PHP fails fatally while doing so.
 pub fn started() -> Result<(), ()> {
-    if unsafe { tenma_started() } < 0 { Err(()) } else { Ok(()) }
+    if unsafe { tenma_started() } < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 /// Drops the pending requests: they end with 500.
@@ -324,8 +406,13 @@ pub fn eval(code: &str, name: &str) -> Result<(), String> {
 /// Runs `argv[0]` as a script, with `argv` as `$argv`, and returns the exit status.
 pub fn execute(argv: &[String]) -> Result<i32, String> {
     let path = std::fs::canonicalize(&argv[0]).map_err(|error| format!("{}: {error}", argv[0]))?;
-    let path = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "path contains a null byte")?;
-    let args: Vec<CString> = argv.iter().map(|arg| CString::new(arg.as_bytes())).collect::<Result<_, _>>().map_err(|_| "argument contains a null byte")?;
+    let path =
+        CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "path contains a null byte")?;
+    let args: Vec<CString> = argv
+        .iter()
+        .map(|arg| CString::new(arg.as_bytes()))
+        .collect::<Result<_, _>>()
+        .map_err(|_| "argument contains a null byte")?;
     let pointers: Vec<*const c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
     Ok(unsafe { tenma_execute(path.as_ptr(), pointers.as_ptr(), pointers.len() as c_int) })
 }
@@ -345,7 +432,10 @@ pub struct Pending {
 impl std::future::Future for Pending {
     type Output = Result<Reply, oneshot::error::RecvError>;
 
-    fn poll(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         std::pin::Pin::new(&mut self.receiver).poll(context)
     }
 }
@@ -353,7 +443,10 @@ impl std::future::Future for Pending {
 impl Drop for Pending {
     fn drop(&mut self) {
         // Already answered: nothing to cancel
-        if WAITING.with_borrow_mut(|waiting| waiting.remove(&self.rid)).is_some() {
+        if WAITING
+            .with_borrow_mut(|waiting| waiting.remove(&self.rid))
+            .is_some()
+        {
             gone(self.rid);
         }
     }
@@ -372,8 +465,18 @@ pub fn gone(rid: u64) {
 }
 
 pub fn handle(handler: u32, request: &Request) -> Outcome {
-    let headers: Vec<Header> = request.headers.iter().map(|(name, value)| Header { name: Str::of(name), value: Str::of(value) }).collect();
-    let (remote_ip, local_ip) = (request.remote.ip().to_canonical().to_string(), request.local.ip().to_canonical().to_string());
+    let headers: Vec<Header> = request
+        .headers
+        .iter()
+        .map(|(name, value)| Header {
+            name: Str::of(name),
+            value: Str::of(value),
+        })
+        .collect();
+    let (remote_ip, local_ip) = (
+        request.remote.ip().to_canonical().to_string(),
+        request.local.ip().to_canonical().to_string(),
+    );
     let raw = RawRequest {
         method: Str::of(request.method),
         uri: Str::of(request.uri),

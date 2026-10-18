@@ -32,12 +32,26 @@ unsafe extern "C" {
     fn tenma_inspect_locals(thread: u32, index: u32, len: *mut usize) -> *mut u8;
     fn tenma_inspect_children(reference: u32, len: *mut usize) -> *mut u8;
     fn tenma_inspect_resume();
-    fn tenma_inspect_evaluate(index: u32, code: *const u8, code_len: usize, statements: bool, len: *mut usize) -> *mut u8;
-    fn tenma_inspect_set_child(reference: u32, name: *const u8, name_len: usize, code: *const u8, code_len: usize, len: *mut usize) -> *mut u8;
+    fn tenma_inspect_evaluate(
+        index: u32,
+        code: *const u8,
+        code_len: usize,
+        statements: bool,
+        len: *mut usize,
+    ) -> *mut u8;
+    fn tenma_inspect_set_child(
+        reference: u32,
+        name: *const u8,
+        name_len: usize,
+        code: *const u8,
+        code_len: usize,
+        len: *mut usize,
+    ) -> *mut u8;
 }
 
 /// The address without --inspect=…: only this machine, a debugger can run any code.
-pub const DEFAULT: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9229);
+pub const DEFAULT: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9229);
 
 /// Variable references from here on are a frame's locals (frame ID added), below it arrays and
 /// objects to expand. DAP wants references and IDs below 2^31.
@@ -48,7 +62,8 @@ const LOCALS: u64 = 1 << 30;
 static FRAMES: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
 
 /// Breakpoints by file (canonical path), from setBreakpoints.
-static BREAKPOINTS: LazyLock<Mutex<HashMap<Vec<u8>, Vec<Breakpoint>>>> = LazyLock::new(Default::default);
+static BREAKPOINTS: LazyLock<Mutex<HashMap<Vec<u8>, Vec<Breakpoint>>>> =
+    LazyLock::new(Default::default);
 static NEXT_BREAKPOINT: AtomicU64 = AtomicU64::new(1);
 /// The code PHP compiled, by file: where breakpoints can stop.
 static CODE: LazyLock<Mutex<HashMap<Vec<u8>, Code>>> = LazyLock::new(Default::default);
@@ -64,11 +79,18 @@ struct Exceptions {
 
 impl Exceptions {
     /// Uncaught exceptions stop, as the filter's default in the editor says.
-    const DEFAULT: Exceptions = Exceptions { uncaught: Some(Vec::new()), all: None };
+    const DEFAULT: Exceptions = Exceptions {
+        uncaught: Some(Vec::new()),
+        all: None,
+    };
 
     /// Does an exception of these classes (its own, its parents', its interfaces') stop?
     fn stop(&self, classes: &[String], uncaught: bool) -> bool {
-        let matches = |filter: &Option<Vec<String>>| filter.as_ref().is_some_and(|only| only.is_empty() || only.iter().any(|class| classes.contains(class)));
+        let matches = |filter: &Option<Vec<String>>| {
+            filter.as_ref().is_some_and(|only| {
+                only.is_empty() || only.iter().any(|class| classes.contains(class))
+            })
+        };
         matches(&self.all) || uncaught && matches(&self.uncaught)
     }
 }
@@ -94,10 +116,11 @@ static ENDING: AtomicBool = AtomicBool::new(false);
 /// --inspect-wait and --inspect-brk wait for this: the editor has set its breakpoints (configurationDone).
 static CONFIGURED: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// The server's commands to the stopped worker.
-static COMMANDS: LazyLock<(Mutex<mpsc::Sender<Command>>, Mutex<mpsc::Receiver<Command>>)> = LazyLock::new(|| {
-    let (sender, receiver) = mpsc::channel();
-    (Mutex::new(sender), Mutex::new(receiver))
-});
+static COMMANDS: LazyLock<(Mutex<mpsc::Sender<Command>>, Mutex<mpsc::Receiver<Command>>)> =
+    LazyLock::new(|| {
+        let (sender, receiver) = mpsc::channel();
+        (Mutex::new(sender), Mutex::new(receiver))
+    });
 /// The editor's connection for writing; the worker writes its answers and events there too.
 static CLIENT: Mutex<Option<TcpStream>> = Mutex::new(None);
 static SEQ: AtomicU64 = AtomicU64::new(1);
@@ -132,15 +155,30 @@ impl Breakpoint {
             (self.at, self.verified) = (Some(self.line), false);
             return;
         };
-        let function = code.functions.iter().filter(|function| function.start <= self.line && self.line <= function.end).min_by_key(|function| function.end - function.start);
-        self.at = function.and_then(|function| function.statements.iter().copied().find(|&statement| statement >= self.line));
+        let function = code
+            .functions
+            .iter()
+            .filter(|function| function.start <= self.line && self.line <= function.end)
+            .min_by_key(|function| function.end - function.start);
+        self.at = function.and_then(|function| {
+            function
+                .statements
+                .iter()
+                .copied()
+                .find(|&statement| statement >= self.line)
+        });
         self.verified = self.at.is_some();
     }
 
     fn json(&self) -> Value {
-        let mut json = json!({"id": self.id, "verified": self.verified, "line": self.at.unwrap_or(self.line)});
+        let mut json =
+            json!({"id": self.id, "verified": self.verified, "line": self.at.unwrap_or(self.line)});
         if !self.verified {
-            json["message"] = json!(if self.at.is_some() { "the file is not loaded yet" } else { "no code on or after this line" });
+            json["message"] = json!(if self.at.is_some() {
+                "the file is not loaded yet"
+            } else {
+                "no code on or after this line"
+            });
         }
         json
     }
@@ -208,9 +246,12 @@ pub fn wait(option: &str) -> Option<bool> {
 /// breakpoints; the script then stops at its first statement if `wait` is `Some(true)`, unless the
 /// editor's stopOnEntry decides otherwise.
 pub fn listen(address: SocketAddr, wait: Option<bool>) -> Result<(), String> {
-    let listener = TcpListener::bind(address).map_err(|error| format!("--inspect: {address} not available: {error}"))?;
+    let listener = TcpListener::bind(address)
+        .map_err(|error| format!("--inspect: {address} not available: {error}"))?;
     if !address.ip().is_loopback() {
-        eprintln!("tenma: warning: the debugger on {address} is open to the network, anyone who reaches it can run code");
+        eprintln!(
+            "tenma: warning: the debugger on {address} is open to the network, anyone who reaches it can run code"
+        );
     }
     if let Some(entry) = wait {
         ENTRY.store(entry, Ordering::Relaxed);
@@ -308,7 +349,11 @@ fn send(mut message: Value) {
     // Failed or timed out, perhaps halfway through a message: the session is over, its thread
     // sees the closed socket and detaches
     if let Some(stream) = client.as_mut()
-        && write_within(stream, format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).is_err()
+        && write_within(
+            stream,
+            format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes(),
+        )
+        .is_err()
     {
         let _ = stream.shutdown(std::net::Shutdown::Both);
         *client = None;
@@ -336,11 +381,15 @@ fn write_within(stream: &mut TcpStream, mut data: &[u8]) -> std::io::Result<()> 
 }
 
 fn respond(request: &Value, body: Value) {
-    send(json!({"type": "response", "request_seq": request["seq"], "command": request["command"], "success": true, "body": body}));
+    send(
+        json!({"type": "response", "request_seq": request["seq"], "command": request["command"], "success": true, "body": body}),
+    );
 }
 
 fn fail(request: &Value, message: &str) {
-    send(json!({"type": "response", "request_seq": request["seq"], "command": request["command"], "success": false, "message": message}));
+    send(
+        json!({"type": "response", "request_seq": request["seq"], "command": request["command"], "success": false, "message": message}),
+    );
 }
 
 fn event(name: &str, body: Value) {
@@ -388,12 +437,37 @@ fn handle(request: &Value) -> bool {
         }
         "setExceptionBreakpoints" => {
             // Plain filters, or filter options with a condition: the classes to stop at
-            let plain = arguments["filters"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|filter| (filter, ""));
-            let options = arguments["filterOptions"].as_array().into_iter().flatten().filter_map(|option| Some((option["filterId"].as_str()?, option["condition"].as_str().unwrap_or_default())));
-            let mut exceptions = Exceptions { uncaught: None, all: None };
+            let plain = arguments["filters"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|filter| (filter, ""));
+            let options = arguments["filterOptions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|option| {
+                    Some((
+                        option["filterId"].as_str()?,
+                        option["condition"].as_str().unwrap_or_default(),
+                    ))
+                });
+            let mut exceptions = Exceptions {
+                uncaught: None,
+                all: None,
+            };
             for (filter, condition) in plain.chain(options) {
-                let classes = condition.split(',').map(class_key).filter(|class| !class.is_empty()).collect();
-                *if filter == "all" { &mut exceptions.all } else { &mut exceptions.uncaught } = Some(classes);
+                let classes = condition
+                    .split(',')
+                    .map(class_key)
+                    .filter(|class| !class.is_empty())
+                    .collect();
+                *if filter == "all" {
+                    &mut exceptions.all
+                } else {
+                    &mut exceptions.uncaught
+                } = Some(classes);
             }
             *EXCEPTIONS.lock().unwrap() = exceptions;
             respond(request, json!({}));
@@ -401,8 +475,16 @@ fn handle(request: &Value) -> bool {
         "setBreakpoints" => {
             let path = arguments["source"]["path"].as_str().unwrap_or_default();
             // PHP knows files by their real path (on macOS /tmp is /private/tmp)
-            let file = std::fs::canonicalize(path).map_or_else(|_| path.as_bytes().to_vec(), |path| path.as_os_str().as_bytes().to_vec());
-            let text = |value: &Value| value.as_str().filter(|text| !text.trim().is_empty()).map(str::to_owned);
+            let file = std::fs::canonicalize(path).map_or_else(
+                |_| path.as_bytes().to_vec(),
+                |path| path.as_os_str().as_bytes().to_vec(),
+            );
+            let text = |value: &Value| {
+                value
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+            };
             let code = CODE.lock().unwrap();
             let set: Vec<Breakpoint> = arguments["breakpoints"]
                 .as_array()
@@ -432,11 +514,18 @@ fn handle(request: &Value) -> bool {
         }
         "scopes" => {
             let frame = arguments["frameId"].as_u64().unwrap_or_default();
-            respond(request, json!({"scopes": [{"name": "Locals", "presentationHint": "locals", "variablesReference": LOCALS + frame, "expensive": false}]}));
+            respond(
+                request,
+                json!({"scopes": [{"name": "Locals", "presentationHint": "locals", "variablesReference": LOCALS + frame, "expensive": false}]}),
+            );
         }
         "threads" | "stackTrace" | "variables" | "evaluate" | "setVariable" => {
             if STOPPED.load(Ordering::Relaxed) {
-                let _ = COMMANDS.0.lock().unwrap().send(Command::Answer(request.clone()));
+                let _ = COMMANDS
+                    .0
+                    .lock()
+                    .unwrap()
+                    .send(Command::Answer(request.clone()));
             } else if request["command"] == "threads" {
                 // Running: the fibers can only be read while the worker stands still
                 respond(request, json!({"threads": [{"id": 1, "name": "main"}]}));
@@ -476,17 +565,34 @@ fn handle(request: &Value) -> bool {
 /// PHP is about to run a statement: stops here at a breakpoint, after a step or on pause.
 /// `frame` and `fiber` identify the call and the fiber (0 outside fibers).
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_statement(file: *const u8, file_len: usize, line: u32, frame: usize, fiber: usize) {
+extern "C" fn tenma_rs_statement(
+    file: *const u8,
+    file_len: usize,
+    line: u32,
+    frame: usize,
+    fiber: usize,
+) {
     if ENDING.load(Ordering::Relaxed) || PREVIOUS.replace((frame, line)) == (frame, line) {
         return;
     }
-    arrive(bytes(file, file_len), line, fiber, ENTRY.swap(false, Ordering::Relaxed));
+    arrive(
+        bytes(file, file_len),
+        line,
+        fiber,
+        ENTRY.swap(false, Ordering::Relaxed),
+    );
 }
 
 /// A function returns, at its closing brace on `line`: a breakpoint there stops, and a step stops
 /// there before it leaves the function.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_return(file: *const u8, file_len: usize, line: u32, frame: usize, fiber: usize) {
+extern "C" fn tenma_rs_return(
+    file: *const u8,
+    file_len: usize,
+    line: u32,
+    frame: usize,
+    fiber: usize,
+) {
     // Ran off its end: the statement PHP puts at the closing brace has just been there
     if ENDING.load(Ordering::Relaxed) || PREVIOUS.replace((frame, line)) == (frame, line) {
         return;
@@ -501,7 +607,10 @@ fn arrive(file: &[u8], line: u32, fiber: usize, entry: bool) {
         "entry"
     } else if PAUSE.swap(false, Ordering::Relaxed) {
         "pause"
-    } else if STEPPING.get().is_some_and(|(step, since, depth)| since == fiber && arrived(step, depth)) {
+    } else if STEPPING
+        .get()
+        .is_some_and(|(step, since, depth)| since == fiber && arrived(step, depth))
+    {
         "step"
     } else if breakpoints_at(file, line).iter().any(hits) {
         "breakpoint"
@@ -524,19 +633,36 @@ extern "C" fn tenma_rs_debugger(fiber: usize) {
     if ENDING.load(Ordering::Relaxed) || CLIENT.lock().unwrap().is_none() {
         return;
     }
-    stop_here(json!({"reason": "breakpoint", "description": "Tenma::debugger()"}), fiber);
+    stop_here(
+        json!({"reason": "breakpoint", "description": "Tenma::debugger()"}),
+        fiber,
+    );
 }
 
 /// PHP throws an exception that the app's code catches or not (`uncaught`); the C layer leaves out
 /// those the stdlib catches itself.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_exception(description: *const u8, description_len: usize, classes: *const u8, classes_len: usize, uncaught: bool) {
-    let classes: Vec<String> = bytes(classes, classes_len).split(|&byte| byte == 0).filter(|class| !class.is_empty()).map(|class| class_key(&String::from_utf8_lossy(class))).collect();
+extern "C" fn tenma_rs_exception(
+    description: *const u8,
+    description_len: usize,
+    classes: *const u8,
+    classes_len: usize,
+    uncaught: bool,
+) {
+    let classes: Vec<String> = bytes(classes, classes_len)
+        .split(|&byte| byte == 0)
+        .filter(|class| !class.is_empty())
+        .map(|class| class_key(&String::from_utf8_lossy(class)))
+        .collect();
     if ENDING.load(Ordering::Relaxed) || !EXCEPTIONS.lock().unwrap().stop(&classes, uncaught) {
         return;
     }
     let description = String::from_utf8_lossy(bytes(description, description_len)).into_owned();
-    let reason = if uncaught { "Paused on uncaught exception" } else { "Paused on exception" };
+    let reason = if uncaught {
+        "Paused on uncaught exception"
+    } else {
+        "Paused on exception"
+    };
     // ponytail: a step from here acts as continue; stepping into the catch block needs the fiber and depth
     STEPPING.set(None);
     // The editor shows the text at the exception (class and message), the description in the call stack
@@ -546,21 +672,53 @@ extern "C" fn tenma_rs_exception(description: *const u8, description_len: usize,
 /// The breakpoints that stop at this line; copies: evaluating a condition must not hold the lock.
 fn breakpoints_at(file: &[u8], line: u32) -> Vec<Breakpoint> {
     let breakpoints = BREAKPOINTS.lock().unwrap();
-    breakpoints.get(file).map(|set| set.iter().filter(|breakpoint| breakpoint.at == Some(line)).cloned().collect()).unwrap_or_default()
+    breakpoints
+        .get(file)
+        .map(|set| {
+            set.iter()
+                .filter(|breakpoint| breakpoint.at == Some(line))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// PHP compiled a function of `file`, or with `main` its top level, the last of a file: the file's
 /// breakpoints move to where its statements are, and the editor hears where they went.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_compiled(file: *const u8, file_len: usize, start: u32, end: u32, main: bool, lines: *const u32, count: usize) {
-    let mut statements = if lines.is_null() || count == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(lines, count) }.to_vec() };
+extern "C" fn tenma_rs_compiled(
+    file: *const u8,
+    file_len: usize,
+    start: u32,
+    end: u32,
+    main: bool,
+    lines: *const u32,
+    count: usize,
+) {
+    let mut statements = if lines.is_null() || count == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(lines, count) }.to_vec()
+    };
     statements.sort_unstable();
     statements.dedup();
     let file = bytes(file, file_len).to_vec();
     let mut code = CODE.lock().unwrap();
     let entry = code.entry(file.clone()).or_default();
     // The top level covers the whole file
-    entry.compiling.push(if main { Function { start: 0, end: u32::MAX, statements } } else { Function { start, end, statements } });
+    entry.compiling.push(if main {
+        Function {
+            start: 0,
+            end: u32::MAX,
+            statements,
+        }
+    } else {
+        Function {
+            start,
+            end,
+            statements,
+        }
+    });
     if !main {
         return;
     }
@@ -578,7 +736,10 @@ extern "C" fn tenma_rs_compiled(file: *const u8, file_len: usize, start: u32, en
         .collect();
     drop((breakpoints, code));
     for breakpoint in changed {
-        event("breakpoint", json!({"reason": "changed", "breakpoint": breakpoint}));
+        event(
+            "breakpoint",
+            json!({"reason": "changed", "breakpoint": breakpoint}),
+        );
     }
 }
 
@@ -589,13 +750,19 @@ fn hits(breakpoint: &Breakpoint) -> bool {
         Some(condition) => match evaluate(0, condition, false) {
             Ok(result) => result.truthy,
             Err(error) => {
-                output(&format!("tenma: breakpoint condition {condition}: {error}\n"), "stderr");
+                output(
+                    &format!("tenma: breakpoint condition {condition}: {error}\n"),
+                    "stderr",
+                );
                 true
             }
         },
         None => true,
     };
-    let stops = stops && breakpoint.hit.as_deref().is_none_or(|hit| hit_matches(hit, breakpoint.hits.fetch_add(1, Ordering::Relaxed) + 1));
+    let stops = stops
+        && breakpoint.hit.as_deref().is_none_or(|hit| {
+            hit_matches(hit, breakpoint.hits.fetch_add(1, Ordering::Relaxed) + 1)
+        });
     let stops = match &breakpoint.log {
         Some(message) if stops => {
             output(&format!("{}\n", interpolate(message)), "console");
@@ -611,7 +778,10 @@ fn hits(breakpoint: &Breakpoint) -> bool {
 /// Does the `count`th hit match a hit condition? One that is not understood always does.
 fn hit_matches(condition: &str, count: u64) -> bool {
     let condition = condition.trim();
-    let (operator, number) = [">=", "<=", "==", "%", ">", "<", "="].iter().find_map(|operator| Some((*operator, condition.strip_prefix(operator)?))).unwrap_or(("==", condition));
+    let (operator, number) = [">=", "<=", "==", "%", ">", "<", "="]
+        .iter()
+        .find_map(|operator| Some((*operator, condition.strip_prefix(operator)?)))
+        .unwrap_or(("==", condition));
     let Ok(number) = number.trim().parse::<u64>() else {
         return true;
     };
@@ -657,8 +827,14 @@ struct Evaluated {
 fn evaluate(index: u32, code: &str, statements: bool) -> Result<Evaluated, String> {
     // As an expression PHP adds `return …;` itself; statements need their last semicolon
     let code = code.trim().trim_end_matches(';');
-    let code = if statements { format!("{code};") } else { code.to_owned() };
-    evaluated(fields(|len| unsafe { tenma_inspect_evaluate(index, code.as_ptr(), code.len(), statements, len) }))
+    let code = if statements {
+        format!("{code};")
+    } else {
+        code.to_owned()
+    };
+    evaluated(fields(|len| unsafe {
+        tenma_inspect_evaluate(index, code.as_ptr(), code.len(), statements, len)
+    }))
 }
 
 /// A result as tenma_inspect_evaluate and tenma_inspect_set_child pack it.
@@ -671,7 +847,10 @@ fn evaluated(fields: Vec<String>) -> Result<Evaluated, String> {
             truthy: fields[5] == "1",
             text: fields[6].clone(),
         }),
-        Some("fatal") => Err(format!("fatal error: {}; the worker restarts once it runs on", fields[1])),
+        Some("fatal") => Err(format!(
+            "fatal error: {}; the worker restarts once it runs on",
+            fields[1]
+        )),
         _ => Err(fields.get(1).cloned().unwrap_or_default()),
     }
 }
@@ -749,10 +928,15 @@ fn answer(request: &Value) {
         }
         Some("stackTrace") => {
             let thread = arguments["threadId"].as_u64().unwrap_or_default();
-            let all = fields(|len| unsafe { tenma_inspect_frames(u32::try_from(thread).unwrap_or_default(), len) });
+            let all = fields(|len| unsafe {
+                tenma_inspect_frames(u32::try_from(thread).unwrap_or_default(), len)
+            });
             let total = all.len() / 3;
             let start = arguments["startFrame"].as_u64().unwrap_or_default() as usize;
-            let levels = arguments["levels"].as_u64().filter(|&levels| levels > 0).map_or(total, |levels| levels as usize);
+            let levels = arguments["levels"]
+                .as_u64()
+                .filter(|&levels| levels > 0)
+                .map_or(total, |levels| levels as usize);
             let frames: Vec<Value> = all
                 .chunks_exact(3)
                 .enumerate()
@@ -774,16 +958,24 @@ fn answer(request: &Value) {
                     json!({"id": id, "name": function, "source": {"name": name, "path": frame[0]}, "line": line, "column": 1})
                 })
                 .collect();
-            respond(request, json!({"stackFrames": frames, "totalFrames": total}));
+            respond(
+                request,
+                json!({"stackFrames": frames, "totalFrames": total}),
+            );
         }
         Some("variables") => {
             let reference = arguments["variablesReference"].as_u64().unwrap_or_default();
             let packed = if reference >= LOCALS {
-                let frame = (reference - LOCALS).checked_sub(1).and_then(|position| usize::try_from(position).ok()).and_then(|position| FRAMES.lock().unwrap().get(position).copied());
+                let frame = (reference - LOCALS)
+                    .checked_sub(1)
+                    .and_then(|position| usize::try_from(position).ok())
+                    .and_then(|position| FRAMES.lock().unwrap().get(position).copied());
                 let Some((thread, index)) = frame else {
                     return respond(request, json!({"variables": []}));
                 };
-                fields(|len| unsafe { tenma_inspect_locals(u32::try_from(thread).unwrap_or_default(), index, len) })
+                fields(|len| unsafe {
+                    tenma_inspect_locals(u32::try_from(thread).unwrap_or_default(), index, len)
+                })
             } else {
                 fields(|len| unsafe { tenma_inspect_children(reference as u32, len) })
             };
@@ -800,30 +992,58 @@ fn answer(request: &Value) {
             let expression = arguments["expression"].as_str().unwrap_or_default();
             let mut result = evaluate(index, expression, false);
             // The debug console also runs statements: echo, assignments, loops
-            if arguments["context"] == "repl" && result.as_ref().is_err_and(|error| error.starts_with("ParseError")) {
+            if arguments["context"] == "repl"
+                && result
+                    .as_ref()
+                    .is_err_and(|error| error.starts_with("ParseError"))
+            {
                 result = evaluate(index, expression, true);
             }
             match result {
-                Ok(result) => respond(request, json!({"result": result.value, "type": result.kind, "variablesReference": result.reference})),
+                Ok(result) => respond(
+                    request,
+                    json!({"result": result.value, "type": result.kind, "variablesReference": result.reference}),
+                ),
                 Err(error) => fail(request, &error),
             }
         }
         Some("setVariable") => {
             let reference = arguments["variablesReference"].as_u64().unwrap_or_default();
             let name = arguments["name"].as_str().unwrap_or_default();
-            let value = arguments["value"].as_str().unwrap_or_default().trim().trim_end_matches(';');
+            let value = arguments["value"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .trim_end_matches(';');
             let result = match reference.checked_sub(LOCALS) {
                 // An element or property: PHP copies shared arrays on the way, checks property types
-                None => evaluated(fields(|len| unsafe { tenma_inspect_set_child(reference as u32, name.as_ptr(), name.len(), value.as_ptr(), value.len(), len) })),
+                None => evaluated(fields(|len| unsafe {
+                    tenma_inspect_set_child(
+                        reference as u32,
+                        name.as_ptr(),
+                        name.len(),
+                        value.as_ptr(),
+                        value.len(),
+                        len,
+                    )
+                })),
                 Some(frame) => {
-                    let Some(index) = frame_index(Some(frame)).filter(|_| name.starts_with('$') && name != "$this") else {
-                        return fail(request, "only variables of the stopped request can be changed");
+                    let Some(index) = frame_index(Some(frame))
+                        .filter(|_| name.starts_with('$') && name != "$this")
+                    else {
+                        return fail(
+                            request,
+                            "only variables of the stopped request can be changed",
+                        );
                     };
                     evaluate(index, &format!("{name} = ({value})"), false)
                 }
             };
             match result {
-                Ok(result) => respond(request, json!({"value": result.value, "type": result.kind, "variablesReference": result.reference})),
+                Ok(result) => respond(
+                    request,
+                    json!({"value": result.value, "type": result.kind, "variablesReference": result.reference}),
+                ),
                 Err(error) => fail(request, &error),
             }
         }
@@ -838,7 +1058,10 @@ fn frame_index(frame: Option<u64>) -> Option<u32> {
         return Some(0);
     };
     let thread = u64::from(STOPPED_THREAD.load(Ordering::Relaxed));
-    let (of, index) = *FRAMES.lock().unwrap().get(usize::try_from(frame).ok()?.checked_sub(1)?)?;
+    let (of, index) = *FRAMES
+        .lock()
+        .unwrap()
+        .get(usize::try_from(frame).ok()?.checked_sub(1)?)?;
     (of == thread).then_some(index)
 }
 
@@ -846,7 +1069,10 @@ fn frame_index(frame: Option<u64>) -> Option<u32> {
 fn fields(read: impl FnOnce(*mut usize) -> *mut u8) -> Vec<String> {
     let mut len = 0;
     let packed = read(&mut len);
-    let fields = bytes(packed, len).split(|&byte| byte == 0).map(|field| String::from_utf8_lossy(field).into_owned()).collect();
+    let fields = bytes(packed, len)
+        .split(|&byte| byte == 0)
+        .map(|field| String::from_utf8_lossy(field).into_owned())
+        .collect();
     unsafe { libc::free(packed.cast()) };
     fields
 }

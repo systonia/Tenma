@@ -137,7 +137,11 @@ fn main() -> ExitCode {
         Some("lsp") => return tool(LSP, "Lsp"),
         Some("docs") => return tool(DOCS, "Docs"),
         Some("--version" | "-v") => {
-            println!("tenma {} (PHP {})", env!("CARGO_PKG_VERSION"), env!("TENMA_PHP_VERSION"));
+            println!(
+                "tenma {} (PHP {})",
+                env!("CARGO_PKG_VERSION"),
+                env!("TENMA_PHP_VERSION")
+            );
             return ExitCode::SUCCESS;
         }
         _ => {}
@@ -174,7 +178,10 @@ fn main() -> ExitCode {
 
 /// `tenma --stubs`: loads the standard library without a script and prints its public API as stubs.
 fn stubs() -> ExitCode {
-    let version = format!("namespace Tenma\\Internal\\Stubs; const VERSION = '{}';", env!("CARGO_PKG_VERSION"));
+    let version = format!(
+        "namespace Tenma\\Internal\\Stubs; const VERSION = '{}';",
+        env!("CARGO_PKG_VERSION")
+    );
     // On the main thread php_embed_init() has already started a request: no thread_start() here
     let printed = php::start().and_then(|()| {
         php::eval(STDLIB.trim_start_matches("<?php"), "tenma:stdlib")
@@ -196,17 +203,36 @@ fn stubs() -> ExitCode {
 /// of stdlib/docs.php. Runs `Tenma\Internal\<namespace>\main($binary, $args)` after the standard library.
 fn tool(source: &str, namespace: &str) -> ExitCode {
     let quote = |text: &str| format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"));
-    let binary = std::env::current_exe().map_or_else(|_| "tenma".to_owned(), |path| path.to_string_lossy().into_owned());
+    let binary = std::env::current_exe().map_or_else(
+        |_| "tenma".to_owned(),
+        |path| path.to_string_lossy().into_owned(),
+    );
     let args: Vec<String> = std::env::args().skip(2).map(|arg| quote(&arg)).collect();
-    let setup = format!("namespace Tenma\\Internal\\{namespace}; const VERSION = '{}';", env!("CARGO_PKG_VERSION"));
-    let call = format!("\\Tenma\\Internal\\{namespace}\\main({}, [{}]);", quote(&binary), args.join(", "));
+    let setup = format!(
+        "namespace Tenma\\Internal\\{namespace}; const VERSION = '{}';",
+        env!("CARGO_PKG_VERSION")
+    );
+    let call = format!(
+        "\\Tenma\\Internal\\{namespace}\\main({}, [{}]);",
+        quote(&binary),
+        args.join(", ")
+    );
     // stdout carries the protocol: PHP's warnings go to stderr, which editors show in their log
-    let ran = php::define_ini("display_errors=stderr").and_then(|()| php::start()).and_then(|()| {
-        php::eval(STDLIB.trim_start_matches("<?php"), "tenma:stdlib")
-            .and_then(|()| php::eval(&setup, "tenma:version"))
-            .and_then(|()| php::eval(source.trim_start_matches("<?php"), &format!("tenma:{}", namespace.to_lowercase())))
-            .and_then(|()| php::eval(&call, &format!("tenma:{}-main", namespace.to_lowercase())))
-    });
+    let ran = php::define_ini("display_errors=stderr")
+        .and_then(|()| php::start())
+        .and_then(|()| {
+            php::eval(STDLIB.trim_start_matches("<?php"), "tenma:stdlib")
+                .and_then(|()| php::eval(&setup, "tenma:version"))
+                .and_then(|()| {
+                    php::eval(
+                        source.trim_start_matches("<?php"),
+                        &format!("tenma:{}", namespace.to_lowercase()),
+                    )
+                })
+                .and_then(|()| {
+                    php::eval(&call, &format!("tenma:{}-main", namespace.to_lowercase()))
+                })
+        });
     php::stop();
     match ran {
         Ok(()) => ExitCode::SUCCESS,
@@ -245,25 +271,41 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
                 options.inspect_wait = inspect::wait(&arg);
             }
             // --inspect=9230 or --inspect=host:port
-            inspect if matches!(inspect.split_once('='), Some(("--inspect" | "--inspect-wait" | "--inspect-brk", _))) => {
+            inspect
+                if matches!(
+                    inspect.split_once('='),
+                    Some(("--inspect" | "--inspect-wait" | "--inspect-brk", _))
+                ) =>
+            {
                 let (option, address) = inspect.split_once('=').unwrap_or_default();
                 options.inspect_wait = inspect::wait(option);
                 let parsed = match address.parse::<u16>() {
                     Ok(port) => Some(std::net::SocketAddr::new(inspect::DEFAULT.ip(), port)),
-                    Err(_) => std::net::ToSocketAddrs::to_socket_addrs(address).ok().and_then(|mut addresses| addresses.next()),
+                    Err(_) => std::net::ToSocketAddrs::to_socket_addrs(address)
+                        .ok()
+                        .and_then(|mut addresses| addresses.next()),
                 };
-                options.inspect = Some(parsed.ok_or(format!("--inspect: not an address: {address}"))?);
+                options.inspect =
+                    Some(parsed.ok_or(format!("--inspect: not an address: {address}"))?);
             }
             "--workers" | "-w" => {
                 options.workers = match value("--workers")?.as_str() {
                     "auto" => std::thread::available_parallelism().map_or(1, usize::from),
-                    number => number.parse().ok().filter(|&count| count > 0).ok_or(format!("--workers {number}: not a number above 0"))?,
+                    number => number
+                        .parse()
+                        .ok()
+                        .filter(|&count| count > 0)
+                        .ok_or(format!("--workers {number}: not a number above 0"))?,
                 };
             }
             "--max-body" => options.max_body = parse_size(&value("--max-body")?)?,
             "--db-pool" => {
                 let number = value("--db-pool")?;
-                let size = number.parse().ok().filter(|&count: &usize| count > 0).ok_or(format!("--db-pool {number}: not a number above 0"))?;
+                let size = number
+                    .parse()
+                    .ok()
+                    .filter(|&count: &usize| count > 0)
+                    .ok_or(format!("--db-pool {number}: not a number above 0"))?;
                 pool = Some(size);
             }
             // As with php: -d name=value or -dname=value, -c path
@@ -272,17 +314,32 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
             "-c" => php::set_ini_path(&value("-c")?)?,
             "--request-timeout" => {
                 let seconds = value("--request-timeout")?;
-                options.request_timeout = seconds.parse::<f64>().ok().filter(|&s| s > 0.0).and_then(|s| Duration::try_from_secs_f64(s).ok()).ok_or(format!("--request-timeout {seconds}: not a number above 0"))?;
+                options.request_timeout = seconds
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|&s| s > 0.0)
+                    .and_then(|s| Duration::try_from_secs_f64(s).ok())
+                    .ok_or(format!("--request-timeout {seconds}: not a number above 0"))?;
             }
             "--max-connections" => {
                 let number = value("--max-connections")?;
-                options.max_connections = number.parse().ok().filter(|&count| count > 0).ok_or(format!("--max-connections {number}: not a number above 0"))?;
+                options.max_connections = number
+                    .parse()
+                    .ok()
+                    .filter(|&count| count > 0)
+                    .ok_or(format!("--max-connections {number}: not a number above 0"))?;
             }
             "--server-name" => php::set_server_name(&value("--server-name")?)?,
             "--pubsub" => pubsub::use_redis(&value("--pubsub")?)?,
             "--max-requests" => {
                 let number = value("--max-requests")?;
-                options.max_requests = Some(number.parse().ok().filter(|&count| count > 0).ok_or(format!("--max-requests {number}: not a number above 0"))?);
+                options.max_requests = Some(
+                    number
+                        .parse()
+                        .ok()
+                        .filter(|&count| count > 0)
+                        .ok_or(format!("--max-requests {number}: not a number above 0"))?,
+                );
             }
             option if option.starts_with('-') => return Err(format!("Unknown option: {option}")),
             _ => {
@@ -301,7 +358,10 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         options.workers = 1;
     }
     // About 20 connections in all by default, Postgres allows 100: ten workers with ten each ran out of them
-    db::POOL_SIZE.store(pool.unwrap_or((20 / options.workers).clamp(2, 10)), std::sync::atomic::Ordering::Relaxed);
+    db::POOL_SIZE.store(
+        pool.unwrap_or((20 / options.workers).clamp(2, 10)),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     Ok((argv, options))
 }
 
@@ -318,7 +378,11 @@ fn parse_size(text: &str) -> Result<usize, String> {
     } else {
         (lower.as_str(), 0)
     };
-    number.parse::<usize>().ok().and_then(|count| count.checked_mul(1 << shift)).ok_or(format!("Not a size: {text}"))
+    number
+        .parse::<usize>()
+        .ok()
+        .and_then(|count| count.checked_mul(1 << shift))
+        .ok_or(format!("Not a size: {text}"))
 }
 
 /// `argv[0]` is the script, the rest are its arguments.
@@ -349,9 +413,19 @@ fn run(argv: &[String], options: Options) -> u8 {
     // tenma.dev.php first: the first request should find what its hooks write
     let dev_worker = dev_file.clone().map(|path| {
         let settled = dev::settled_receiver();
-        let (worker, ready) = spawn_worker(&[path.to_string_lossy().into_owned()], options, Some(BTreeSet::new()), true);
-        if ready.is_ok() && settled.recv_timeout(HOOKS_FIRST_RUN) == Err(mpsc::RecvTimeoutError::Timeout) {
-            eprintln!("tenma: hooks still running after {} s, starting the script anyway", HOOKS_FIRST_RUN.as_secs());
+        let (worker, ready) = spawn_worker(
+            &[path.to_string_lossy().into_owned()],
+            options,
+            Some(BTreeSet::new()),
+            true,
+        );
+        if ready.is_ok()
+            && settled.recv_timeout(HOOKS_FIRST_RUN) == Err(mpsc::RecvTimeoutError::Timeout)
+        {
+            eprintln!(
+                "tenma: hooks still running after {} s, starting the script anyway",
+                HOOKS_FIRST_RUN.as_secs()
+            );
         }
         worker
     });
@@ -383,10 +457,16 @@ fn run(argv: &[String], options: Options) -> u8 {
         }
     }
 
-    let senders: Vec<_> = workers.iter().map(|worker| worker.connections.clone()).collect();
+    let senders: Vec<_> = workers
+        .iter()
+        .map(|worker| worker.connections.clone())
+        .collect();
     let changed: Vec<_> = workers.iter().map(|worker| worker.change.clone()).collect();
     let dev_changed = dev_worker.as_ref().map(|worker| worker.change.clone());
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio does not start");
     runtime.block_on(async move {
         for port in ports {
             tokio::spawn(accept(port, senders.clone()));
@@ -444,7 +524,9 @@ fn build(path: &str, options: Options) -> u8 {
 }
 
 /// The next change --watch reports; never without --watch.
-async fn next_change(changes: &mut Option<UnboundedReceiver<watch::Changes>>) -> Option<watch::Changes> {
+async fn next_change(
+    changes: &mut Option<UnboundedReceiver<watch::Changes>>,
+) -> Option<watch::Changes> {
     match changes {
         Some(changes) => changes.recv().await,
         None => std::future::pending().await,
@@ -453,7 +535,11 @@ async fn next_change(changes: &mut Option<UnboundedReceiver<watch::Changes>>) ->
 
 /// A path for messages: relative to the working directory if it lies below it.
 fn shown(path: &std::path::Path) -> String {
-    let relative = std::env::current_dir().ok().and_then(|cwd| path.strip_prefix(cwd.canonicalize().ok()?).ok().map(std::path::Path::to_path_buf));
+    let relative = std::env::current_dir().ok().and_then(|cwd| {
+        path.strip_prefix(cwd.canonicalize().ok()?)
+            .ok()
+            .map(std::path::Path::to_path_buf)
+    });
     relative.as_deref().unwrap_or(path).display().to_string()
 }
 
@@ -469,7 +555,12 @@ fn stop_workers(workers: Vec<Worker>) {
 /// Starts a worker thread and waits until its script has run.
 /// `ports`: those the main thread listens on, None for the first worker, which determines them.
 /// `dev`: the worker runs tenma.dev.php, `argv[0]`.
-fn spawn_worker(argv: &[String], options: Options, ports: Option<BTreeSet<u16>>, dev: bool) -> (Worker, Ready) {
+fn spawn_worker(
+    argv: &[String],
+    options: Options,
+    ports: Option<BTreeSet<u16>>,
+    dev: bool,
+) -> (Worker, Ready) {
     let argv = argv.to_vec();
     let (ready_sender, ready) = mpsc::channel();
     let (connections, receiver) = unbounded_channel();
@@ -477,15 +568,33 @@ fn spawn_worker(argv: &[String], options: Options, ports: Option<BTreeSet<u16>>,
     let worker_change = change.clone();
     let thread = std::thread::Builder::new()
         .stack_size(WORKER_STACK)
-        .spawn(move || worker(&argv, &ready_sender, receiver, worker_change, ports, dev, options))
+        .spawn(move || {
+            worker(
+                &argv,
+                &ready_sender,
+                receiver,
+                worker_change,
+                ports,
+                dev,
+                options,
+            )
+        })
         .expect("worker thread does not start");
     let ready = ready.recv().unwrap_or(Err(1));
-    (Worker { connections, change, thread }, ready)
+    (
+        Worker {
+            connections,
+            change,
+            thread,
+        },
+        ready,
+    )
 }
 
 /// Ctrl+C or SIGTERM, as sent by Docker, systemd and Kubernetes to stop.
 async fn shutdown_signal() {
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("cannot catch SIGTERM");
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("cannot catch SIGTERM");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = terminate.recv() => {}
@@ -498,7 +607,15 @@ async fn shutdown_signal() {
     }
 }
 
-fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: UnboundedReceiver<Connection>, change: Arc<Notify>, mut ports: Option<BTreeSet<u16>>, dev: bool, options: Options) -> u8 {
+fn worker(
+    argv: &[String],
+    ready: &mpsc::Sender<Ready>,
+    mut connections: UnboundedReceiver<Connection>,
+    change: Arc<Notify>,
+    mut ports: Option<BTreeSet<u16>>,
+    dev: bool,
+    options: Options,
+) -> u8 {
     CHANGE.set(change);
     if dev {
         watch::dev_thread();
@@ -545,7 +662,11 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
                 if listeners.is_empty() {
                     // If the script ended with exit() or die(), tenma starts nothing it had scheduled
                     // With --watch, exit() in a hook ends tenma through dev::EXIT
-                    let ended = if php::script_exited() { Ok(status) } else { run_until_idle(&mut connections, !(dev && options.watch), options) };
+                    let ended = if php::script_exited() {
+                        Ok(status)
+                    } else {
+                        run_until_idle(&mut connections, !(dev && options.watch), options)
+                    };
                     match ended {
                         // exit() in a hook: tenma is ending
                         Ok(_) if dev && dev::exit_status().is_some() => Stop::Closed,
@@ -553,9 +674,13 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
                             status = ended;
                             if options.watch {
                                 if dev {
-                                    eprintln!("tenma: hooks stopped, waiting for a change to tenma.dev.php");
+                                    eprintln!(
+                                        "tenma: hooks stopped, waiting for a change to tenma.dev.php"
+                                    );
                                 } else {
-                                    eprintln!("tenma: script ended with status {status}, waiting for changes");
+                                    eprintln!(
+                                        "tenma: script ended with status {status}, waiting for changes"
+                                    );
                                 }
                                 Stop::Wait
                             } else {
@@ -576,7 +701,10 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
                         let _ = ready.send(Ok(Vec::new()));
                     }
                     ports.get_or_insert_with(BTreeSet::new);
-                    eprintln!("tenma: {} failed, waiting for changes", if dev { "tenma.dev.php" } else { "script" });
+                    eprintln!(
+                        "tenma: {} failed, waiting for changes",
+                        if dev { "tenma.dev.php" } else { "script" }
+                    );
                     Stop::Wait
                 } else if first {
                     let _ = ready.send(Err(status));
@@ -610,7 +738,10 @@ fn worker(argv: &[String], ready: &mpsc::Sender<Ready>, mut connections: Unbound
 /// Replaces the process with a fresh tenma with the same arguments.
 fn restart_process() -> ! {
     use std::os::unix::process::CommandExt;
-    let error = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "tenma".into())).args(std::env::args_os().skip(1)).exec();
+    let error =
+        std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "tenma".into()))
+            .args(std::env::args_os().skip(1))
+            .exec();
     eprintln!("tenma: cannot restart: {error}");
     std::process::exit(1);
 }
@@ -618,7 +749,10 @@ fn restart_process() -> ! {
 /// --watch: the script failed or ended. Requests get 503 until the next change restarts the
 /// worker; the error is on the console.
 fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options) -> Stop {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio does not start");
     let change = CHANGE.with_borrow(Arc::clone);
     runtime.block_on(async {
         let mut answering = tokio::task::JoinSet::new();
@@ -647,9 +781,15 @@ fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options
 }
 
 /// Answers a connection no script serves with 503, without keep-alive: it gets its answer and ends.
-fn refuse(stream: std::net::TcpStream, options: Options, message: &'static str) -> Option<impl std::future::Future<Output = Result<(), hyper::Error>> + Send + 'static> {
+fn refuse(
+    stream: std::net::TcpStream,
+    options: Options,
+    message: &'static str,
+) -> Option<impl std::future::Future<Output = Result<(), hyper::Error>> + Send + 'static> {
     let stream = TcpStream::from_std(stream).ok()?;
-    let service = service_fn(move |_| async move { Ok::<_, Infallible>(plain(StatusCode::SERVICE_UNAVAILABLE, message)) });
+    let service = service_fn(move |_| async move {
+        Ok::<_, Infallible>(plain(StatusCode::SERVICE_UNAVAILABLE, message))
+    });
     Some(
         http1::Builder::new()
             .timer(hyper_util::rt::TokioTimer::new())
@@ -662,8 +802,15 @@ fn refuse(stream: std::net::TcpStream, options: Options, message: &'static str) 
 /// A script without servers: the event loop runs while timers or other ops are pending.
 /// Ends with the status of exit() in timers or background work, 255 after a fatal error. With
 /// --watch, a change (Restart) or the end of tenma (Closed) stops it early.
-fn run_until_idle(connections: &mut UnboundedReceiver<Connection>, exits: bool, options: Options) -> Result<u8, Stop> {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
+fn run_until_idle(
+    connections: &mut UnboundedReceiver<Connection>,
+    exits: bool,
+    options: Options,
+) -> Result<u8, Stop> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio does not start");
     let restart = RESTART.with(Rc::clone);
     let change = CHANGE.with_borrow(Arc::clone);
     let ended = ops::in_loop(|| {
@@ -697,7 +844,11 @@ fn run_until_idle(connections: &mut UnboundedReceiver<Connection>, exits: bool, 
         })
     });
     let status = ended?;
-    Ok(if BROKEN.get() { 255 } else { php::exit_status().unwrap_or(status) })
+    Ok(if BROKEN.get() {
+        255
+    } else {
+        php::exit_status().unwrap_or(status)
+    })
 }
 
 /// Loads the standard library and the script (or tenma.dev.php) into this thread's PHP interpreter.
@@ -707,7 +858,10 @@ fn load(argv: &[String], dev: bool, options: Options) -> Result<Vec<php::Listene
         return Err(1);
     }
     if dev {
-        return match php::eval(&dev::code(std::path::Path::new(&argv[0]), options.watch), "tenma:dev") {
+        return match php::eval(
+            &dev::code(std::path::Path::new(&argv[0]), options.watch),
+            "tenma:dev",
+        ) {
             Ok(()) => Ok(Vec::new()),
             Err(message) => {
                 eprintln!("tenma: {message}");
@@ -728,9 +882,19 @@ fn load(argv: &[String], dev: bool, options: Options) -> Result<Vec<php::Listene
 /// A worker's event loop: PHP may only run on this thread, hence current_thread and LocalSet.
 /// Ends when no more connections come or the interpreter should restart; running requests may
 /// still finish then, except after a fatal error.
-fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connection>, options: Options) -> Stop {
-    let handlers: HashMap<u16, (u32, std::sync::Arc<Vec<files::Mount>>)> = listeners.iter().map(|listener| (listener.port, (listener.handler, listener.mounts.clone()))).collect();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio does not start");
+fn serve(
+    listeners: &[php::Listener],
+    connections: &mut UnboundedReceiver<Connection>,
+    options: Options,
+) -> Stop {
+    let handlers: HashMap<u16, (u32, std::sync::Arc<Vec<files::Mount>>)> = listeners
+        .iter()
+        .map(|listener| (listener.port, (listener.handler, listener.mounts.clone())))
+        .collect();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio does not start");
     let local = LocalSet::new();
     // Each connection holds a receiver; drain sends the stop signal and waits until all are gone
     let (drain, drained) = tokio::sync::watch::channel(());
@@ -740,7 +904,8 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
     // does not apply to this one; a change does, it may have come while the script was loading
     let _ = futures_util::FutureExt::now_or_never(restart.notified());
     let change = CHANGE.with_borrow(Arc::clone);
-    let stop = ops::in_loop(|| local.block_on(&runtime, async {
+    let stop = ops::in_loop(|| {
+        local.block_on(&runtime, async {
         if php::started().is_err() {
             // If the startup work already fails, every restart would fail again: tenma shuts down
             // cleanly, the other workers still finish their requests
@@ -805,7 +970,8 @@ fn serve(listeners: &[php::Listener], connections: &mut UnboundedReceiver<Connec
                 }
             }
         }
-    }));
+    })
+    });
     drop(drained);
     // Running responses may finish, even after a fatal error (e.g. the error page): every path
     // into PHP checks BROKEN, so broken PHP does not run again
@@ -877,37 +1043,61 @@ struct WriteTimeout {
 
 impl WriteTimeout {
     fn new(stream: TcpStream, limit: Duration) -> Self {
-        Self { stream, limit, stalled: None }
+        Self {
+            stream,
+            limit,
+            stalled: None,
+        }
     }
 
     /// Pending starts the clock, or fails once it ran out; any progress stops it.
-    fn check<T>(&mut self, context: &mut std::task::Context<'_>, poll: std::task::Poll<std::io::Result<T>>) -> std::task::Poll<std::io::Result<T>> {
+    fn check<T>(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        poll: std::task::Poll<std::io::Result<T>>,
+    ) -> std::task::Poll<std::io::Result<T>> {
         if poll.is_ready() {
             self.stalled = None;
             return poll;
         }
         let limit = self.limit;
-        let stalled = self.stalled.get_or_insert_with(|| Box::pin(tokio::time::sleep(limit)));
+        let stalled = self
+            .stalled
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(limit)));
         match stalled.as_mut().poll(context) {
-            std::task::Poll::Ready(()) => std::task::Poll::Ready(Err(std::io::ErrorKind::TimedOut.into())),
+            std::task::Poll::Ready(()) => {
+                std::task::Poll::Ready(Err(std::io::ErrorKind::TimedOut.into()))
+            }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 }
 
 impl tokio::io::AsyncRead for WriteTimeout {
-    fn poll_read(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>, buffer: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.stream).poll_read(context, buffer)
     }
 }
 
 impl tokio::io::AsyncWrite for WriteTimeout {
-    fn poll_write(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>, data: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
         let poll = std::pin::Pin::new(&mut self.stream).poll_write(context, data);
         self.check(context, poll)
     }
 
-    fn poll_write_vectored(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>, data: &[std::io::IoSlice<'_>]) -> std::task::Poll<std::io::Result<usize>> {
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        data: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
         let poll = std::pin::Pin::new(&mut self.stream).poll_write_vectored(context, data);
         self.check(context, poll)
     }
@@ -916,12 +1106,18 @@ impl tokio::io::AsyncWrite for WriteTimeout {
         self.stream.is_write_vectored()
     }
 
-    fn poll_flush(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         let poll = std::pin::Pin::new(&mut self.stream).poll_flush(context);
         self.check(context, poll)
     }
 
-    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.stream).poll_shutdown(context)
     }
 }
@@ -940,15 +1136,25 @@ async fn respond(
 ) -> Result<Response<ResponseBody>, Infallible> {
     // The file first, if there is one; otherwise the handler
     if !mounts.is_empty()
-        && let Some(response) = files::serve(&mounts, request.method(), request.uri(), request.headers()).await
+        && let Some(response) =
+            files::serve(&mounts, request.method(), request.uri(), request.headers()).await
     {
         return Ok(close_if_restarting(response, options));
     }
     let (mut parts, body) = request.into_parts();
     // ponytail: body fully in memory up to the limit; streams when large uploads come
-    let body = match tokio::time::timeout(options.request_timeout, Limited::new(body, options.max_body).collect()).await {
+    let body = match tokio::time::timeout(
+        options.request_timeout,
+        Limited::new(body, options.max_body).collect(),
+    )
+    .await
+    {
         Ok(Ok(collected)) => collected.to_bytes(),
-        Ok(Err(error)) if error.downcast_ref::<http_body_util::LengthLimitError>().is_some() => {
+        Ok(Err(error))
+            if error
+                .downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some() =>
+        {
             return Ok(plain(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large\n"));
         }
         // Aborted upload, broken chunked encoding
@@ -956,20 +1162,33 @@ async fn respond(
         Err(_) => return Ok(plain(StatusCode::REQUEST_TIMEOUT, "Request Timeout\n")),
     };
     if BROKEN.get() {
-        return Ok(close_if_restarting(plain(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n"), options));
+        return Ok(close_if_restarting(
+            plain(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n"),
+            options,
+        ));
     }
     let upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
     let uri = parts.uri.to_string();
     let request = php::Request {
         method: parts.method.as_str().as_bytes(),
         uri: uri.as_bytes(),
-        headers: parts.headers.iter().map(|(name, value)| (name.as_str().as_bytes(), value.as_bytes())).collect(),
+        headers: parts
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str().as_bytes(), value.as_bytes()))
+            .collect(),
         body: &body,
         remote: peers.0,
         local: peers.1,
     };
     // PHP runs on the loop thread until the handler responds or its fiber waits for an op
-    let failed = || php::Reply::Full(php::Response { status: 500, headers: Vec::new(), body: b"Internal Server Error\n".to_vec() });
+    let failed = || {
+        php::Reply::Full(php::Response {
+            status: 500,
+            headers: Vec::new(),
+            body: b"Internal Server Error\n".to_vec(),
+        })
+    };
     let reply = match php::handle(handler, &request) {
         php::Outcome::Pending(pending) => pending.await.unwrap_or_else(|_| failed()),
         php::Outcome::Failed => failed(),
@@ -989,29 +1208,59 @@ async fn respond(
     // ponytail: checked after requests only; a file only a timer loads is watched from the next request on
     watch::report();
     let (status, headers, body) = match reply {
-        php::Reply::Full(response) => (response.status, response.headers, Either::Left(Full::new(Bytes::from(response.body)))),
-        php::Reply::Stream { status, headers, body } => (status, headers, Either::Right(body)),
-        php::Reply::Upgrade(pipes) => return Ok(accept_websocket(&parts.headers, upgrade, pipes, &open)),
+        php::Reply::Full(response) => (
+            response.status,
+            response.headers,
+            Either::Left(Full::new(Bytes::from(response.body))),
+        ),
+        php::Reply::Stream {
+            status,
+            headers,
+            body,
+        } => (status, headers, Either::Right(body)),
+        php::Reply::Upgrade(pipes) => {
+            return Ok(accept_websocket(&parts.headers, upgrade, pipes, &open));
+        }
     };
-    let mut builder = Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+    let mut builder = Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
     for (name, value) in headers {
         builder = builder.header(name, value);
     }
-    Ok(close_if_restarting(builder.body(body).unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "Invalid response headers\n")), options))
+    Ok(close_if_restarting(
+        builder.body(body).unwrap_or_else(|_| {
+            plain(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid response headers\n",
+            )
+        }),
+        options,
+    ))
 }
 
 /// After a fatal error or the last of --max-requests this interpreter takes no more requests: a
 /// client that kept the connection would send its next one into the drain (reset, or a 503 from
 /// the broken interpreter). Connection: close sends it to a new connection, served by the fresh one.
-fn close_if_restarting(mut response: Response<ResponseBody>, options: Options) -> Response<ResponseBody> {
+fn close_if_restarting(
+    mut response: Response<ResponseBody>,
+    options: Options,
+) -> Response<ResponseBody> {
     if BROKEN.get() || options.max_requests.is_some_and(|max| HANDLED.get() >= max) {
-        response.headers_mut().insert(hyper::header::CONNECTION, hyper::header::HeaderValue::from_static("close"));
+        response.headers_mut().insert(
+            hyper::header::CONNECTION,
+            hyper::header::HeaderValue::from_static("close"),
+        );
     }
     response
 }
 
 /// Responds with 101 and hands the connection to PHP after the upgrade.
-fn accept_websocket(headers: &hyper::HeaderMap, upgrade: Option<hyper::upgrade::OnUpgrade>, pipes: streams::Pipes, open: &Rc<Cell<usize>>) -> Response<ResponseBody> {
+fn accept_websocket(
+    headers: &hyper::HeaderMap,
+    upgrade: Option<hyper::upgrade::OnUpgrade>,
+    pipes: streams::Pipes,
+    open: &Rc<Cell<usize>>,
+) -> Response<ResponseBody> {
     let (Some(key), Some(upgrade)) = (headers.get("sec-websocket-key"), upgrade) else {
         return plain(StatusCode::BAD_REQUEST, "Not a WebSocket request\n");
     };

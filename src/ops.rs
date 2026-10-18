@@ -128,12 +128,29 @@ pub fn clear() {
 
 fn client() -> reqwest::Client {
     CLIENT.with_borrow_mut(|client| {
-        client.get_or_insert_with(|| reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().expect("HTTP client does not start")).clone()
+        client
+            .get_or_insert_with(|| {
+                reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .build()
+                    .expect("HTTP client does not start")
+            })
+            .clone()
     })
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_fetch(method: *const u8, method_len: usize, url: *const u8, url_len: usize, headers: *const u8, headers_len: usize, body: *const u8, body_len: usize, timeout_ms: u64) -> u64 {
+extern "C" fn tenma_rs_fetch(
+    method: *const u8,
+    method_len: usize,
+    url: *const u8,
+    url_len: usize,
+    headers: *const u8,
+    headers_len: usize,
+    body: *const u8,
+    body_len: usize,
+    timeout_ms: u64,
+) -> u64 {
     let method = text(method, method_len);
     let url = text(url, url_len);
     let headers = text(headers, headers_len);
@@ -144,7 +161,10 @@ extern "C" fn tenma_rs_fetch(method: *const u8, method_len: usize, url: *const u
         let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
             return spawn(async { OpResult::Error("invalid method".into()) });
         };
-        let mut request = client.request(method, &url).body(body).timeout(Duration::from_millis(timeout_ms.max(1)));
+        let mut request = client
+            .request(method, &url)
+            .body(body)
+            .timeout(Duration::from_millis(timeout_ms.max(1)));
         for line in headers.split('\0').filter(|line| !line.is_empty()) {
             if let Some((name, value)) = line.split_once(':') {
                 request = request.header(name.trim(), value.trim());
@@ -158,9 +178,17 @@ extern "C" fn tenma_rs_fetch(method: *const u8, method_len: usize, url: *const u
             Err(error) => return OpResult::Error(error.to_string()),
         };
         let status = response.status().as_u16();
-        let headers = response.headers().iter().map(|(name, value)| format!("{}: {}", name, String::from_utf8_lossy(value.as_bytes()))).collect();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| format!("{}: {}", name, String::from_utf8_lossy(value.as_bytes())))
+            .collect();
         match response.bytes().await {
-            Ok(body) => OpResult::Http { status, headers, body: body.to_vec() },
+            Ok(body) => OpResult::Http {
+                status,
+                headers,
+                body: body.to_vec(),
+            },
             Err(error) => OpResult::Error(error.to_string()),
         }
     })

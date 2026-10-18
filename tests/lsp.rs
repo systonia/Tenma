@@ -21,12 +21,28 @@ impl Drop for Lsp {
 impl Lsp {
     /// A server for a workspace: the projects are the directories with a composer.json in it.
     fn start(root: &std::path::Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_tenma")).arg("lsp").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .arg("lsp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        let mut lsp = Lsp { child, stdin, stdout, next: 0 };
-        let initialized = lsp.request("initialize", json!({ "rootUri": uri(root), "capabilities": {} }));
-        assert_eq!(initialized["result"]["capabilities"]["definitionProvider"], true, "{initialized}");
+        let mut lsp = Lsp {
+            child,
+            stdin,
+            stdout,
+            next: 0,
+        };
+        let initialized = lsp.request(
+            "initialize",
+            json!({ "rootUri": uri(root), "capabilities": {} }),
+        );
+        assert_eq!(
+            initialized["result"]["capabilities"]["definitionProvider"], true,
+            "{initialized}"
+        );
         lsp
     }
 
@@ -40,7 +56,10 @@ impl Lsp {
         let mut length = 0;
         loop {
             let mut line = String::new();
-            assert!(self.stdout.read_line(&mut line).unwrap() > 0, "the server ended");
+            assert!(
+                self.stdout.read_line(&mut line).unwrap() > 0,
+                "the server ended"
+            );
             let line = line.trim_end();
             if line.is_empty() {
                 break;
@@ -92,7 +111,12 @@ impl Lsp {
 
     fn labels(&mut self, file: &std::path::Path, line: u32, character: u32) -> Vec<String> {
         let response = self.request("textDocument/completion", json!({ "textDocument": { "uri": uri(file) }, "position": { "line": line, "character": character } }));
-        response["result"]["items"].as_array().unwrap().iter().map(|item| item["label"].as_str().unwrap().to_owned()).collect()
+        response["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["label"].as_str().unwrap().to_owned())
+            .collect()
     }
 
     fn at(&mut self, method: &str, file: &std::path::Path, line: u32, character: u32) -> Value {
@@ -108,7 +132,10 @@ fn uri(path: &std::path::Path) -> String {
 fn project(name: &str) -> std::path::PathBuf {
     let target = std::env::temp_dir().join(format!("tenma-lsp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&target);
-    copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp"), &target);
+    copy(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp"),
+        &target,
+    );
     target.canonicalize().unwrap()
 }
 
@@ -129,16 +156,44 @@ fn completes_this_in_a_file_a_provider_binds() {
     let root = project("this");
     let template = root.join("page.tpl.php");
     let mut lsp = Lsp::start(&root);
-    lsp.open(&template, "<h1><?= $this-> ?></h1>\n<?= $this->author-> ?>\n<b data-on-click=\"");
+    lsp.open(
+        &template,
+        "<h1><?= $this-> ?></h1>\n<?= $this->author-> ?>\n<b data-on-click=\"",
+    );
     // Inside the class: private members too, no statics, no magic methods
-    assert_eq!(lsp.labels(&template, 0, 15), ["title", "author", "authors", "pens", "tags", "increment", "secret", "team"]);
+    assert_eq!(
+        lsp.labels(&template, 0, 15),
+        [
+            "title",
+            "author",
+            "authors",
+            "pens",
+            "tags",
+            "increment",
+            "secret",
+            "team"
+        ]
+    );
     // Through a typed property into another class: only its public members
     assert_eq!(lsp.labels(&template, 1, 19), ["name"]);
     // The provider's own completions
     assert_eq!(lsp.labels(&template, 2, 18), ["increment"]);
     // A value JSON cannot hold costs no other answer
     lsp.change(&template, "<?= $this-> NAN ?>");
-    assert_eq!(lsp.labels(&template, 0, 11), ["not-a-number", "title", "author", "authors", "pens", "tags", "increment", "secret", "team"]);
+    assert_eq!(
+        lsp.labels(&template, 0, 11),
+        [
+            "not-a-number",
+            "title",
+            "author",
+            "authors",
+            "pens",
+            "tags",
+            "increment",
+            "secret",
+            "team"
+        ]
+    );
     // A file no provider binds: nothing
     let other = root.join("other.php");
     lsp.open(&other, "<?php $this->");
@@ -167,17 +222,30 @@ fn loop_variables_get_the_element_type_of_what_they_loop_over() {
     assert!(lsp.labels(&template, 3, 49).is_empty());
     assert!(lsp.labels(&template, 4, 13).is_empty());
     // Hover and definition work on loop variables too
-    lsp.change(&template, "@foreach ($this->authors as $author) {{ $author->name }} @endforeach");
+    lsp.change(
+        &template,
+        "@foreach ($this->authors as $author) {{ $author->name }} @endforeach",
+    );
     let definition = lsp.at("textDocument/definition", &template, 0, 51);
-    assert_eq!(definition["uri"], uri(&root.join("src/Author.php")), "{definition}");
+    assert_eq!(
+        definition["uri"],
+        uri(&root.join("src/Author.php")),
+        "{definition}"
+    );
     // A loop variable itself, value or key, leads to the loop that introduces it
-    lsp.change(&template, "<p>\n@foreach ($this->tags as $i => $tag)\n  {{ $tag }} {{ $i }} {{ $nope }}\n@endforeach");
+    lsp.change(
+        &template,
+        "<p>\n@foreach ($this->tags as $i => $tag)\n  {{ $tag }} {{ $i }} {{ $nope }}\n@endforeach",
+    );
     for column in [6, 17] {
         let definition = lsp.at("textDocument/definition", &template, 2, column);
         assert_eq!(definition["uri"], uri(&template), "{definition}");
         assert_eq!(definition["range"]["start"]["line"], 1, "{definition}");
     }
-    assert!(lsp.at("textDocument/definition", &template, 2, 25).is_null());
+    assert!(
+        lsp.at("textDocument/definition", &template, 2, 25)
+            .is_null()
+    );
     // Not a loop in a comment
     lsp.change(&template, "<?php // foreach ($list as $x) ?>\n{{ $x }}");
     assert!(lsp.at("textDocument/definition", &template, 1, 4).is_null());
@@ -201,17 +269,39 @@ fn what_the_running_app_publishes_shows_next_to_the_providers_problems() {
     let list = json!([{ "file": template.to_str().unwrap(), "line": 1, "column": 7, "severity": "warning", "message": "slow render" }]);
     std::fs::write(published.join("app.my-app.json"), list.to_string()).unwrap();
     let diagnostics = lsp.diagnostics();
-    assert_eq!(diagnostics.as_array().unwrap().len(), before.as_array().unwrap().len() + 1, "{diagnostics}");
-    let mine = diagnostics.as_array().unwrap().iter().find(|d| d["source"] == "my-app").unwrap();
-    assert_eq!((mine["message"].as_str(), mine["severity"].as_u64(), mine["range"]["start"]["character"].as_u64()), (Some("slow render"), Some(2), Some(5)));
+    assert_eq!(
+        diagnostics.as_array().unwrap().len(),
+        before.as_array().unwrap().len() + 1,
+        "{diagnostics}"
+    );
+    let mine = diagnostics
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["source"] == "my-app")
+        .unwrap();
+    assert_eq!(
+        (
+            mine["message"].as_str(),
+            mine["severity"].as_u64(),
+            mine["range"]["start"]["character"].as_u64()
+        ),
+        (Some("slow render"), Some(2), Some(5))
+    );
     // The same problem from a provider and from the app shows once
     let own = &before[0];
     let twice = json!([{ "file": template.to_str().unwrap(), "line": own["range"]["start"]["line"].as_u64().unwrap() + 1, "message": own["message"] }]);
     std::fs::write(published.join("app.checks.json"), twice.to_string()).unwrap();
-    assert_eq!(lsp.diagnostics().as_array().unwrap().len(), before.as_array().unwrap().len() + 1);
+    assert_eq!(
+        lsp.diagnostics().as_array().unwrap().len(),
+        before.as_array().unwrap().len() + 1
+    );
     std::fs::remove_file(published.join("app.checks.json")).unwrap();
     // Taken back: only the providers' problems are left
-    assert_eq!(lsp.diagnostics().as_array().unwrap().len(), before.as_array().unwrap().len() + 1);
+    assert_eq!(
+        lsp.diagnostics().as_array().unwrap().len(),
+        before.as_array().unwrap().len() + 1
+    );
     std::fs::remove_file(published.join("app.my-app.json")).unwrap();
     assert_eq!(lsp.diagnostics(), before);
 }
@@ -229,13 +319,20 @@ fn published_problems_arrive_while_the_editor_keeps_asking() {
     // A request every 0.3 s, as while typing: the input is never quiet for a whole second
     let started = std::time::Instant::now();
     'asking: loop {
-        assert!(started.elapsed() < std::time::Duration::from_secs(4), "nothing published while the editor asks");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "nothing published while the editor asks"
+        );
         lsp.next += 1;
         let id = lsp.next;
         lsp.send(json!({ "jsonrpc": "2.0", "id": id, "method": "textDocument/hover", "params": { "textDocument": { "uri": uri(&template) }, "position": { "line": 0, "character": 0 } } }));
         loop {
             let message = lsp.receive();
-            if message["method"] == "textDocument/publishDiagnostics" && message["params"]["diagnostics"].to_string().contains("slow render") {
+            if message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["diagnostics"]
+                    .to_string()
+                    .contains("slow render")
+            {
                 break 'asking;
             }
             if message["id"] == id {
@@ -252,12 +349,22 @@ fn semantic_tokens_come_from_providers_relative_and_in_utf16() {
     let template = root.join("page.tpl.php");
     let mut lsp = Lsp::start(&root);
     let initialized = lsp.request("initialize", json!({ "capabilities": {} }));
-    assert_eq!(initialized["result"]["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"][0], "keyword");
+    assert_eq!(
+        initialized["result"]["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"][0],
+        "keyword"
+    );
     // "ä" is two bytes but one UTF-16 unit
     lsp.open(&template, "@if x @end\nä @foreach");
-    let tokens = lsp.request("textDocument/semanticTokens/full", json!({ "textDocument": { "uri": uri(&template) } }));
+    let tokens = lsp.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri(&template) } }),
+    );
     // line, start relative to the token before on the same line, length, type 0 = keyword
-    assert_eq!(tokens["result"]["data"], json!([0, 0, 3, 0, 0, 0, 6, 4, 0, 0, 1, 2, 8, 0, 0]), "{tokens}");
+    assert_eq!(
+        tokens["result"]["data"],
+        json!([0, 0, 3, 0, 0, 0, 6, 4, 0, 0, 1, 2, 8, 0, 0]),
+        "{tokens}"
+    );
 }
 
 #[test]
@@ -265,20 +372,35 @@ fn hover_and_definition_follow_this_into_the_class() {
     let root = project("definition");
     let template = root.join("page.tpl.php");
     let mut lsp = Lsp::start(&root);
-    lsp.open(&template, "<?= $this->increment(1) ?><?= $this->author->name ?>");
+    lsp.open(
+        &template,
+        "<?= $this->increment(1) ?><?= $this->author->name ?>",
+    );
     let hover = lsp.at("textDocument/hover", &template, 0, 13);
-    assert_eq!(hover["contents"]["value"], "```php\npublic function increment(int $by): void\n```\n\nCounts up by one.", "{hover}");
+    assert_eq!(
+        hover["contents"]["value"],
+        "```php\npublic function increment(int $by): void\n```\n\nCounts up by one.",
+        "{hover}"
+    );
     let method = lsp.at("textDocument/definition", &template, 0, 13);
     assert_eq!(method["uri"], uri(&root.join("src/Page.php")), "{method}");
     assert_eq!(method["range"]["start"]["line"], 22, "{method}");
     // A property: the line of its declaration, in the class it belongs to
     let property = lsp.at("textDocument/definition", &template, 0, 47);
-    assert_eq!(property["uri"], uri(&root.join("src/Author.php")), "{property}");
+    assert_eq!(
+        property["uri"],
+        uri(&root.join("src/Author.php")),
+        "{property}"
+    );
     assert_eq!(property["range"]["start"]["line"], 8, "{property}");
     // A property from a trait: in the trait
     lsp.change(&template, "<?= $this->author->phone ?>");
     let property = lsp.at("textDocument/definition", &template, 0, 21);
-    assert_eq!(property["uri"], uri(&root.join("src/Contact.php")), "{property}");
+    assert_eq!(
+        property["uri"],
+        uri(&root.join("src/Contact.php")),
+        "{property}"
+    );
     assert_eq!(property["range"]["start"]["line"], 6, "{property}");
 }
 
@@ -295,7 +417,10 @@ fn diagnostics_follow_the_unsaved_text() {
     // A provider that throws is logged and left out; the server keeps answering
     assert_eq!(lsp.change(&template, "THROW\n"), json!([]));
     assert_eq!(lsp.labels(&template, 0, 0), Vec::<String>::new());
-    lsp.notify("textDocument/didClose", json!({ "textDocument": { "uri": uri(&template) } }));
+    lsp.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": uri(&template) } }),
+    );
     assert_eq!(lsp.diagnostics(), json!([]));
 }
 
@@ -306,12 +431,24 @@ fn a_saved_class_is_seen_after_the_save() {
     let page = root.join("src/Page.php");
     let mut lsp = Lsp::start(&root);
     lsp.open(&template, "<?= $this->");
-    assert!(!lsp.labels(&template, 0, 11).contains(&"subtitle".to_owned()));
-    let source = std::fs::read_to_string(&page).unwrap().replace("public string $title = '';", "public string $title = '';\n\n    public string $subtitle = '';");
+    assert!(
+        !lsp.labels(&template, 0, 11)
+            .contains(&"subtitle".to_owned())
+    );
+    let source = std::fs::read_to_string(&page).unwrap().replace(
+        "public string $title = '';",
+        "public string $title = '';\n\n    public string $subtitle = '';",
+    );
     std::fs::write(&page, source).unwrap();
-    lsp.notify("textDocument/didSave", json!({ "textDocument": { "uri": uri(&page) } }));
+    lsp.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": uri(&page) } }),
+    );
     lsp.diagnostics();
-    assert!(lsp.labels(&template, 0, 11).contains(&"subtitle".to_owned()));
+    assert!(
+        lsp.labels(&template, 0, 11)
+            .contains(&"subtitle".to_owned())
+    );
 }
 
 #[test]
@@ -319,7 +456,10 @@ fn each_file_belongs_to_the_nearest_project_with_its_packages() {
     // A workspace above the project, as with several folders open: the first one is no project
     let workspace = project("workspace");
     let root = workspace.join("app");
-    copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp"), &root);
+    copy(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp"),
+        &root,
+    );
     let template = root.join("page.tpl.php");
     let mut lsp = Lsp::start(&workspace.join("src"));
     lsp.open(&template, "<?= $this-> /* hints */");
@@ -337,7 +477,10 @@ fn each_file_belongs_to_the_nearest_project_with_its_packages() {
 fn unknown_requests_get_an_error_and_exit_ends_the_server() {
     let root = project("exit");
     let mut lsp = Lsp::start(&root);
-    assert_eq!(lsp.request("textDocument/rename", json!({}))["error"]["code"], -32601);
+    assert_eq!(
+        lsp.request("textDocument/rename", json!({}))["error"]["code"],
+        -32601
+    );
     assert_eq!(lsp.request("shutdown", Value::Null)["result"], Value::Null);
     lsp.notify("exit", Value::Null);
     assert!(lsp.child.wait().unwrap().success());
@@ -362,16 +505,38 @@ fn assigned_variables_get_the_type_of_what_is_assigned() {
     lsp.open(&template, &text);
     // A property, a method's return type (self), new; a comment and a string are no assignment
     assert_eq!(lsp.labels(&template, 4, 12), ["name"]);
-    assert_eq!(lsp.labels(&template, 5, 10), ["title", "author", "authors", "pens", "tags", "increment", "secret", "team"]);
+    assert_eq!(
+        lsp.labels(&template, 5, 10),
+        [
+            "title",
+            "author",
+            "authors",
+            "pens",
+            "tags",
+            "increment",
+            "secret",
+            "team"
+        ]
+    );
     assert_eq!(lsp.labels(&template, 6, 66), ["name"]);
     // The last assignment counts: a string has no members
     assert!(lsp.labels(&template, 7, 46).is_empty());
     // Hover and definition of a member, and F12 on the variable leads to the last assignment above
-    lsp.change(&template, "<?php $writer = 'x';\n$writer = $this->author; ?>\n{{ $writer->name }}");
+    lsp.change(
+        &template,
+        "<?php $writer = 'x';\n$writer = $this->author; ?>\n{{ $writer->name }}",
+    );
     let hover = lsp.at("textDocument/hover", &template, 2, 13);
-    assert_eq!(hover["contents"]["value"], "```php\npublic string $name\n```", "{hover}");
+    assert_eq!(
+        hover["contents"]["value"], "```php\npublic string $name\n```",
+        "{hover}"
+    );
     let property = lsp.at("textDocument/definition", &template, 2, 13);
-    assert_eq!(property["uri"], uri(&root.join("src/Author.php")), "{property}");
+    assert_eq!(
+        property["uri"],
+        uri(&root.join("src/Author.php")),
+        "{property}"
+    );
     let definition = lsp.at("textDocument/definition", &template, 2, 5);
     assert_eq!(definition["uri"], uri(&template), "{definition}");
     assert_eq!(definition["range"]["start"]["line"], 1, "{definition}");
@@ -385,21 +550,44 @@ fn a_provider_s_imports_resolve_class_names_in_a_template() {
     let root = project("imports");
     let template = root.join("page.tpl.php");
     let mut lsp = Lsp::start(&root);
-    lsp.open(&template, "{{ OrderStatus:: }}\n<?php $author = new Author(); ?>{{ $author-> }}\n<p>OrderStatus</p>");
+    lsp.open(
+        &template,
+        "{{ OrderStatus:: }}\n<?php $author = new Author(); ?>{{ $author-> }}\n<p>OrderStatus</p>",
+    );
     // Cases, constants and static methods; the namespace the provider names resolves Author
-    assert_eq!(lsp.labels(&template, 0, 16), ["Open", "Paid", "DEFAULT", "label", "cases", "from", "tryFrom"]);
+    assert_eq!(
+        lsp.labels(&template, 0, 16),
+        [
+            "Open", "Paid", "DEFAULT", "label", "cases", "from", "tryFrom"
+        ]
+    );
     assert_eq!(lsp.labels(&template, 1, 44), ["name"]);
     let definition = lsp.at("textDocument/definition", &template, 0, 5);
-    assert_eq!(definition["uri"], uri(&root.join("src/OrderStatus.php")), "{definition}");
+    assert_eq!(
+        definition["uri"],
+        uri(&root.join("src/OrderStatus.php")),
+        "{definition}"
+    );
     assert_eq!(definition["range"]["start"]["line"], 5, "{definition}");
     let hover = lsp.at("textDocument/hover", &template, 0, 5);
-    assert_eq!(hover["contents"]["value"], "```php\nenum Fixture\\Shop\\OrderStatus\n```\n\nWhere an order stands.", "{hover}");
+    assert_eq!(
+        hover["contents"]["value"],
+        "```php\nenum Fixture\\Shop\\OrderStatus\n```\n\nWhere an order stands.",
+        "{hover}"
+    );
     // A word of the template is no class name
     assert!(lsp.at("textDocument/hover", &template, 2, 6).is_null());
     // The file's own import wins over the provider's
-    lsp.change(&template, "<?php use Fixture\\People\\Writer as OrderStatus; ?>\n{{ OrderStatus::class }}");
+    lsp.change(
+        &template,
+        "<?php use Fixture\\People\\Writer as OrderStatus; ?>\n{{ OrderStatus::class }}",
+    );
     let definition = lsp.at("textDocument/definition", &template, 1, 5);
-    assert_eq!(definition["uri"], uri(&root.join("src/Writer.php")), "{definition}");
+    assert_eq!(
+        definition["uri"],
+        uri(&root.join("src/Writer.php")),
+        "{definition}"
+    );
 }
 
 #[test]
@@ -417,9 +605,13 @@ fn a_provider_s_variables_get_their_class() {
     ];
     lsp.open(&template, &lines.join("\n"));
     // The column after the n-th "->" of a line
-    let after = |line: usize, n: usize| lines[line].match_indices("->").nth(n).unwrap().0 as u32 + 2;
+    let after =
+        |line: usize, n: usize| lines[line].match_indices("->").nth(n).unwrap().0 as u32 + 2;
     // Outside the class it binds: only public members
-    assert_eq!(lsp.labels(&template, 0, after(0, 0)), ["owner", "buyers", "lines", "first", "extras"]);
+    assert_eq!(
+        lsp.labels(&template, 0, after(0, 0)),
+        ["owner", "buyers", "lines", "first", "extras"]
+    );
     // Chains through a property and a method, a loop over a property, an assignment from one
     assert_eq!(lsp.labels(&template, 1, after(1, 1)), ["name"]);
     assert_eq!(lsp.labels(&template, 1, after(1, 3)), ["name"]);
@@ -427,13 +619,31 @@ fn a_provider_s_variables_get_their_class() {
     assert_eq!(lsp.labels(&template, 3, after(3, 1)), ["name"]);
     // A class that does not exist types nothing; below its own assignment the file's typing wins
     assert!(lsp.labels(&template, 4, after(4, 0)).is_empty());
-    assert_eq!(lsp.labels(&template, 5, after(5, 0)), ["title", "author", "authors", "pens", "tags", "increment", "secret", "team"]);
+    assert_eq!(
+        lsp.labels(&template, 5, after(5, 0)),
+        [
+            "title",
+            "author",
+            "authors",
+            "pens",
+            "tags",
+            "increment",
+            "secret",
+            "team"
+        ]
+    );
     // Hover on the variable and on a member, F12 on a member
     lsp.change(&template, "{{ $model->owner }} {{ $model->first() }}");
     let hover = lsp.at("textDocument/hover", &template, 0, 5);
-    assert_eq!(hover["contents"]["value"], "```php\nFixture\\Cart $model\n```", "{hover}");
+    assert_eq!(
+        hover["contents"]["value"], "```php\nFixture\\Cart $model\n```",
+        "{hover}"
+    );
     let hover = lsp.at("textDocument/hover", &template, 0, 13);
-    assert_eq!(hover["contents"]["value"], "```php\npublic Fixture\\Author $owner\n```", "{hover}");
+    assert_eq!(
+        hover["contents"]["value"], "```php\npublic Fixture\\Author $owner\n```",
+        "{hover}"
+    );
     let method = lsp.at("textDocument/definition", &template, 0, 32);
     assert_eq!(method["uri"], uri(&root.join("src/Cart.php")), "{method}");
     assert_eq!(method["range"]["start"]["line"], 17, "{method}");

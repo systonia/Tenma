@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::BytesMut;
 use serde_json::Value;
-use tokio_postgres::types::{Format, IsNull, ToSql, Type, to_sql_checked};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_postgres::types::{Format, IsNull, ToSql, Type, to_sql_checked};
 use tokio_postgres::{Client, NoTls};
 
 use crate::ops;
@@ -82,7 +82,9 @@ impl Busy {
 
 impl Drop for Busy {
     fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else { return };
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
         if let Some(slot) = &self.slot {
             *slot.borrow_mut() = Slot::Lost;
         }
@@ -153,7 +155,13 @@ fn text_params(params: &[Value]) -> Vec<TextParam> {
 const POOL_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 async fn connect(url: &str) -> Result<Lease, Failure> {
-    let permits = PERMITS.with_borrow_mut(|permits| Arc::clone(permits.entry(url.to_owned()).or_insert_with(|| Arc::new(Semaphore::new(POOL_SIZE.load(Ordering::Relaxed))))));
+    let permits = PERMITS.with_borrow_mut(|permits| {
+        Arc::clone(
+            permits
+                .entry(url.to_owned())
+                .or_insert_with(|| Arc::new(Semaphore::new(POOL_SIZE.load(Ordering::Relaxed)))),
+        )
+    });
     // Waiting forever would hang the worker's database access, for example when every connection
     // belongs to a transaction that calls the pool from inside it
     let permit = tokio::time::timeout(POOL_WAIT, permits.acquire_owned()).await.map_err(|_| {
@@ -163,7 +171,11 @@ async fn connect(url: &str) -> Result<Lease, Failure> {
             POOL_SIZE.load(Ordering::Relaxed)
         )
     })??;
-    let idle = IDLE.with_borrow_mut(|idle| idle.get_mut(url).and_then(|clients| std::iter::from_fn(|| clients.pop()).find(|client| !client.is_closed())));
+    let idle = IDLE.with_borrow_mut(|idle| {
+        idle.get_mut(url).and_then(|clients| {
+            std::iter::from_fn(|| clients.pop()).find(|client| !client.is_closed())
+        })
+    });
     let client = match idle {
         Some(client) => client,
         None => {
@@ -177,7 +189,10 @@ async fn connect(url: &str) -> Result<Lease, Failure> {
             client
         }
     };
-    Ok(Lease { client, _permit: permit })
+    Ok(Lease {
+        client,
+        _permit: permit,
+    })
 }
 
 /// What DISCARD ALL does, except DEALLOCATE ALL: that would also drop the statements tokio-postgres
@@ -198,7 +213,10 @@ fn release(url: &str, lease: Lease) {
     let url = url.to_owned();
     // Both moved by name: an async block captures only the fields it uses, and a permit left
     // behind would free its place while the cleanup still runs, so the pool opens a connection more
-    let Lease { client, _permit: permit } = lease;
+    let Lease {
+        client,
+        _permit: permit,
+    } = lease;
     tokio::task::spawn_local(async move {
         if client.batch_execute(CLEANUP).await.is_ok() {
             IDLE.with_borrow_mut(|idle| idle.entry(url).or_default().push(client));
@@ -215,7 +233,10 @@ async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result
         return Ok("null".to_owned());
     }
     let params = text_params(params);
-    let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|param| param as &(dyn ToSql + Sync)).collect();
+    let refs: Vec<&(dyn ToSql + Sync)> = params
+        .iter()
+        .map(|param| param as &(dyn ToSql + Sync))
+        .collect();
     if mode == "execute" {
         let affected = client.execute(sql, &refs).await?;
         return Ok(affected.to_string());
@@ -226,14 +247,23 @@ async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result
     if modifying_with(sql) {
         // A data-modifying WITH must stay at the top level, so it cannot go inside another WITH.
         // CREATE TABLE AS takes it, with parameters; the temporary table keeps the rows in order
-        client.execute(&format!("CREATE TEMP TABLE tenma_query AS {sql}\n"), &refs).await?;
+        client
+            .execute(&format!("CREATE TEMP TABLE tenma_query AS {sql}\n"), &refs)
+            .await?;
         let row = client.query_one(AGGREGATE, &[]).await;
-        client.batch_execute("DROP TABLE pg_temp.tenma_query").await?;
+        client
+            .batch_execute("DROP TABLE pg_temp.tenma_query")
+            .await?;
         return Ok(exact_numbers(row?.get(0)));
     }
     // Newline before the parenthesis: otherwise a --comment at the end of the query swallows it.
     // MATERIALIZED: the rows come in the order the query returns them (ORDER BY)
-    let row = client.query_one(&format!("WITH tenma_query AS MATERIALIZED ({sql}\n) {AGGREGATE}"), &refs).await?;
+    let row = client
+        .query_one(
+            &format!("WITH tenma_query AS MATERIALIZED ({sql}\n) {AGGREGATE}"),
+            &refs,
+        )
+        .await?;
     Ok(exact_numbers(row.get(0)))
 }
 
@@ -251,8 +281,15 @@ fn modifying_with(sql: &str) -> bool {
             break;
         }
     }
-    let words = |text: &str| text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').map(str::to_ascii_lowercase).collect::<Vec<_>>();
-    words(rest).first().is_some_and(|word| word == "with") && words(rest).iter().any(|word| matches!(word.as_str(), "insert" | "update" | "delete" | "merge"))
+    let words = |text: &str| {
+        text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>()
+    };
+    words(rest).first().is_some_and(|word| word == "with")
+        && words(rest)
+            .iter()
+            .any(|word| matches!(word.as_str(), "insert" | "update" | "delete" | "merge"))
 }
 
 /// PHP decodes a JSON number with a fraction or exponent as float. A `numeric` value a float cannot
@@ -275,9 +312,16 @@ fn exact_numbers(json: String) -> String {
             in_string = true;
             i += 1;
         } else if byte == b'-' || byte.is_ascii_digit() {
-            let end = i + bytes[i..].iter().position(|b| !matches!(b, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')).unwrap_or(bytes.len() - i);
+            let end = i + bytes[i..]
+                .iter()
+                .position(|b| !matches!(b, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'))
+                .unwrap_or(bytes.len() - i);
             let number = &json[i..end];
-            if number.contains(['.', 'e', 'E']) && !number.parse::<f64>().is_ok_and(|float| decimal(number) == decimal(&float.to_string())) {
+            if number.contains(['.', 'e', 'E'])
+                && !number
+                    .parse::<f64>()
+                    .is_ok_and(|float| decimal(number) == decimal(&float.to_string()))
+            {
                 out.push_str(&json[start..i]);
                 out.push('"');
                 out.push_str(number);
@@ -295,8 +339,14 @@ fn exact_numbers(json: String) -> String {
 
 /// A decimal number as sign, significant digits and power of ten: 1.10, 1.1 and 11e-1 are equal.
 fn decimal(number: &str) -> (bool, String, i64) {
-    let (negative, number) = number.strip_prefix('-').map_or((false, number), |rest| (true, rest));
-    let (mantissa, exponent) = number.split_once(['e', 'E']).map_or((number, 0), |(mantissa, exponent)| (mantissa, exponent.parse().unwrap_or(0)));
+    let (negative, number) = number
+        .strip_prefix('-')
+        .map_or((false, number), |rest| (true, rest));
+    let (mantissa, exponent) = number
+        .split_once(['e', 'E'])
+        .map_or((number, 0), |(mantissa, exponent)| {
+            (mantissa, exponent.parse().unwrap_or(0))
+        });
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let digits = format!("{whole}{fraction}");
     let trimmed = digits.trim_start_matches('0').trim_end_matches('0');
@@ -304,7 +354,11 @@ fn decimal(number: &str) -> (bool, String, i64) {
         return (false, String::new(), 0);
     }
     let trailing = (digits.len() - digits.trim_end_matches('0').len()) as i64;
-    (negative, trimmed.to_owned(), exponent - fraction.len() as i64 + trailing)
+    (
+        negative,
+        trimmed.to_owned(),
+        exponent - fraction.len() as i64 + trailing,
+    )
 }
 
 #[cfg(test)]
@@ -317,14 +371,28 @@ mod tests {
             exact_numbers(r#"[{"a": 9.99, "b": 123456789012345678.90, "c": 42, "d": "1.234567890123456789", "e": 0.30000000000000004, "f": 1.10, "g": 1e+20, "h": -0.0000000000000000000123456789012345678901}]"#.into()),
             r#"[{"a": 9.99, "b": "123456789012345678.90", "c": 42, "d": "1.234567890123456789", "e": 0.30000000000000004, "f": 1.10, "g": 1e+20, "h": "-0.0000000000000000000123456789012345678901"}]"#
         );
-        assert_eq!(exact_numbers(r#"[{"s": "say \"1.00000000000000000001\""}]"#.into()), r#"[{"s": "say \"1.00000000000000000001\""}]"#);
+        assert_eq!(
+            exact_numbers(r#"[{"s": "say \"1.00000000000000000001\""}]"#.into()),
+            r#"[{"s": "say \"1.00000000000000000001\""}]"#
+        );
     }
 }
 
-async fn postgres(mode: String, target: String, sql: String, params: Vec<Value>) -> Result<String, Failure> {
+async fn postgres(
+    mode: String,
+    target: String,
+    sql: String,
+    params: Vec<Value>,
+) -> Result<String, Failure> {
     // Queries in a transaction use its connection
-    if let Some(id) = target.strip_prefix("tx:").and_then(|id| id.parse::<u64>().ok()) {
-        let Some((url, cell)) = TRANSACTIONS.with_borrow(|txs| txs.get(&id).map(|tx| (tx.url.clone(), Rc::clone(&tx.client)))) else {
+    if let Some(id) = target
+        .strip_prefix("tx:")
+        .and_then(|id| id.parse::<u64>().ok())
+    {
+        let Some((url, cell)) = TRANSACTIONS.with_borrow(|txs| {
+            txs.get(&id)
+                .map(|tx| (tx.url.clone(), Rc::clone(&tx.client)))
+        }) else {
             return Err("transaction has already ended".into());
         };
         let ending = mode == "commit" || mode == "rollback";
@@ -338,13 +406,29 @@ async fn postgres(mode: String, target: String, sql: String, params: Vec<Value>)
                     TRANSACTIONS.with_borrow_mut(|txs| txs.remove(&id));
                 }
                 // A rollback has already happened; nothing else works any more
-                return if mode == "rollback" { Ok("null".into()) } else { Err("the transaction was aborted".into()) };
+                return if mode == "rollback" {
+                    Ok("null".into())
+                } else {
+                    Err("the transaction was aborted".into())
+                };
             }
         };
-        let busy = Busy { url: url.clone(), slot: Some(Rc::clone(&cell)), lease: Some(lease) };
+        let busy = Busy {
+            url: url.clone(),
+            slot: Some(Rc::clone(&cell)),
+            lease: Some(lease),
+        };
         let client = busy.client();
         let result = if ending {
-            client.batch_execute(if mode == "commit" { "COMMIT" } else { "ROLLBACK" }).await.map(|()| "null".to_owned()).map_err(Failure::from)
+            client
+                .batch_execute(if mode == "commit" {
+                    "COMMIT"
+                } else {
+                    "ROLLBACK"
+                })
+                .await
+                .map(|()| "null".to_owned())
+                .map_err(Failure::from)
         } else {
             run(client, &mode, &sql, &params).await
         };
@@ -364,11 +448,27 @@ async fn postgres(mode: String, target: String, sql: String, params: Vec<Value>)
         lease.client.batch_execute("BEGIN").await?;
         // PHP picks the ID: if it is cancelled while this finishes, it can still roll back
         let owner = params.first().and_then(Value::as_u64).unwrap_or(0);
-        let id = params.get(1).and_then(Value::as_u64).unwrap_or_else(crate::php::next_id);
-        TRANSACTIONS.with_borrow_mut(|txs| txs.insert(id, Transaction { url: target, owner, client: Rc::new(RefCell::new(Slot::Idle(lease))) }));
+        let id = params
+            .get(1)
+            .and_then(Value::as_u64)
+            .unwrap_or_else(crate::php::next_id);
+        TRANSACTIONS.with_borrow_mut(|txs| {
+            txs.insert(
+                id,
+                Transaction {
+                    url: target,
+                    owner,
+                    client: Rc::new(RefCell::new(Slot::Idle(lease))),
+                },
+            )
+        });
         return Ok(id.to_string());
     }
-    let busy = Busy { url: target, slot: None, lease: Some(lease) };
+    let busy = Busy {
+        url: target,
+        slot: None,
+        lease: Some(lease),
+    };
     let result = run(busy.client(), &mode, &sql, &params).await;
     busy.done();
     result
@@ -384,17 +484,28 @@ async fn redis_command(url: String, args: Vec<u8>) -> Result<Vec<u8>, Failure> {
             let config = redis::AsyncConnectionConfig::new()
                 .set_connection_timeout(Some(std::time::Duration::from_secs(10)))
                 .set_response_timeout(Some(std::time::Duration::from_secs(30)));
-            let connection = redis::Client::open(url.as_str())?.get_multiplexed_async_connection_with_config(&config).await?;
-            REDIS.with_borrow_mut(|connections| connections.insert(url.clone(), connection.clone()));
+            let connection = redis::Client::open(url.as_str())?
+                .get_multiplexed_async_connection_with_config(&config)
+                .await?;
+            REDIS
+                .with_borrow_mut(|connections| connections.insert(url.clone(), connection.clone()));
             connection
         }
     };
     let mut command = redis::Cmd::new();
     let mut rest = args.as_slice();
     while !rest.is_empty() {
-        let colon = rest.iter().position(|&byte| byte == b':').ok_or("malformed Redis arguments")?;
-        let length: usize = std::str::from_utf8(&rest[..colon]).ok().and_then(|length| length.parse().ok()).ok_or("malformed Redis arguments")?;
-        let arg = rest[colon + 1..].get(..length).ok_or("malformed Redis arguments")?;
+        let colon = rest
+            .iter()
+            .position(|&byte| byte == b':')
+            .ok_or("malformed Redis arguments")?;
+        let length: usize = std::str::from_utf8(&rest[..colon])
+            .ok()
+            .and_then(|length| length.parse().ok())
+            .ok_or("malformed Redis arguments")?;
+        let arg = rest[colon + 1..]
+            .get(..length)
+            .ok_or("malformed Redis arguments")?;
         command.arg(arg);
         rest = &rest[colon + 1 + length..];
     }
@@ -443,11 +554,19 @@ fn serialize(value: redis::Value, out: &mut Vec<u8>) {
             let _ = write!(out, "b:{};", u8::from(flag));
         }
         redis::Value::Double(number) if number.is_nan() => out.extend_from_slice(b"d:NAN;"),
-        redis::Value::Double(number) if number.is_infinite() => out.extend_from_slice(if number > 0.0 { b"d:INF;" } else { b"d:-INF;" }),
+        redis::Value::Double(number) if number.is_infinite() => {
+            out.extend_from_slice(if number > 0.0 { b"d:INF;" } else { b"d:-INF;" })
+        }
         redis::Value::Double(number) => {
             let _ = write!(out, "d:{number:?};");
         }
-        redis::Value::Map(pairs) => list(out, pairs.into_iter().map(|(key, value)| redis::Value::Array(vec![key, value])).collect()),
+        redis::Value::Map(pairs) => list(
+            out,
+            pairs
+                .into_iter()
+                .map(|(key, value)| redis::Value::Array(vec![key, value]))
+                .collect(),
+        ),
         other => string(out, format!("{other:?}").as_bytes()),
     }
 }
@@ -455,16 +574,40 @@ fn serialize(value: redis::Value, out: &mut Vec<u8>) {
 /// Starts a database op. $op: "pg.query", "pg.execute", "pg.script", "pg.begin", "pg.commit", "pg.rollback" or
 /// "redis"; $target: URL or "tx:<id>"; $params: JSON array (Redis: see redis_command). The result comes as JSON text.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_db(op: *const u8, op_len: usize, target: *const u8, target_len: usize, sql: *const u8, sql_len: usize, params: *const u8, params_len: usize) -> u64 {
-    let (op, target, sql) = (text(op, op_len), text(target, target_len), text(sql, sql_len));
+extern "C" fn tenma_rs_db(
+    op: *const u8,
+    op_len: usize,
+    target: *const u8,
+    target_len: usize,
+    sql: *const u8,
+    sql_len: usize,
+    params: *const u8,
+    params_len: usize,
+) -> u64 {
+    let (op, target, sql) = (
+        text(op, op_len),
+        text(target, target_len),
+        text(sql, sql_len),
+    );
     // JSON for Postgres, raw bytes for Redis
     let params = bytes(params, params_len).to_vec();
     // COMMIT and ROLLBACK run to completion even if the caller is cancelled: cancelled midway,
     // it would be unclear whether the transaction holds, and its entry would stay forever
-    let spawn = if matches!(op.as_str(), "pg.commit" | "pg.rollback") { ops::spawn_uncancellable } else { ops::spawn };
+    let spawn = if matches!(op.as_str(), "pg.commit" | "pg.rollback") {
+        ops::spawn_uncancellable
+    } else {
+        ops::spawn
+    };
     spawn(async move {
         let result = match op.split_once('.') {
-            Some(("pg", mode)) => postgres(mode.to_owned(), target, sql, serde_json::from_slice(&params).unwrap_or_default()).await.map(String::into_bytes),
+            Some(("pg", mode)) => postgres(
+                mode.to_owned(),
+                target,
+                sql,
+                serde_json::from_slice(&params).unwrap_or_default(),
+            )
+            .await
+            .map(String::into_bytes),
             _ if op == "redis" => redis_command(target, params).await,
             _ => Err(format!("unknown database op {op}").into()),
         };

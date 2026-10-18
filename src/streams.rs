@@ -30,7 +30,8 @@ const STREAM_BUFFER: usize = 16;
 /// The client not reading: send() waits.
 const SOCKET_BACKLOG: usize = 256;
 /// Largest WebSocket message in bytes, like --max-body.
-pub static MAX_MESSAGE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(10 << 20);
+pub static MAX_MESSAGE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(10 << 20);
 
 /// Body of a streaming response: what PHP writes, as soon as it is there. Ends when the channel
 /// closes; unless the writer finished, with an error, so hyper aborts the connection instead of
@@ -47,7 +48,9 @@ pub struct ChannelBody {
 impl Drop for ChannelBody {
     fn drop(&mut self) {
         if let Some(rid) = self.rid
-            && STREAMS.with_borrow_mut(|streams| streams.remove(&rid)).is_some()
+            && STREAMS
+                .with_borrow_mut(|streams| streams.remove(&rid))
+                .is_some()
         {
             php::gone(rid);
         }
@@ -57,7 +60,12 @@ impl Drop for ChannelBody {
 impl ChannelBody {
     /// A body whose end is checked by its Content-Length, as for files.
     pub fn sized(chunks: mpsc::Receiver<Bytes>) -> Self {
-        Self { chunks, finished: Arc::new(AtomicBool::new(true)), flushed: false, rid: None }
+        Self {
+            chunks,
+            finished: Arc::new(AtomicBool::new(true)),
+            flushed: false,
+            rid: None,
+        }
     }
 }
 
@@ -65,7 +73,10 @@ impl Body for ChannelBody {
     type Data = Bytes;
     type Error = std::io::Error;
 
-    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
         match self.chunks.poll_recv(cx) {
             Poll::Ready(Some(bytes)) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
             Poll::Ready(None) if self.finished.load(Ordering::Relaxed) => Poll::Ready(None),
@@ -77,7 +88,9 @@ impl Body for ChannelBody {
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
-            Poll::Ready(None) => Poll::Ready(Some(Err(std::io::Error::other("the stream was cut off")))),
+            Poll::Ready(None) => {
+                Poll::Ready(Some(Err(std::io::Error::other("the stream was cut off"))))
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -98,7 +111,11 @@ struct Gone(u64);
 
 impl Drop for Gone {
     fn drop(&mut self) {
-        let receiving = SOCKETS.with_borrow(|sockets| sockets.get(&self.0).map(|socket| socket.incoming.borrow().is_none()));
+        let receiving = SOCKETS.with_borrow(|sockets| {
+            sockets
+                .get(&self.0)
+                .map(|socket| socket.incoming.borrow().is_none())
+        });
         if receiving == Some(false) {
             SOCKETS.with_borrow_mut(|sockets| sockets.remove(&self.0));
             php::gone(self.0);
@@ -129,17 +146,36 @@ pub fn clear() {
 
 /// Closes a WebSocket with 1011: the server broke off.
 fn fail(socket: &Socket) {
-    let _ = socket.outgoing.try_send(Message::Close(Some(CloseFrame { code: CloseCode::Error, reason: "Internal error".into() })));
+    let _ = socket.outgoing.try_send(Message::Close(Some(CloseFrame {
+        code: CloseCode::Error,
+        reason: "Internal error".into(),
+    })));
 }
-
 
 /// Sends the head of the response; the body follows with tenma_rs_stream_write. 0 if the request is not waiting.
 #[unsafe(no_mangle)]
-extern "C" fn tenma_rs_stream_start(rid: u64, status: u16, headers: *const u8, headers_len: usize) -> c_int {
+extern "C" fn tenma_rs_stream_start(
+    rid: u64,
+    status: u16,
+    headers: *const u8,
+    headers_len: usize,
+) -> c_int {
     let (sender, chunks) = mpsc::channel(STREAM_BUFFER);
     let finished = Arc::new(AtomicBool::new(false));
     let headers = php::parse_header_lines(bytes(headers, headers_len));
-    if !php::reply(rid, Reply::Stream { status, headers, body: ChannelBody { chunks, finished: Arc::clone(&finished), flushed: false, rid: Some(rid) } }) {
+    if !php::reply(
+        rid,
+        Reply::Stream {
+            status,
+            headers,
+            body: ChannelBody {
+                chunks,
+                finished: Arc::clone(&finished),
+                flushed: false,
+                rid: Some(rid),
+            },
+        },
+    ) {
         return 0;
     }
     STREAMS.with_borrow_mut(|streams| streams.insert(rid, (sender, finished)));
@@ -149,7 +185,9 @@ extern "C" fn tenma_rs_stream_start(rid: u64, status: u16, headers: *const u8, h
 /// 0: written. Above 0: buffer full, an op the fiber must wait on. -1: client is gone.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_stream_write(rid: u64, chunk: *const u8, len: usize) -> i64 {
-    let Some(sender) = STREAMS.with_borrow(|streams| streams.get(&rid).map(|(sender, _)| sender.clone())) else {
+    let Some(sender) =
+        STREAMS.with_borrow(|streams| streams.get(&rid).map(|(sender, _)| sender.clone()))
+    else {
         return -1;
     };
     match sender.try_send(Bytes::copy_from_slice(bytes(chunk, len))) {
@@ -184,10 +222,22 @@ extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
     let (outgoing, outgoing_receiver) = mpsc::channel(SOCKET_BACKLOG);
     let (incoming_sender, incoming) = mpsc::channel(SOCKET_BACKLOG);
     let unread = Rc::new(Cell::new(0));
-    if !php::reply(rid, Reply::Upgrade(Pipes { outgoing: outgoing_receiver, incoming: incoming_sender, unread: Rc::clone(&unread), gone: Gone(rid) })) {
+    if !php::reply(
+        rid,
+        Reply::Upgrade(Pipes {
+            outgoing: outgoing_receiver,
+            incoming: incoming_sender,
+            unread: Rc::clone(&unread),
+            gone: Gone(rid),
+        }),
+    ) {
         return 0;
     }
-    let socket = Socket { outgoing, incoming: Rc::new(RefCell::new(Some(incoming))), unread };
+    let socket = Socket {
+        outgoing,
+        incoming: Rc::new(RefCell::new(Some(incoming))),
+        unread,
+    };
     SOCKETS.with_borrow_mut(|sockets| sockets.insert(rid, socket));
     1
 }
@@ -197,7 +247,9 @@ extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
 /// disconnected after --request-timeout (WriteTimeout), which ends the op too.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> i64 {
-    let Some(sender) = SOCKETS.with_borrow(|sockets| sockets.get(&rid).map(|socket| socket.outgoing.clone())) else {
+    let Some(sender) =
+        SOCKETS.with_borrow(|sockets| sockets.get(&rid).map(|socket| socket.outgoing.clone()))
+    else {
         return -1;
     };
     // Text if it is UTF-8, otherwise a binary frame: bytes arrive as they were sent
@@ -227,14 +279,21 @@ extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> i64 {
 /// Op for the next message: a string, or null if the client has closed. 0: no socket.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_ws_receive(rid: u64) -> u64 {
-    let Some((incoming, unread)) = SOCKETS.with_borrow(|sockets| sockets.get(&rid).map(|socket| (Rc::clone(&socket.incoming), Rc::clone(&socket.unread)))) else {
+    let Some((incoming, unread)) = SOCKETS.with_borrow(|sockets| {
+        sockets
+            .get(&rid)
+            .map(|socket| (Rc::clone(&socket.incoming), Rc::clone(&socket.unread)))
+    }) else {
         return 0;
     };
     ops::spawn(async move {
         let Some(receiver) = incoming.borrow_mut().take() else {
             return OpResult::Error("receive() is already running on this WebSocket".into());
         };
-        let mut lent = Lent { slot: incoming, receiver: Some(receiver) };
+        let mut lent = Lent {
+            slot: incoming,
+            receiver: Some(receiver),
+        };
         let message = lent.receiver.as_mut().unwrap().recv().await;
         message.map_or(OpResult::Null, |message| {
             unread.set(unread.get() - message.len());
@@ -267,13 +326,21 @@ extern "C" fn tenma_rs_ws_close(rid: u64, finished: c_int) {
 
 /// After the 101 response: pass messages between client and PHP until one side closes.
 pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
-    let Pipes { mut outgoing, incoming, unread, gone: _gone } = pipes;
+    let Pipes {
+        mut outgoing,
+        incoming,
+        unread,
+        gone: _gone,
+    } = pipes;
     let Ok(upgraded) = upgrade.await else {
         return;
     };
     let limit = MAX_MESSAGE.load(std::sync::atomic::Ordering::Relaxed);
-    let config = WebSocketConfig::default().max_message_size(Some(limit)).max_frame_size(Some(limit));
-    let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config)).await;
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(limit))
+        .max_frame_size(Some(limit));
+    let socket =
+        WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config)).await;
     let (mut sink, mut stream) = socket.split();
     loop {
         tokio::select! {
@@ -309,9 +376,19 @@ pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
 /// Passes a message on to PHP. If PHP does not keep reading, the backlog does not grow without end:
 /// at SOCKET_BACKLOG unread messages or more than $limit unread bytes (one message is at most that)
 /// tenma disconnects the client. False means: end the connection.
-async fn accept_message(incoming: &mpsc::Sender<Vec<u8>>, unread: &Cell<usize>, limit: usize, message: Vec<u8>, sink: &mut (impl SinkExt<Message> + Unpin)) -> bool {
+async fn accept_message(
+    incoming: &mpsc::Sender<Vec<u8>>,
+    unread: &Cell<usize>,
+    limit: usize,
+    message: Vec<u8>,
+    sink: &mut (impl SinkExt<Message> + Unpin),
+) -> bool {
     let size = message.len();
-    let sent = if !incoming.is_closed() && unread.get() + size > limit { Err(mpsc::error::TrySendError::Full(message)) } else { incoming.try_send(message) };
+    let sent = if !incoming.is_closed() && unread.get() + size > limit {
+        Err(mpsc::error::TrySendError::Full(message))
+    } else {
+        incoming.try_send(message)
+    };
     match sent {
         Ok(()) => {
             unread.set(unread.get() + size);
@@ -321,7 +398,12 @@ async fn accept_message(incoming: &mpsc::Sender<Vec<u8>>, unread: &Cell<usize>, 
         Err(mpsc::error::TrySendError::Closed(_)) => true,
         Err(mpsc::error::TrySendError::Full(_)) => {
             let reason = "Too many unread messages";
-            let _ = sink.send(Message::Close(Some(CloseFrame { code: CloseCode::Policy, reason: reason.into() }))).await;
+            let _ = sink
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Policy,
+                    reason: reason.into(),
+                })))
+                .await;
             false
         }
     }

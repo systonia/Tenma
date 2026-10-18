@@ -45,7 +45,8 @@ pub struct Changes {
 /// The way to the watcher thread; only set with --watch.
 static WATCHER: OnceLock<mpsc::Sender<Message>> = OnceLock::new();
 /// Changed files below the hooks' directories with their modification time, for the dev thread.
-static HOOKS: OnceLock<tokio::sync::Mutex<UnboundedReceiver<Vec<(PathBuf, f64)>>>> = OnceLock::new();
+static HOOKS: OnceLock<tokio::sync::Mutex<UnboundedReceiver<Vec<(PathBuf, f64)>>>> =
+    OnceLock::new();
 
 thread_local! {
     /// How many of this interpreter's loaded files are already reported.
@@ -64,7 +65,11 @@ unsafe extern "C" {
 extern "C" fn tenma_rs_included(path: *const u8, len: usize) {
     if let Some(watcher) = WATCHER.get() {
         let path = Path::new(std::ffi::OsStr::from_bytes(crate::php::bytes(path, len)));
-        let _ = watcher.send(Message::Loaded(path.to_path_buf(), GROUP.get(), SINCE.get()));
+        let _ = watcher.send(Message::Loaded(
+            path.to_path_buf(),
+            GROUP.get(),
+            SINCE.get(),
+        ));
     }
 }
 
@@ -125,12 +130,21 @@ thread_local! {
 
 /// Called before the workers run the script again because `path` changed.
 pub fn reloaded_by(path: &Path) {
-    *RELOADED_BY.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.to_path_buf());
+    *RELOADED_BY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.to_path_buf());
 }
 
 /// A worker runs the script again: because of the last change, or (`changed` false) for another reason.
 pub fn rerun(changed: bool) {
-    let path = if changed { RELOADED_BY.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() } else { None };
+    let path = if changed {
+        RELOADED_BY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    } else {
+        None
+    };
     RUN_RELOADED_BY.with_borrow_mut(|reloaded| *reloaded = path);
 }
 
@@ -158,7 +172,10 @@ fn copy_path(reloaded: Option<&Path>, buffer: *mut u8, capacity: usize) -> usize
 pub fn clear_diagnostics(file: &Path, group: &str) {
     let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
     let directory = file.parent().unwrap_or(Path::new("."));
-    let project = directory.ancestors().find(|at| at.join("composer.json").is_file()).unwrap_or(directory);
+    let project = directory
+        .ancestors()
+        .find(|at| at.join("composer.json").is_file())
+        .unwrap_or(directory);
     let Ok(entries) = std::fs::read_dir(project.join(".tenma/diagnostics")) else {
         return;
     };
@@ -192,10 +209,21 @@ pub fn start() -> Result<UnboundedReceiver<Changes>, String> {
 /// Below a hook root watched recursively: watching the directory on its own again would replace
 /// that watch on macOS (FSEvents keeps one mode per path) and lose its subdirectories.
 fn covered(directory: &Path, roots: &[(PathBuf, bool)]) -> bool {
-    roots.iter().any(|(root, recursive)| *recursive && (directory.starts_with(root) || root.canonicalize().is_ok_and(|root| directory.starts_with(root))))
+    roots.iter().any(|(root, recursive)| {
+        *recursive
+            && (directory.starts_with(root)
+                || root
+                    .canonicalize()
+                    .is_ok_and(|root| directory.starts_with(root)))
+    })
 }
 
-fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Message>, changes: &UnboundedSender<Changes>, hooks: &UnboundedSender<Vec<(PathBuf, f64)>>) {
+fn watch(
+    mut watcher: notify::RecommendedWatcher,
+    messages: &mpsc::Receiver<Message>,
+    changes: &UnboundedSender<Changes>,
+    hooks: &UnboundedSender<Vec<(PathBuf, f64)>>,
+) {
     // Fingerprints of the content of the files seen so far (None: missing)
     let mut files: HashMap<PathBuf, Option<u64>> = HashMap::new();
     // Loaded files and who loaded them
@@ -210,8 +238,12 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
     let mut settle: Option<(Instant, Instant)> = None;
     loop {
         let message = match settle {
-            Some((_, deadline)) => messages.recv_timeout(deadline.saturating_duration_since(Instant::now())),
-            None => messages.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            Some((_, deadline)) => {
+                messages.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            }
+            None => messages
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
         match message {
             Ok(Message::Loaded(path, group, since)) => {
@@ -227,10 +259,14 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                     continue;
                 }
                 *groups |= group;
-                if let std::collections::hash_map::Entry::Vacant(entry) = files.entry(path.clone()) {
+                if let std::collections::hash_map::Entry::Vacant(entry) = files.entry(path.clone())
+                {
                     // Reported only after the request that loaded it: saved since then, the worker may
                     // run the old content, and the fingerprint now would already be the new one
-                    if std::fs::metadata(&path).and_then(|meta| meta.modified()).is_ok_and(|modified| modified >= since) {
+                    if std::fs::metadata(&path)
+                        .and_then(|meta| meta.modified())
+                        .is_ok_and(|modified| modified >= since)
+                    {
                         entry.insert(None);
                         candidates.insert(path);
                         wait_for_more(&mut settle);
@@ -253,11 +289,18 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                     if roots.contains(&root) {
                         continue;
                     }
-                    let mode = if root.1 { notify::RecursiveMode::Recursive } else { notify::RecursiveMode::NonRecursive };
+                    let mode = if root.1 {
+                        notify::RecursiveMode::Recursive
+                    } else {
+                        notify::RecursiveMode::NonRecursive
+                    };
                     // ponytail: a directory missing now is not watched once it appears; restart tenma
                     // (or touch tenma.dev.php) after creating it. Upgrade: watch the nearest parent.
                     if let Err(error) = watcher.watch(&root.0, mode) {
-                        eprintln!("tenma: cannot watch {} for hooks: {error}", root.0.display());
+                        eprintln!(
+                            "tenma: cannot watch {} for hooks: {error}",
+                            root.0.display()
+                        );
                     }
                     roots.push(root);
                 }
@@ -269,7 +312,11 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
             Ok(Message::Event(Ok(event))) => {
                 // A watched directory deleted or moved away (git checkout, composer install): inotify
                 // drops or keeps following its watch, so it is watched anew at the next report
-                if matches!(event.kind, notify::EventKind::Remove(_) | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
+                if matches!(
+                    event.kind,
+                    notify::EventKind::Remove(_)
+                        | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                ) {
                     for path in &event.paths {
                         if directories.remove(path) {
                             let _ = watcher.unwatch(path);
@@ -309,8 +356,15 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
                         batch.dev.get_or_insert(path.clone());
                     }
                     if below(&roots, &path) && !ignore.ignored(&path) {
-                        let modified = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok();
-                        hook_paths.push((path, modified.and_then(|time| time.duration_since(UNIX_EPOCH).ok()).map_or(0.0, |since| since.as_secs_f64())));
+                        let modified = std::fs::metadata(&path)
+                            .and_then(|meta| meta.modified())
+                            .ok();
+                        hook_paths.push((
+                            path,
+                            modified
+                                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                                .map_or(0.0, |since| since.as_secs_f64()),
+                        ));
                     }
                 }
                 if !hook_paths.is_empty() {
@@ -326,7 +380,12 @@ fn watch(mut watcher: notify::RecommendedWatcher, messages: &mpsc::Receiver<Mess
 }
 
 /// Watches a directory of loaded files unless it already is; a failure is reported once.
-fn watch_directory(watcher: &mut notify::RecommendedWatcher, directories: &mut HashSet<PathBuf>, failed: &mut HashSet<PathBuf>, directory: &Path) {
+fn watch_directory(
+    watcher: &mut notify::RecommendedWatcher,
+    directories: &mut HashSet<PathBuf>,
+    failed: &mut HashSet<PathBuf>,
+    directory: &Path,
+) {
     if directories.contains(directory) {
         return;
     }
@@ -337,7 +396,10 @@ fn watch_directory(watcher: &mut notify::RecommendedWatcher, directories: &mut H
         // Gone meanwhile (a checkout in progress): the next report tries again
         Err(error) => {
             if directory.exists() && failed.insert(directory.to_path_buf()) {
-                eprintln!("tenma: --watch cannot watch {}, its files do not reload: {error}", directory.display());
+                eprintln!(
+                    "tenma: --watch cannot watch {}, its files do not reload: {error}",
+                    directory.display()
+                );
             }
         }
     }
@@ -351,14 +413,26 @@ fn wait_for_more(settle: &mut Option<(Instant, Instant)>) {
 }
 
 fn below(roots: &[(PathBuf, bool)], path: &Path) -> bool {
-    roots.iter().any(|(root, recursive)| if *recursive { path.starts_with(root) } else { path.parent() == Some(root) })
+    roots.iter().any(|(root, recursive)| {
+        if *recursive {
+            path.starts_with(root)
+        } else {
+            path.parent() == Some(root)
+        }
+    })
 }
 
 /// The path of an event if it is a loaded file or an input below a hook directory. Events may
 /// name it by another path than PHP (a symlinked directory such as /tmp on macOS): then the
 /// resolved directory decides.
-fn relevant(loaded: &HashMap<PathBuf, u8>, roots: &[(PathBuf, bool)], ignore: &Ignore, path: PathBuf) -> Option<PathBuf> {
-    let wanted = |path: &Path| loaded.contains_key(path) || (below(roots, path) && !ignore.ignored(path));
+fn relevant(
+    loaded: &HashMap<PathBuf, u8>,
+    roots: &[(PathBuf, bool)],
+    ignore: &Ignore,
+    path: PathBuf,
+) -> Option<PathBuf> {
+    let wanted =
+        |path: &Path| loaded.contains_key(path) || (below(roots, path) && !ignore.ignored(path));
     if wanted(&path) {
         return Some(path);
     }
@@ -384,7 +458,10 @@ struct Ignore {
 impl Ignore {
     fn read(file: &Path, project: PathBuf) -> Self {
         let text = std::fs::read(file).unwrap_or_else(|_| b".git\nnode_modules\nvendor\n".to_vec());
-        let mut ignore = Ignore { project, ..Ignore::default() };
+        let mut ignore = Ignore {
+            project,
+            ..Ignore::default()
+        };
         for line in text.split(|&byte| byte == b'\n') {
             let entry = line.trim_ascii();
             if entry.is_empty() || entry.starts_with(b"#") {
@@ -393,7 +470,12 @@ impl Ignore {
             let entry = entry.strip_suffix(b"/").unwrap_or(entry);
             if entry.contains(&b'/') {
                 let entry = entry.strip_prefix(b"/").unwrap_or(entry);
-                ignore.paths.push(entry.split(|&byte| byte == b'/').map(<[u8]>::to_vec).collect());
+                ignore.paths.push(
+                    entry
+                        .split(|&byte| byte == b'/')
+                        .map(<[u8]>::to_vec)
+                        .collect(),
+                );
             } else {
                 ignore.names.push(entry.to_vec());
             }
@@ -406,8 +488,16 @@ impl Ignore {
             return false;
         };
         let parts: Vec<&[u8]> = relative.iter().map(|part| part.as_bytes()).collect();
-        parts.iter().any(|part| self.names.iter().any(|name| wildcard(name, part)))
-            || self.paths.iter().any(|entry| entry.len() <= parts.len() && entry.iter().zip(&parts).all(|(pattern, part)| wildcard(pattern, part)))
+        parts
+            .iter()
+            .any(|part| self.names.iter().any(|name| wildcard(name, part)))
+            || self.paths.iter().any(|entry| {
+                entry.len() <= parts.len()
+                    && entry
+                        .iter()
+                        .zip(&parts)
+                        .all(|(pattern, part)| wildcard(pattern, part))
+            })
     }
 }
 
@@ -415,9 +505,13 @@ impl Ignore {
 fn wildcard(pattern: &[u8], text: &[u8]) -> bool {
     match (pattern.split_first(), text.split_first()) {
         (None, None) => true,
-        (Some((b'*', rest)), _) => wildcard(rest, text) || (!text.is_empty() && wildcard(pattern, &text[1..])),
+        (Some((b'*', rest)), _) => {
+            wildcard(rest, text) || (!text.is_empty() && wildcard(pattern, &text[1..]))
+        }
         (Some((b'?', rest)), Some((_, text_rest))) => wildcard(rest, text_rest),
-        (Some((expected, rest)), Some((byte, text_rest))) => expected == byte && wildcard(rest, text_rest),
+        (Some((expected, rest)), Some((byte, text_rest))) => {
+            expected == byte && wildcard(rest, text_rest)
+        }
         _ => false,
     }
 }
@@ -432,12 +526,23 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let file = directory.join(IGNORE);
         let defaults = Ignore::read(&file, "/p".into());
-        assert!(defaults.ignored(Path::new("/p/vendor/a/b.php")) && defaults.ignored(Path::new("/p/x/node_modules/y.js")));
-        assert!(!defaults.ignored(Path::new("/p/src/a.php")) && !defaults.ignored(Path::new("/elsewhere/vendor/a.php")));
+        assert!(
+            defaults.ignored(Path::new("/p/vendor/a/b.php"))
+                && defaults.ignored(Path::new("/p/x/node_modules/y.js"))
+        );
+        assert!(
+            !defaults.ignored(Path::new("/p/src/a.php"))
+                && !defaults.ignored(Path::new("/elsewhere/vendor/a.php"))
+        );
         std::fs::write(&file, "# own list\n*.log\n/storage/c?che/\n").unwrap();
         let own = Ignore::read(&file, "/p".into());
-        assert!(own.ignored(Path::new("/p/a/b.log")) && own.ignored(Path::new("/p/storage/cache/x")));
-        assert!(!own.ignored(Path::new("/p/vendor/a.php")) && !own.ignored(Path::new("/p/src/storage/cache/x")));
+        assert!(
+            own.ignored(Path::new("/p/a/b.log")) && own.ignored(Path::new("/p/storage/cache/x"))
+        );
+        assert!(
+            !own.ignored(Path::new("/p/vendor/a.php"))
+                && !own.ignored(Path::new("/p/src/storage/cache/x"))
+        );
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -451,16 +556,29 @@ mod tests {
         let (changes, mut receiver) = unbounded_channel();
         let (hooks, _hook_receiver) = unbounded_channel();
         std::thread::spawn(move || watch(watcher, &messages, &changes, &hooks));
-        sender.send(Message::Loaded(file.clone(), APP, SystemTime::now() + Duration::from_secs(3600))).unwrap();
+        sender
+            .send(Message::Loaded(
+                file.clone(),
+                APP,
+                SystemTime::now() + Duration::from_secs(3600),
+            ))
+            .unwrap();
         // The watcher thread takes its fingerprint first
         std::thread::sleep(Duration::from_millis(100));
         std::fs::write(&file, "<?php // two").unwrap();
-        sender.send(Message::Event(Ok(notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan)))).unwrap();
+        sender
+            .send(Message::Event(Ok(notify::Event::new(
+                notify::EventKind::Other,
+            )
+            .set_flag(notify::event::Flag::Rescan))))
+            .unwrap();
         let started = Instant::now();
         let changed = loop {
             match receiver.try_recv() {
                 Ok(changed) => break changed.app,
-                Err(_) if started.elapsed() < Duration::from_secs(3) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) if started.elapsed() < Duration::from_secs(3) => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
                 Err(_) => break None,
             }
         };

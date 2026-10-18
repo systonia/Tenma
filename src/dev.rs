@@ -22,13 +22,19 @@ static SETTLED: OnceLock<mpsc::Sender<()>> = OnceLock::new();
 /// The tenma.dev.php next to the script, if there is one.
 pub fn find(script: &str) -> Option<PathBuf> {
     let directory = Path::new(script).parent()?;
-    let directory = if directory.as_os_str().is_empty() { Path::new(".") } else { directory };
+    let directory = if directory.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        directory
+    };
     directory.join(FILE).canonicalize().ok()
 }
 
 /// PHP code that runs the dev script: `watch` keeps it running and waiting for changes.
 pub fn code(path: &Path, watch: bool) -> String {
-    let quoted = String::from_utf8_lossy(path.as_os_str().as_bytes()).replace('\\', "\\\\").replace('\'', "\\'");
+    let quoted = String::from_utf8_lossy(path.as_os_str().as_bytes())
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
     format!("\\Tenma\\Internal\\dev('{quoted}', {watch});")
 }
 
@@ -57,7 +63,8 @@ fn string(value: &serde_json::Value) -> String {
 
 /// exit() in a hook with --watch: tenma ends with EXIT_STATUS. Apart from php::EXIT, which the
 /// workers wait on for exit() in the script.
-pub static EXIT: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
+pub static EXIT: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
 static EXIT_STATUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 pub fn request_exit(status: u8) {
@@ -84,7 +91,8 @@ extern "C" fn tenma_rs_dev(op: *const u8, op_len: usize, arg: *const u8, arg_len
         // {"roots": [[path, recursive], …], "directory": …}
         b"watch" => {
             let value: serde_json::Value = serde_json::from_slice(&arg).unwrap_or_default();
-            let roots: Vec<(PathBuf, bool)> = serde_json::from_value(value["roots"].clone()).unwrap_or_default();
+            let roots: Vec<(PathBuf, bool)> =
+                serde_json::from_value(value["roots"].clone()).unwrap_or_default();
             let directory = PathBuf::from(string(&value["directory"]));
             ops::spawn(async move {
                 crate::watch::roots(roots, directory).await;
@@ -117,7 +125,10 @@ extern "C" fn tenma_rs_dev(op: *const u8, op_len: usize, arg: *const u8, arg_len
             let value: serde_json::Value = serde_json::from_slice(&arg).unwrap_or_default();
             let command = Command {
                 name: string(&value["name"]),
-                command: value["command"].as_array().map(|parts| parts.iter().map(string).collect()).unwrap_or_default(),
+                command: value["command"]
+                    .as_array()
+                    .map(|parts| parts.iter().map(string).collect())
+                    .unwrap_or_default(),
                 directory: string(&value["directory"]).into(),
             };
             ops::spawn(run(command))
@@ -152,7 +163,11 @@ async fn run(command: Command) -> OpResult {
         return OpResult::Error("empty command".into());
     };
     // Relative to the project, not to tenma's working directory
-    let program = if program.contains('/') { command.directory.join(program) } else { PathBuf::from(program) };
+    let program = if program.contains('/') {
+        command.directory.join(program)
+    } else {
+        PathBuf::from(program)
+    };
     let child = tokio::process::Command::new(&program)
         .args(arguments)
         .current_dir(&command.directory)
@@ -163,7 +178,9 @@ async fn run(command: Command) -> OpResult {
         .spawn();
     let mut child = match child {
         Ok(child) => child,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return OpResult::Error(format!("{} not found", program.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return OpResult::Error(format!("{} not found", program.display()));
+        }
         Err(error) => return OpResult::Error(format!("{}: {error}", program.display())),
     };
     let _group = child.id().map(|pid| Group(pid as i32));
@@ -183,7 +200,11 @@ async fn prefixed(pipe: Option<impl AsyncRead + Unpin>, name: String, error: boo
     // Bytes, not lines(): that fails on output that is no UTF-8, and the closed pipe kills the hook
     let mut pipe = BufReader::new(pipe);
     let mut buffer = Vec::new();
-    while pipe.read_until(b'\n', &mut buffer).await.is_ok_and(|read| read > 0) {
+    while pipe
+        .read_until(b'\n', &mut buffer)
+        .await
+        .is_ok_and(|read| read > 0)
+    {
         let line = String::from_utf8_lossy(&buffer);
         let line = line.trim_end_matches(['\n', '\r']);
         if error {
