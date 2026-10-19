@@ -1934,15 +1934,40 @@ fn scratch(name: &str) -> std::path::PathBuf {
     directory
 }
 
-/// Asks until the response satisfies `expected`; a reload takes a moment.
+/// Asks until the response satisfies `expected`; a reload takes a moment, on a busy runner longer.
 fn eventually(port: u16, path: &str, expected: impl Fn(&str) -> bool) -> String {
     let started = Instant::now();
     loop {
         let response = get(port, path);
-        if expected(&response) || started.elapsed() > Duration::from_secs(5) {
+        if expected(&response) || started.elapsed() > Duration::from_secs(10) {
             return response;
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Asks until `count` responses in a row satisfy `expected`, and panics after 10 s. Each worker
+/// reloads on its own, and connections go to the workers in turn: once a run of them agrees, every
+/// worker has caught up.
+fn settled(port: u16, path: &str, count: usize, expected: impl Fn(&str) -> bool) {
+    let started = Instant::now();
+    let mut run = 0;
+    loop {
+        let response = get(port, path);
+        if expected(&response) {
+            run += 1;
+        } else {
+            run = 0;
+        }
+        if run == count {
+            return;
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            panic!("{run} of {count} in a row after 10 s, the last response: {response}");
+        }
+        if run == 0 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -1993,19 +2018,14 @@ fn watch_reloads_on_changes() {
     // No server for a while, but an interval keeps the script running: 503 from every worker, and
     // every worker serves again after the next change
     std::fs::write(&app, "<?php\nTenma::setInterval(fn () => null, 1);\n").unwrap();
-    // Waits for the new script: a worker still reloading from the syntax error answers 503 too
-    let response = eventually(port, "/", |response| {
-        response.contains("serves no requests")
+    // A worker that has not reloaded yet still answers with "three"
+    settled(port, "/", 4, |response| {
+        response.starts_with("HTTP/1.1 503") && response.contains("serves no requests")
     });
-    assert!(response.contains("serves no requests"), "{response}");
-    for _ in 0..4 {
-        assert!(get(port, "/").starts_with("HTTP/1.1 503"));
-    }
     std::fs::write(&app, script("four")).unwrap();
-    eventually(port, "/", |response| response.ends_with("four\n"));
-    for _ in 0..4 {
-        assert!(get(port, "/").ends_with("\r\n\r\nfour\n"));
-    }
+    settled(port, "/", 4, |response| {
+        response.ends_with("\r\n\r\nfour\n")
+    });
     let _ = std::fs::remove_dir_all(directory);
 }
 
