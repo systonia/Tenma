@@ -47,6 +47,8 @@ typedef struct {
     uint16_t remote_port;
     tenma_str server_addr;
     uint16_t server_port;
+    /** The connection came over TLS (--tls-cert). */
+    bool https;
 } tenma_request;
 
 /** Owned by Rust after tenma_handle; free with tenma_response_free. */
@@ -2421,6 +2423,7 @@ int tenma_handle(uint32_t handler, uint64_t rid, const tenma_request *request) {
     add_assoc_long(argument, "remote_port", request->remote_port);
     add_str(argument, "server_addr", request->server_addr);
     add_assoc_long(argument, "server_port", request->server_port);
+    add_assoc_bool(argument, "https", request->https);
     array_init(&headers);
     for (size_t i = 0; i < request->header_count; i++) {
         const tenma_header *header = &request->headers[i];

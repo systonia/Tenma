@@ -68,6 +68,8 @@ Everything after the script goes to the script's `$argv`.
 | `--request-timeout SECONDS` | 30                 | time for headers and body, and for a stalled write      |
 | `--db-pool N`               | 20 / workers, 2–10 | Postgres connections per worker and URL                 |
 | `--pubsub redis://HOST`     | none               | `Tenma::publish()` through Redis, to every process      |
+| `--tls-cert FILE`           | none               | HTTPS with this certificate chain (PEM)                 |
+| `--tls-key FILE`            | none               | the private key for `--tls-cert` (PEM)                  |
 | `--server-name NAME`        | `localhost`        | `$_SERVER['SERVER_NAME']` in classic mode               |
 | `-d name=value`             |                    | a PHP setting, as with `php -d`                         |
 | `-c FILE\|DIR`              |                    | a `php.ini`, as with `php -c`                           |

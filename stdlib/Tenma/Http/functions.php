@@ -194,7 +194,7 @@ function startClassic(array $server, Request $request, int $rid): void
         'QUERY_STRING' => explode('?', $request->uri, 2)[1] ?? '',
         'SERVER_PROTOCOL' => 'HTTP/1.1',
         'SERVER_SOFTWARE' => 'tenma',
-        'REQUEST_SCHEME' => 'http',
+        'REQUEST_SCHEME' => $request->https ? 'https' : 'http',
         'REMOTE_ADDR' => $request->remoteAddress,
         'REMOTE_PORT' => (string) $request->remotePort,
         'SERVER_ADDR' => $request->serverAddress,
@@ -208,6 +208,10 @@ function startClassic(array $server, Request $request, int $rid): void
         'REQUEST_TIME' => time(),
         'REQUEST_TIME_FLOAT' => microtime(true),
     ];
+    // As under FPM: HTTPS is set only for a TLS connection
+    if ($request->https) {
+        $_SERVER['HTTPS'] = 'on';
+    }
     foreach ($request->headers as $name => $value) {
         // Headers with an underscore are dropped, otherwise x_forwarded_for would overwrite X-Forwarded-For
         if (str_contains($name, '_')) {

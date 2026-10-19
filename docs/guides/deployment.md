@@ -35,9 +35,25 @@ The request timeout protects against slowloris clients. A streaming writer or `W
 
 There is no execution timeout for CPU work. A handler that computes forever (an endless loop) is not interrupted and holds up its worker.
 
+## HTTPS
+
+With a certificate and its key, every port the script serves speaks HTTPS:
+
+```bash
+tenma --tls-cert /etc/app/fullchain.pem --tls-key /etc/app/privkey.pem --workers auto index.php
+```
+
+- Both files are PEM. The certificate file holds the chain: the server certificate first, then the intermediates.
+- Tenma reads them once at the start. A renewed certificate takes effect after a restart.
+- A wrong path, an empty file, or a key that does not belong to the certificate stops Tenma at the start with exit code 2.
+- TLS 1.2 and 1.3, HTTP/1.1 over TLS. WebSockets work as `wss://`.
+- `$request->https` is `true`. In classic mode, `$_SERVER['HTTPS']` is `on` and `$_SERVER['REQUEST_SCHEME']` is `https`.
+- A client that speaks plain HTTP to such a port gets no answer. Each worker does the handshakes of its own connections, within `--request-timeout`.
+- Ports 80 and 443 need root or the capability `CAP_NET_BIND_SERVICE` on Linux.
+
 ## Behind a reverse proxy
 
-Tenma speaks plain HTTP/1.1. Put a proxy such as Caddy or nginx in front of it for TLS, HTTP/2 and compression. A Caddyfile:
+Tenma speaks HTTP/1.1, plain or over TLS. A proxy such as Caddy or nginx in front of it adds HTTP/2, compression and certificates that renew on their own. A Caddyfile:
 
 ```caddyfile
 example.com {

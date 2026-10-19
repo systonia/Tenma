@@ -25,6 +25,7 @@ Rust:
 | `src/fs.rs`      | file operations for `Tenma\Fs`, on background threads                    |
 | `src/pubsub.rs`  | `Tenma::publish()` and `subscribe()`, through Redis with `--pubsub`      |
 | `src/files.rs`   | static files: prefixes, ETag and 304, ranges                             |
+| `src/tls.rs`     | `--tls-cert` and `--tls-key`: the TLS handshake for every connection     |
 | `src/streams.rs` | streamed responses and WebSockets                                        |
 | `src/watch.rs`   | `--watch`: which loaded files really changed (content, not timestamps)   |
 | `src/dev.rs`     | the hooks of `tenma.dev.php`                                             |

@@ -20,9 +20,11 @@ notify = { version = "8.2.0", default-features = false, features = ["macos_fseve
 percent-encoding = "2"
 redis = { version = "1", default-features = false, features = ["tokio-comp"] }
 reqwest = "0.12"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "net", "macros", "signal", "time", "sync", "fs", "io-util", "process"] }
 tokio-postgres = "0.7"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [build-dependencies]

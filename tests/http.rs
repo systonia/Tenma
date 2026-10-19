@@ -3575,3 +3575,159 @@ fn publish_through_redis_reaches_other_processes() {
         assert!(heard.ends_with("\r\n\r\na,b\n"), "{heard}");
     }
 }
+
+/// A request over TLS that trusts only the test CA of tests/fixtures/tls (cert.pem is for localhost
+/// and 127.0.0.1, valid until 2126; the CA key is not kept).
+fn get_tls(port: u16, path: &str) -> String {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+
+    let mut roots = rustls::RootCertStore::empty();
+    let ca = CertificateDer::from_pem_file("tests/fixtures/tls/ca.pem").unwrap();
+    roots.add(ca).unwrap();
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+    let name = "localhost".try_into().unwrap();
+    let client = rustls::ClientConnection::new(std::sync::Arc::new(config), name).unwrap();
+    let started = Instant::now();
+    let socket = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(socket) => break socket,
+            Err(_) if started.elapsed() < Duration::from_secs(5) => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            Err(error) => panic!("server does not respond: {error}"),
+        }
+    };
+    let mut stream = rustls::StreamOwned::new(client, socket);
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+
+    let mut response = Vec::new();
+    // The server may close without close_notify after Connection: close: what came is the answer
+    let _ = stream.read_to_end(&mut response);
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+#[test]
+fn serves_https_with_tls_cert_and_key() {
+    let port = 18_171;
+    let directory = scratch("tls");
+    let app = directory.join("app.php");
+    std::fs::write(
+        &app,
+        format!("<?php\nTenma::serve({port}, fn ($request) => $request->https ? \"https\\n\" : \"http\\n\");\n"),
+    )
+    .unwrap();
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([
+                "--tls-cert",
+                "tests/fixtures/tls/cert.pem",
+                "--tls-key",
+                "tests/fixtures/tls/key.pem",
+            ])
+            .arg(&app)
+            .spawn()
+            .unwrap(),
+    );
+
+    let response = get_tls(port, "/");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("\r\n\r\nhttps\n"), "{response}");
+
+    // Plain HTTP on that port gets no answer, the handshake fails
+    let mut plain = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    plain
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    plain
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut answer = Vec::new();
+    let _ = plain.read_to_end(&mut answer);
+    assert!(
+        !answer.starts_with(b"HTTP/"),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+
+    // The server still serves TLS after the failed handshake
+    assert!(get_tls(port, "/").ends_with("https\n"));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn classic_mode_sets_https_over_tls() {
+    let port = 18_172;
+    let directory = scratch("tls-classic");
+    let app = directory.join("app.php");
+    std::fs::write(
+        &app,
+        format!("<?php\nTenma::serveClassic({port}, function () {{\n    echo ($_SERVER['HTTPS'] ?? 'off') . ' ' . $_SERVER['REQUEST_SCHEME'] . \"\\n\";\n}});\n"),
+    )
+    .unwrap();
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([
+                "--tls-cert",
+                "tests/fixtures/tls/cert.pem",
+                "--tls-key",
+                "tests/fixtures/tls/key.pem",
+            ])
+            .arg(&app)
+            .spawn()
+            .unwrap(),
+    );
+    let response = get_tls(port, "/");
+    assert!(response.ends_with("\r\n\r\non https\n"), "{response}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn tls_options_are_checked_at_the_start() {
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args(args)
+            .arg("tests/fixtures/hello.php")
+            .env("PORT", "18173")
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    let (code, error) = run(&["--tls-cert", "tests/fixtures/tls/cert.pem"]);
+    assert_eq!(code, Some(2), "{error}");
+    assert!(
+        error.contains("--tls-cert and --tls-key go together"),
+        "{error}"
+    );
+
+    let (code, error) = run(&[
+        "--tls-cert",
+        "missing.pem",
+        "--tls-key",
+        "tests/fixtures/tls/key.pem",
+    ]);
+    assert_eq!(code, Some(2), "{error}");
+    assert!(error.contains("--tls-cert missing.pem"), "{error}");
+
+    // A key that does not belong to the certificate
+    let (code, error) = run(&[
+        "--tls-cert",
+        "tests/fixtures/tls/ca.pem",
+        "--tls-key",
+        "tests/fixtures/tls/key.pem",
+    ]);
+    assert_eq!(code, Some(2), "{error}");
+    assert!(error.contains("do not fit together"), "{error}");
+}

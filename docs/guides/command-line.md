@@ -30,22 +30,24 @@ tenma --version
 
 Options come before the script. Each takes its value as the next argument.
 
-| Option                         | Default            | Does                                                                                         |
-| ------------------------------ | ------------------ | -------------------------------------------------------------------------------------------- |
-| `--workers N`, `-w N`          | `1`                | worker threads, each with its own PHP interpreter and state; `auto` starts one per CPU core  |
-| `--max-body SIZE`              | `10m`              | largest request body and WebSocket message; bytes, or with `k`, `m`, `g`; 413 above it       |
-| `--max-requests N`             | none               | a worker restarts its interpreter after N requests                                           |
-| `--max-connections N`          | `1024`             | open connections per worker; more get a 503 at once                                          |
-| `--request-timeout SECONDS`    | `30`               | time for headers and body to arrive (408 or disconnect), and for a stalled write to a client |
-| `--db-pool N`                  | 20 / workers, 2–10 | Postgres connections per worker and URL                                                      |
-| `--pubsub redis://HOST`        | none               | `Tenma::publish()` goes through Redis and reaches every process                              |
-| `--server-name NAME`           | `localhost`        | `$_SERVER['SERVER_NAME']` in [classic mode](classic-mode.md)                                 |
-| `-d name=value`                |                    | a PHP setting, also written `-dname=value`; any number of times                              |
-| `-c FILE\|DIR`                 |                    | the `php.ini` to read, or the directory that holds it                                        |
-| `--watch`                      |                    | reloads on changes and runs the hooks of `tenma.dev.php` ([Watch mode](watch.md))            |
-| `--inspect[=[HOST:]PORT]`      | `127.0.0.1:9229`   | starts the [debugger](debugger.md)                                                           |
-| `--inspect-wait[=[HOST:]PORT]` | `127.0.0.1:9229`   | the debugger; the script waits until the editor has set its breakpoints                      |
-| `--inspect-brk[=[HOST:]PORT]`  | `127.0.0.1:9229`   | the debugger; the script waits, then stops at its first line                                 |
+| Option                         | Default            | Does                                                                                             |
+| ------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------ |
+| `--workers N`, `-w N`          | `1`                | worker threads, each with its own PHP interpreter and state; `auto` starts one per CPU core      |
+| `--max-body SIZE`              | `10m`              | largest request body and WebSocket message; bytes, or with `k`, `m`, `g`; 413 above it           |
+| `--max-requests N`             | none               | a worker restarts its interpreter after N requests                                               |
+| `--max-connections N`          | `1024`             | open connections per worker; more get a 503 at once                                              |
+| `--request-timeout SECONDS`    | `30`               | time for headers and body to arrive (408 or disconnect), and for a stalled write to a client     |
+| `--db-pool N`                  | 20 / workers, 2–10 | Postgres connections per worker and URL                                                          |
+| `--pubsub redis://HOST`        | none               | `Tenma::publish()` goes through Redis and reaches every process                                  |
+| `--tls-cert FILE`              | none               | serves HTTPS with this certificate chain (PEM); needs `--tls-key` ([HTTPS](deployment.md#https)) |
+| `--tls-key FILE`               | none               | the private key of the certificate (PEM)                                                         |
+| `--server-name NAME`           | `localhost`        | `$_SERVER['SERVER_NAME']` in [classic mode](classic-mode.md)                                     |
+| `-d name=value`                |                    | a PHP setting, also written `-dname=value`; any number of times                                  |
+| `-c FILE\|DIR`                 |                    | the `php.ini` to read, or the directory that holds it                                            |
+| `--watch`                      |                    | reloads on changes and runs the hooks of `tenma.dev.php` ([Watch mode](watch.md))                |
+| `--inspect[=[HOST:]PORT]`      | `127.0.0.1:9229`   | starts the [debugger](debugger.md)                                                               |
+| `--inspect-wait[=[HOST:]PORT]` | `127.0.0.1:9229`   | the debugger; the script waits until the editor has set its breakpoints                          |
+| `--inspect-brk[=[HOST:]PORT]`  | `127.0.0.1:9229`   | the debugger; the script waits, then stops at its first line                                     |
 
 Numbers must be above 0. `--request-timeout` also takes fractions such as `0.5`. With `--inspect` and more than one worker, Tenma prints `tenma: --inspect runs one worker` and runs one. [Configuration and php.ini](configuration.md) explains `-d` and `-c`.
 

@@ -22,8 +22,10 @@ final class Request
     /** Address and port the connection arrived on. */
     public readonly string $serverAddress;
     public readonly int $serverPort;
+    /** Whether the connection came over TLS, with --tls-cert. Behind a proxy that ends TLS it is false. */
+    public readonly bool $https;
 
-    /** @param array{method: string, uri: string, headers: array<string, string>, body: string, remote_addr: string, remote_port: int, server_addr: string, server_port: int} $raw */
+    /** @param array{method: string, uri: string, headers: array<string, string>, body: string, remote_addr: string, remote_port: int, server_addr: string, server_port: int, https?: bool} $raw */
     public function __construct(array $raw)
     {
         $this->method = $raw['method'];
@@ -41,6 +43,7 @@ final class Request
         $this->remotePort = $raw['remote_port'];
         $this->serverAddress = $raw['server_addr'];
         $this->serverPort = $raw['server_port'];
+        $this->https = $raw['https'] ?? false;
     }
 
     /**

@@ -86,6 +86,14 @@ Address and port the connection arrived on.
 public readonly int $serverPort;
 ```
 
+### $https
+
+```php
+public readonly bool $https;
+```
+
+Whether the connection came over TLS, with --tls-cert. Behind a proxy that ends TLS it is false.
+
 ## Methods
 
 ### __construct()
@@ -96,7 +104,7 @@ public function __construct(array $raw)
 
 **Parameters**
 
-- `$raw` `array{method: string, uri: string, headers: array<string, string>, body: string, remote_addr: string, remote_port: int, server_addr: string, server_port: int}`
+- `$raw` `array{method: string, uri: string, headers: array<string, string>, body: string, remote_addr: string, remote_port: int, server_addr: string, server_port: int, https?: bool}`
 
 ### host()
 

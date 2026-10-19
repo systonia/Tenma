@@ -69,6 +69,7 @@ Tenma::serve(8080, function (Request $request): Response {
 | `host()`                      | the Host header without port, otherwise the server address                             |
 | `remoteAddress`, `remotePort` | the client, or the proxy in front of it                                                |
 | `serverAddress`, `serverPort` | the address and port the connection arrived on                                         |
+| `https`                       | whether the connection came over TLS ([HTTPS](deployment.md#https))                    |
 | `body`                        | the raw body                                                                           |
 | `json()`                      | the body decoded as JSON into arrays                                                   |
 | `form()`                      | fields of `application/x-www-form-urlencoded` and `multipart/form-data`, like `$_POST` |

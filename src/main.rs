@@ -17,6 +17,7 @@ mod php;
 mod pubsub;
 mod stdlib;
 mod streams;
+mod tls;
 mod watch;
 
 use std::cell::{Cell, RefCell};
@@ -40,7 +41,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--tls-cert FILE --tls-key FILE] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -263,6 +264,8 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
     };
     let mut argv = Vec::new();
     let mut pool = None;
+    let mut certificate = None;
+    let mut key = None;
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
@@ -335,6 +338,8 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
             }
             "--server-name" => php::set_server_name(&value("--server-name")?)?,
             "--pubsub" => pubsub::use_redis(&value("--pubsub")?)?,
+            "--tls-cert" => certificate = Some(value("--tls-cert")?),
+            "--tls-key" => key = Some(value("--tls-key")?),
             "--max-requests" => {
                 let number = value("--max-requests")?;
                 options.max_requests = Some(
@@ -360,6 +365,11 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
     if options.inspect.is_some() && options.workers > 1 {
         eprintln!("tenma: --inspect runs one worker");
         options.workers = 1;
+    }
+    match (certificate, key) {
+        (Some(certificate), Some(key)) => tls::configure(&certificate, &key)?,
+        (None, None) => {}
+        _ => return Err("--tls-cert and --tls-key go together".into()),
     }
     // About 20 connections in all by default, Postgres allows 100: ten workers with ten each ran out of them
     db::POOL_SIZE.store(
@@ -784,23 +794,39 @@ fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options
     })
 }
 
+/// A connection, plain or TLS, where its type does not matter.
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+
 /// Answers a connection no script serves with 503, without keep-alive: it gets its answer and ends.
+/// With --tls-cert after the handshake, or the client could not read the answer.
 fn refuse(
     stream: std::net::TcpStream,
     options: Options,
     message: &'static str,
-) -> Option<impl std::future::Future<Output = Result<(), hyper::Error>> + Send + 'static> {
+) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
     let stream = TcpStream::from_std(stream).ok()?;
-    let service = service_fn(move |_| async move {
-        Ok::<_, Infallible>(plain(StatusCode::SERVICE_UNAVAILABLE, message))
-    });
-    Some(
+    let answer = move |stream: Box<dyn Io>| {
+        let service = service_fn(move |_| async move {
+            Ok::<_, Infallible>(plain(StatusCode::SERVICE_UNAVAILABLE, message))
+        });
         http1::Builder::new()
             .timer(hyper_util::rt::TokioTimer::new())
             .header_read_timeout(options.request_timeout)
             .keep_alive(false)
-            .serve_connection(TokioIo::new(stream), service),
-    )
+            .serve_connection(TokioIo::new(stream), service)
+    };
+    Some(async move {
+        let Some(acceptor) = tls::acceptor() else {
+            let _ = answer(Box::new(stream)).await;
+            return;
+        };
+        let handshake = tokio::time::timeout(options.request_timeout, acceptor.accept(stream));
+        if let Ok(Ok(stream)) = handshake.await {
+            let _ = answer(Box::new(stream)).await;
+        }
+    })
 }
 
 /// A script without servers: the event loop runs while timers or other ops are pending.
@@ -953,22 +979,18 @@ fn serve(
                     let peers = (remote, local);
                     let counter = Rc::clone(&open);
                     let service = service_fn(move |request| respond(handler, mounts.clone(), request, options, peers, Rc::clone(&counter)));
-                    let mut drained = drained.clone();
+                    let drained = drained.clone();
                     let open = Open::count(&open);
                     tokio::task::spawn_local(async move {
                         let _open = open;
-                        let connection = http1::Builder::new()
-                            .timer(hyper_util::rt::TokioTimer::new())
-                            .header_read_timeout(options.request_timeout)
-                            .serve_connection(TokioIo::new(WriteTimeout::new(stream, options.request_timeout)), service)
-                            .with_upgrades();
-                        tokio::pin!(connection);
-                        tokio::select! {
-                            _ = connection.as_mut() => {}
-                            _ = drained.changed() => {
-                                connection.as_mut().graceful_shutdown();
-                                let _ = connection.await;
-                            }
+                        let Some(acceptor) = tls::acceptor() else {
+                            serve_http(stream, service, options, drained).await;
+                            return;
+                        };
+                        // A client that never finishes the handshake is gone after the request timeout
+                        let handshake = tokio::time::timeout(options.request_timeout, acceptor.accept(stream));
+                        if let Ok(Ok(stream)) = handshake.await {
+                            serve_http(stream, service, options, drained).await;
                         }
                     });
                 }
@@ -992,6 +1014,34 @@ fn serve(
     drop(local);
     runtime.shutdown_timeout(Duration::from_millis(100));
     stop
+}
+
+/// Serves HTTP on one connection, plain or after the TLS handshake, until it ends; once the worker
+/// drains, it finishes the running request and closes.
+async fn serve_http<S, H>(
+    stream: S,
+    service: H,
+    options: Options,
+    mut drained: tokio::sync::watch::Receiver<()>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    H: hyper::service::HttpService<Incoming, ResBody = ResponseBody>,
+    H::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let stream = WriteTimeout::new(stream, options.request_timeout);
+    let connection = http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(options.request_timeout)
+        .serve_connection(TokioIo::new(stream), service)
+        .with_upgrades();
+    tokio::pin!(connection);
+    tokio::select! {
+        _ = connection.as_mut() => {}
+        _ = drained.changed() => {
+            connection.as_mut().graceful_shutdown();
+            let _ = connection.await;
+        }
+    }
 }
 
 /// Accepts connections and hands them to the workers round-robin.
@@ -1039,14 +1089,14 @@ impl Drop for Open {
 
 /// A connection whose writes may stall at most $limit: a client that stops reading is disconnected
 /// instead of holding its task, its buffers and a stream writer that waits for room forever.
-struct WriteTimeout {
-    stream: TcpStream,
+struct WriteTimeout<S> {
+    stream: S,
     limit: Duration,
     stalled: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
-impl WriteTimeout {
-    fn new(stream: TcpStream, limit: Duration) -> Self {
+impl<S> WriteTimeout<S> {
+    fn new(stream: S, limit: Duration) -> Self {
         Self {
             stream,
             limit,
@@ -1077,7 +1127,7 @@ impl WriteTimeout {
     }
 }
 
-impl tokio::io::AsyncRead for WriteTimeout {
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for WriteTimeout<S> {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
         context: &mut std::task::Context<'_>,
@@ -1087,7 +1137,7 @@ impl tokio::io::AsyncRead for WriteTimeout {
     }
 }
 
-impl tokio::io::AsyncWrite for WriteTimeout {
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for WriteTimeout<S> {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
         context: &mut std::task::Context<'_>,
@@ -1184,6 +1234,7 @@ async fn respond(
         body: &body,
         remote: peers.0,
         local: peers.1,
+        https: tls::acceptor().is_some(),
     };
     // PHP runs on the loop thread until the handler responds or its fiber waits for an op
     let failed = || {
