@@ -3921,3 +3921,94 @@ fn sighup_reloads_the_certificate() {
     drop(server);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn https_speaks_http2_when_the_client_offers_it() {
+    let port = 18_178;
+    let directory = scratch("http2");
+    let app = directory.join("app.php");
+    std::fs::write(
+        &app,
+        format!(
+            "<?php\nTenma::serve({port}, function ($request) {{\n    Tenma::sleep(0.3);\n    return $request->protocol . ' ' . $request->host() . ' ' . $request->uri . \"\\n\";\n}});\n"
+        ),
+    )
+    .unwrap();
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([
+                "--tls-cert",
+                "tests/fixtures/tls/cert.pem",
+                "--tls-key",
+                "tests/fixtures/tls/key.pem",
+            ])
+            .arg(&app)
+            .spawn()
+            .unwrap(),
+    );
+    // Without h2 in ALPN the client gets HTTP/1.1 as before
+    assert!(get_tls(port, "/").ends_with("\r\n\r\nHTTP/1.1 localhost /\n"));
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (bodies, elapsed) = runtime.block_on(http2_get_both(port));
+    assert_eq!(bodies[0], "HTTP/2 localhost /a?b=1\n");
+    assert_eq!(bodies[1], "HTTP/2 localhost /c\n");
+    // Two streams on one connection run at the same time: about 0.3 s, not 0.6
+    assert!(elapsed < Duration::from_millis(550), "{elapsed:?}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// Two requests as streams of one HTTP/2 connection, sent together; their bodies and the time both took.
+async fn http2_get_both(port: u16) -> (Vec<String>, Duration) {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_file("tests/fixtures/tls/ca.pem").unwrap())
+        .unwrap();
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let name = "localhost".try_into().unwrap();
+    let stream = connector.connect(name, socket).await.unwrap();
+    assert_eq!(stream.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+
+    let (client, connection) = h2::client::handshake(stream).await.unwrap();
+    tokio::spawn(connection);
+    let mut client = client.ready().await.unwrap();
+
+    let started = Instant::now();
+    let mut responses = Vec::new();
+    for path in ["/a?b=1", "/c"] {
+        let request = hyper::Request::get(format!("https://localhost:{port}{path}"))
+            .body(())
+            .unwrap();
+        let (response, _) = client.send_request(request, true).unwrap();
+        responses.push(response);
+    }
+    let mut bodies = Vec::new();
+    for response in responses {
+        let mut body = response.await.unwrap().into_body();
+        let mut text = Vec::new();
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk.unwrap();
+            let _ = body.flow_control().release_capacity(chunk.len());
+            text.extend_from_slice(&chunk);
+        }
+        bodies.push(String::from_utf8(text).unwrap());
+    }
+    (bodies, started.elapsed())
+}

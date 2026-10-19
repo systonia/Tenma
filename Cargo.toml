@@ -12,7 +12,7 @@ bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 http-body-util = "0.1"
 httpdate = "1"
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 mime_guess = "2"
@@ -26,6 +26,9 @@ tokio = { version = "1", features = ["rt", "net", "macros", "signal", "time", "s
 tokio-postgres = "0.7"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
+[dev-dependencies]
+h2 = "0.4"
 
 [build-dependencies]
 cc = "1"

@@ -1028,7 +1028,12 @@ fn serve(
                         };
                         // A client that never finishes the handshake is gone after the request timeout
                         let handshake = tokio::time::timeout(options.request_timeout, acceptor.accept(stream));
-                        if let Ok(Ok(stream)) = handshake.await {
+                        let Ok(Ok(stream)) = handshake.await else {
+                            return;
+                        };
+                        if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
+                            serve_h2(stream, service, options, drained).await;
+                        } else {
                             serve_http(stream, service, options, drained).await;
                         }
                     });
@@ -1080,6 +1085,47 @@ async fn serve_http<S, H>(
             connection.as_mut().graceful_shutdown();
             let _ = connection.await;
         }
+    }
+}
+
+/// Serves HTTP/2 on a TLS connection whose client chose it. Each request is a stream of its own, on
+/// this worker's thread; once the worker drains, the client is told to open no new streams.
+async fn serve_h2<S, H>(
+    stream: S,
+    service: H,
+    options: Options,
+    mut drained: tokio::sync::watch::Receiver<()>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
+    H: hyper::service::HttpService<Incoming, ResBody = ResponseBody>,
+    LocalExecutor: hyper::rt::bounds::Http2ServerConnExec<H::Future, ResponseBody>,
+{
+    // ponytail: --request-timeout covers stalled writes here, not slow request headers; hyper's
+    // HTTP/2 server has no header timeout per stream, a keep-alive ping would close dead connections
+    let stream = WriteTimeout::new(stream, options.request_timeout);
+    let connection = hyper::server::conn::http2::Builder::new(LocalExecutor)
+        .timer(hyper_util::rt::TokioTimer::new())
+        .serve_connection(TokioIo::new(stream), service);
+    tokio::pin!(connection);
+    tokio::select! {
+        _ = connection.as_mut() => {}
+        _ = drained.changed() => {
+            connection.as_mut().graceful_shutdown();
+            let _ = connection.await;
+        }
+    }
+}
+
+/// Runs the streams of an HTTP/2 connection on the worker's thread, where PHP is.
+#[derive(Clone, Copy)]
+struct LocalExecutor;
+
+impl<F> hyper::rt::Executor<F> for LocalExecutor
+where
+    F: std::future::Future + 'static,
+{
+    fn execute(&self, future: F) {
+        tokio::task::spawn_local(future);
     }
 }
 
@@ -1261,7 +1307,23 @@ async fn respond(
         ));
     }
     let upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
-    let uri = parts.uri.to_string();
+    // HTTP/2 sends scheme and host in the request line (:scheme, :authority), not as a Host header
+    let uri = parts
+        .uri
+        .path_and_query()
+        .map_or("/", |path| path.as_str())
+        .to_owned();
+    if !parts.headers.contains_key(hyper::header::HOST)
+        && let Some(authority) = parts.uri.authority()
+        && let Ok(host) = hyper::header::HeaderValue::from_str(authority.as_str())
+    {
+        parts.headers.insert(hyper::header::HOST, host);
+    }
+    let protocol = match parts.version {
+        hyper::Version::HTTP_2 => "HTTP/2",
+        hyper::Version::HTTP_10 => "HTTP/1.0",
+        _ => "HTTP/1.1",
+    };
     let request = php::Request {
         method: parts.method.as_str().as_bytes(),
         uri: uri.as_bytes(),
@@ -1274,6 +1336,7 @@ async fn respond(
         remote: peers.0,
         local: peers.1,
         https: tls::acceptor(peers.1.port()).is_some(),
+        protocol: protocol.as_bytes(),
     };
     // PHP runs on the loop thread until the handler responds or its fiber waits for an op
     let failed = || {

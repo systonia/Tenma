@@ -46,7 +46,8 @@ tenma --tls-cert /etc/app/fullchain.pem --tls-key /etc/app/privkey.pem --workers
 - Both files are PEM. The certificate file holds the chain: the server certificate first, then the intermediates.
 - `kill -HUP` reads both files again, for a renewed certificate. New connections get it, running ones keep theirs. If the new files are broken, Tenma logs it and keeps the previous certificate.
 - A wrong path, an empty file, or a key that does not belong to the certificate stops Tenma at the start with exit code 2.
-- TLS 1.2 and 1.3, HTTP/1.1 over TLS. WebSockets work as `wss://`.
+- TLS 1.2 and 1.3. A client that offers HTTP/2 (every browser does) gets it, others get HTTP/1.1. Over HTTP/2 many requests share one connection and run at the same time, each in its own fiber.
+- WebSockets work as `wss://`. They use HTTP/1.1: a browser opens a connection of its own for them.
 - `$request->https` is `true`. In classic mode, `$_SERVER['HTTPS']` is `on` and `$_SERVER['REQUEST_SCHEME']` is `https`.
 - A client that speaks plain HTTP to such a port gets no answer. Each worker does the handshakes of its own connections, within `--request-timeout`.
 - Ports 80 and 443 need root or the capability `CAP_NET_BIND_SERVICE` on Linux.
@@ -70,7 +71,7 @@ tenma --tls-cert fullchain.pem --tls-key privkey.pem --tls-port 443 index.php
 
 ## Behind a reverse proxy
 
-Tenma speaks HTTP/1.1, plain or over TLS. A proxy such as Caddy or nginx in front of it adds HTTP/2, compression and certificates that renew on their own. A Caddyfile:
+Tenma speaks HTTP/1.1, and HTTP/2 over TLS. A proxy such as Caddy or nginx in front of it adds HTTP/3, compression and certificates that renew on their own. A Caddyfile:
 
 ```caddyfile
 example.com {

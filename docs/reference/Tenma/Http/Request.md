@@ -94,6 +94,14 @@ public readonly bool $https;
 
 Whether the connection came over TLS, with --tls-cert. Behind a proxy that ends TLS it is false.
 
+### $protocol
+
+```php
+public readonly string $protocol;
+```
+
+The version the client spoke: HTTP/1.1, HTTP/2 (over TLS) or HTTP/1.0.
+
 ## Methods
 
 ### __construct()
@@ -104,7 +112,7 @@ public function __construct(array $raw)
 
 **Parameters**
 
-- `$raw` `array{method: string, uri: string, headers: array<string, string>, body: string, remote_addr: string, remote_port: int, server_addr: string, server_port: int, https?: bool}`
+- `$raw` `array{method: string, uri: string, headers: array<string, string>, body: string, remote_addr: string, remote_port: int, server_addr: string, server_port: int, https?: bool, protocol?: string}`
 
 ### host()
 

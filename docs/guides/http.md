@@ -70,6 +70,7 @@ Tenma::serve(8080, function (Request $request): Response {
 | `remoteAddress`, `remotePort` | the client, or the proxy in front of it                                                |
 | `serverAddress`, `serverPort` | the address and port the connection arrived on                                         |
 | `https`                       | whether the connection came over TLS ([HTTPS](deployment.md#https))                    |
+| `protocol`                    | the version the client spoke: `HTTP/1.1`, `HTTP/2` (over TLS) or `HTTP/1.0`            |
 | `body`                        | the raw body                                                                           |
 | `json()`                      | the body decoded as JSON into arrays                                                   |
 | `form()`                      | fields of `application/x-www-form-urlencoded` and `multipart/form-data`, like `$_POST` |

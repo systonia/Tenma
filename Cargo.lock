@@ -1509,6 +1509,7 @@ dependencies = [
  "bytes",
  "cc",
  "futures-util",
+ "h2",
  "http-body-util",
  "httpdate",
  "hyper",

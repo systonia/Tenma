@@ -1,6 +1,6 @@
 //! --tls-cert and --tls-key: HTTPS on the ports of --tls-port, or on every port the script serves
 //! without it. The workers do the handshakes, each on its own thread. SIGHUP reads the files again,
-//! so a renewed certificate needs no restart.
+//! so a renewed certificate needs no restart. ALPN offers HTTP/2 and HTTP/1.1.
 
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
@@ -65,7 +65,8 @@ pub fn configure(certificate: String, key: String, ports: Vec<u16>) -> Result<()
         .map_err(|error| error.to_string())?
         .with_no_client_auth()
         .with_cert_resolver(current.clone());
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // A client that offers both gets HTTP/2
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     let _ = FILES.set(Files { certificate, key });
     let _ = CERTIFICATE.set(current);

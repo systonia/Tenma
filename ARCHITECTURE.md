@@ -15,21 +15,21 @@ commands, the [documentation](docs/index.md) the features.
 
 Rust:
 
-| File             | Does                                                                                          |
-| ---------------- | --------------------------------------------------------------------------------------------- |
-| `src/main.rs`    | command line, worker threads, accepting connections, the HTTP server                          |
-| `src/php.rs`     | safe wrappers around the C layer; pending requests, resuming fibers                           |
-| `src/stdlib.rs`  | loads the embedded PHP files of `stdlib/`                                                     |
-| `src/ops.rs`     | ops PHP waits for: `sleep`, `fetch`                                                           |
-| `src/db.rs`      | Postgres (a pool per worker) and Redis (one connection per URL)                               |
-| `src/fs.rs`      | file operations for `Tenma\Fs`, on background threads                                         |
-| `src/pubsub.rs`  | `Tenma::publish()` and `subscribe()`, through Redis with `--pubsub`                           |
-| `src/files.rs`   | static files: prefixes, ETag and 304, ranges                                                  |
-| `src/tls.rs`     | `--tls-cert`, `--tls-key` and `--tls-port`: the TLS handshake, SIGHUP reloads the certificate |
-| `src/streams.rs` | streamed responses and WebSockets                                                             |
-| `src/watch.rs`   | `--watch`: which loaded files really changed (content, not timestamps)                        |
-| `src/dev.rs`     | the hooks of `tenma.dev.php`                                                                  |
-| `src/inspect.rs` | `--inspect`: the debugger, stops a worker inside PHP's statement handler                      |
+| File             | Does                                                                                                                        |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `src/main.rs`    | command line, worker threads, accepting connections, the HTTP server                                                        |
+| `src/php.rs`     | safe wrappers around the C layer; pending requests, resuming fibers                                                         |
+| `src/stdlib.rs`  | loads the embedded PHP files of `stdlib/`                                                                                   |
+| `src/ops.rs`     | ops PHP waits for: `sleep`, `fetch`                                                                                         |
+| `src/db.rs`      | Postgres (a pool per worker) and Redis (one connection per URL)                                                             |
+| `src/fs.rs`      | file operations for `Tenma\Fs`, on background threads                                                                       |
+| `src/pubsub.rs`  | `Tenma::publish()` and `subscribe()`, through Redis with `--pubsub`                                                         |
+| `src/files.rs`   | static files: prefixes, ETag and 304, ranges                                                                                |
+| `src/tls.rs`     | `--tls-cert`, `--tls-key` and `--tls-port`: the TLS handshake and ALPN (HTTP/2 or HTTP/1.1), SIGHUP reloads the certificate |
+| `src/streams.rs` | streamed responses and WebSockets                                                                                           |
+| `src/watch.rs`   | `--watch`: which loaded files really changed (content, not timestamps)                                                      |
+| `src/dev.rs`     | the hooks of `tenma.dev.php`                                                                                                |
+| `src/inspect.rs` | `--inspect`: the debugger, stops a worker inside PHP's statement handler                                                    |
 
 PHP, in `stdlib/`: one file per class, folders by namespace, the functions of a namespace in its
 `functions.php`. `build.rs` embeds every file; `src/stdlib.rs` loads them.

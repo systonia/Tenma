@@ -40,6 +40,7 @@ struct RawRequest {
     server_addr: Str,
     server_port: u16,
     https: bool,
+    protocol: Str,
 }
 
 #[repr(C)]
@@ -224,6 +225,8 @@ pub struct Request<'a> {
     pub local: std::net::SocketAddr,
     /// Whether the connection came over TLS.
     pub https: bool,
+    /// HTTP/1.1, HTTP/2 or HTTP/1.0.
+    pub protocol: &'a [u8],
 }
 
 pub struct Response {
@@ -497,6 +500,7 @@ pub fn handle(handler: u32, request: &Request) -> Outcome {
         server_addr: Str::of(local_ip.as_bytes()),
         server_port: request.local.port(),
         https: request.https,
+        protocol: Str::of(request.protocol),
     };
     let rid = next_id();
     let (sender, receiver) = oneshot::channel();

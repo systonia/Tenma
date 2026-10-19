@@ -192,7 +192,7 @@ function startClassic(array $server, Request $request, int $rid): void
         'REQUEST_METHOD' => $request->method,
         'REQUEST_URI' => $request->uri,
         'QUERY_STRING' => explode('?', $request->uri, 2)[1] ?? '',
-        'SERVER_PROTOCOL' => 'HTTP/1.1',
+        'SERVER_PROTOCOL' => $request->protocol,
         'SERVER_SOFTWARE' => 'tenma',
         'REQUEST_SCHEME' => $request->https ? 'https' : 'http',
         'REMOTE_ADDR' => $request->remoteAddress,
