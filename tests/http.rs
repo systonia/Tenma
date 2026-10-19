@@ -819,6 +819,14 @@ fn postgres_and_redis_async() {
             && inserted.contains(r#""price": 9.99"#),
         "{inserted}"
     );
+    // SHOW and EXPLAIN return rows but cannot stand inside a WITH: values come as text
+    let show = get(port, "/show");
+    assert!(
+        show.contains(r#""client_encoding": "UTF8""#)
+            && show.contains("true")
+            && show.contains("SHOW, EXPLAIN and FETCH take no parameters"),
+        "{show}"
+    );
     let numeric = get(port, "/numeric");
     assert!(
         numeric.contains(r#""big": "123456789012345678.90""#)
@@ -3730,4 +3738,50 @@ fn tls_options_are_checked_at_the_start() {
     ]);
     assert_eq!(code, Some(2), "{error}");
     assert!(error.contains("do not fit together"), "{error}");
+}
+
+#[test]
+fn fetch_errors_name_their_cause() {
+    let port = 18_174;
+    let directory = scratch("fetch-errors");
+    let app = directory.join("app.php");
+    std::fs::write(
+        &app,
+        format!(
+            r#"<?php
+Tenma::serve({port}, function ($request) {{
+    if ($request->path === '/slow') {{
+        Tenma::sleep(2);
+        return "late\n";
+    }}
+    $url = $request->path === '/timeout' ? 'http://127.0.0.1:{port}/slow' : 'http://127.0.0.1:1/';
+    try {{
+        Tenma::fetch($url, timeout: 0.2);
+        return "no error\n";
+    }} catch (RuntimeException $error) {{
+        return $error->getMessage() . "\n";
+    }}
+}});
+"#
+        ),
+    )
+    .unwrap();
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .arg(&app)
+            .spawn()
+            .unwrap(),
+    );
+
+    let timeout = get(port, "/timeout");
+    assert!(
+        timeout.ends_with("/slow: timed out after 0.2 s\n"),
+        "{timeout}"
+    );
+    let refused = get(port, "/refused");
+    assert!(
+        refused.contains("127.0.0.1:1/: cannot connect: "),
+        "{refused}"
+    );
+    let _ = std::fs::remove_dir_all(directory);
 }

@@ -21,7 +21,8 @@ final class Postgres
     }
 
     /**
-     * Rows as a list of associative arrays, values with Postgres' JSON types.
+     * Rows as a list of associative arrays, values with Postgres' JSON types. SHOW, EXPLAIN and FETCH
+     * take no parameters and return every value as a string.
      *
      * @param list<mixed> $params
      * @return list<array<string, mixed>>

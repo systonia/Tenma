@@ -223,8 +223,13 @@ fn tool(tool: stdlib::Tool, namespace: &str) -> ExitCode {
         "namespace Tenma\\Internal\\{namespace}; const VERSION = '{}';",
         env!("CARGO_PKG_VERSION")
     );
+    // A RuntimeException is the command refusing (a bad option, a page it must not overwrite): one
+    // line on stderr and status 1, not an uncaught exception with its trace
+    let command = namespace.to_lowercase();
     let call = format!(
-        "\\Tenma\\Internal\\{namespace}\\main({}, [{}]);",
+        "try {{ \\Tenma\\Internal\\{namespace}\\main({}, [{}]); }} \
+         catch (\\RuntimeException $error) {{ \
+         file_put_contents('php://stderr', 'tenma {command}: ' . $error->getMessage() . PHP_EOL); exit(1); }}",
         php_string(&binary),
         args.join(", ")
     );
@@ -238,9 +243,12 @@ fn tool(tool: stdlib::Tool, namespace: &str) -> ExitCode {
                     php::eval(&call, &format!("tenma:{}-main", namespace.to_lowercase()))
                 })
         });
+    let status = php::php_exit_status();
     php::stop();
     match ran {
         Ok(()) => ExitCode::SUCCESS,
+        // exit() or a fatal error: PHP has said why
+        Err(_) if status != 0 => ExitCode::from(status),
         Err(message) => {
             eprintln!("tenma: {message}");
             ExitCode::FAILURE

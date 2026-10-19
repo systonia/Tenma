@@ -120,6 +120,7 @@ To avoid a request per page view, keep the last answer in memory and refresh it 
 - HTTP statuses never throw. Check `status`.
 - A `RuntimeException` is thrown for DNS errors, refused connections and TLS errors.
 - It is also thrown when the connection is not established within 10 seconds, or the response is not complete within `timeout`.
+- The message starts with the URL and names the cause: `https://example.com/slow: timed out after 2.5 s`, or `http://127.0.0.1:1/: cannot connect: Connection refused (os error 61)`.
 - `json()` throws a `JsonException` on invalid JSON.
 - An invalid header name or value (a line break, a control character) throws a `ValueError`.
 - Redirects are followed.

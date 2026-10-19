@@ -69,6 +69,22 @@ return [
 ];
 ```
 
+Any program works the same way, such as a script of the project that writes a cache:
+
+```php
+<?php
+// tenma.dev.php
+
+return [
+    new Tenma\Hook(
+        inputs: ['src/**/*.php'],
+        outputs: ['var/routes.php'],
+        run: ['php', 'bin/routes.php'],
+        name: 'routes',
+    ),
+];
+```
+
 A PHP hook gets the changed paths, an empty list on the first run. It may use Tenma's async functions. This one writes a list of icons for the app to `include`:
 
 ```php

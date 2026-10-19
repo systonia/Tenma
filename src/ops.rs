@@ -175,7 +175,7 @@ extern "C" fn tenma_rs_fetch(
     spawn(async move {
         let response = match request.send().await {
             Ok(response) => response,
-            Err(error) => return OpResult::Error(error.to_string()),
+            Err(error) => return OpResult::Error(fetch_error(&error, timeout_ms)),
         };
         let status = response.status().as_u16();
         let headers = response
@@ -189,7 +189,25 @@ extern "C" fn tenma_rs_fetch(
                 headers,
                 body: body.to_vec(),
             },
-            Err(error) => OpResult::Error(error.to_string()),
+            Err(error) => OpResult::Error(fetch_error(&error, timeout_ms)),
         }
     })
+}
+
+/// reqwest's own message names the URL but not what went wrong: say whether the request ran out of
+/// time or found no server, with the cause from the bottom of the chain.
+fn fetch_error(error: &reqwest::Error, timeout_ms: u64) -> String {
+    let url = error.url().map_or_else(String::new, |url| url.to_string());
+    let mut cause: &dyn std::error::Error = error;
+    while let Some(source) = cause.source() {
+        cause = source;
+    }
+    if error.is_connect() {
+        format!("{url}: cannot connect: {cause}")
+    } else if error.is_timeout() {
+        let seconds = timeout_ms as f64 / 1000.0;
+        format!("{url}: timed out after {seconds} s")
+    } else {
+        format!("{url}: {cause}")
+    }
 }

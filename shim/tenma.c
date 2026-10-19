@@ -446,6 +446,11 @@ static void wrap_exit(void) {
     }
 }
 
+/** The status PHP would exit with: from exit(), 255 after a fatal error. */
+int tenma_exit_status(void) {
+    return EG(exit_status);
+}
+
 /** 1 if the script last run with tenma_execute ended with exit() or die(). */
 int tenma_script_exited(void) {
     return script_exited;

@@ -76,7 +76,7 @@ Results come back with JSON types:
 | `timestamptz`, dates, `uuid` | strings                                                |
 | `NULL`                       | `null`                                                 |
 
-`query()` and `first()` take statements that return rows: `SELECT`, `VALUES`, `INSERT … RETURNING` and a data-modifying `WITH`. The rows come back in the order of the statement. `SHOW` does not work there, use `SELECT current_setting('name')` instead.
+`query()` and `first()` take statements that return rows: `SELECT`, `VALUES`, `INSERT … RETURNING` and a data-modifying `WITH`. The rows come back in the order of the statement. `SHOW`, `EXPLAIN` and `FETCH` work too, but take no parameters and return every value as a string.
 
 ## Transactions
 

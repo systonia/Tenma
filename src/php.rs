@@ -61,6 +61,7 @@ unsafe extern "C" {
     fn tenma_thread_stop();
     fn tenma_started() -> c_int;
     fn tenma_script_exited() -> c_int;
+    fn tenma_exit_status() -> c_int;
     fn tenma_eval(code: *const c_char, len: usize, name: *const c_char) -> c_int;
     fn tenma_execute(path: *const c_char, argv: *const *const c_char, argc: c_int) -> c_int;
     fn tenma_handle(handler: u32, rid: u64, request: *const RawRequest) -> c_int;
@@ -365,6 +366,11 @@ pub fn request_exit(status: u8) {
 pub fn forget_exit() {
     EXIT_STATUS.store(-1, std::sync::atomic::Ordering::Relaxed);
     let _ = futures_util::FutureExt::now_or_never(EXIT.notified());
+}
+
+/// The status PHP itself would exit with: from exit(), 255 after a fatal error, otherwise 0.
+pub fn php_exit_status() -> u8 {
+    (unsafe { tenma_exit_status() } & 0xff) as u8
 }
 
 /// The status of exit() outside a request, if it ran.

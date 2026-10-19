@@ -139,6 +139,17 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
             $db->query("WITH moved AS (UPDATE $table SET amount = amount + \$1 RETURNING id, amount) SELECT amount FROM moved ORDER BY id DESC", [1]),
             $db->transaction(fn (Postgres $tx) => $tx->first("/* first */ WITH gone AS (DELETE FROM $table WHERE false RETURNING id) SELECT count(*)::int AS n FROM gone")),
         ],
+        '/show' => [
+            $db->first('SHOW client_encoding'),
+            count($db->query('EXPLAIN SELECT 1')) > 0,
+            (function () use ($db) {
+                try {
+                    return $db->query('SHOW client_encoding', [1]);
+                } catch (RuntimeException $error) {
+                    return $error->getMessage();
+                }
+            })(),
+        ],
         '/numeric' => $db->first('SELECT 123456789012345678.90::numeric AS big, 9.99::numeric AS small'),
         // Parameters of the app's own types: the driver looks each one up the first time it meets it
         '/types' => $db->script("DROP TYPE IF EXISTS {$table}_mood, {$table}_size; CREATE TYPE {$table}_mood AS ENUM ('happy'); CREATE TYPE {$table}_size AS ENUM ('big')"),

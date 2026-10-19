@@ -146,11 +146,14 @@ fn removes_stale_generated_pages_only() {
         .arg(&out)
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    // One line and status 1, not an uncaught exception with its trace
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("not overwriting"),
-        "{output:?}"
+        stderr.starts_with("tenma docs: ") && stderr.contains("not overwriting"),
+        "{stderr}"
     );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
     assert_eq!(
         std::fs::read_to_string(out.join("index.md")).unwrap(),
         "---\ntitle: Mine\n---\n"

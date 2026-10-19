@@ -232,6 +232,10 @@ async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result
         client.batch_execute(sql).await?;
         return Ok("null".to_owned());
     }
+    // SHOW, EXPLAIN and FETCH return rows but cannot stand inside a WITH
+    if mode == "query" && matches!(first_word(sql).as_str(), "show" | "explain" | "fetch") {
+        return utility(client, sql, params).await;
+    }
     let params = text_params(params);
     let refs: Vec<&(dyn ToSql + Sync)> = params
         .iter()
@@ -267,9 +271,41 @@ async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result
     Ok(exact_numbers(row.get(0)))
 }
 
-/// Whether the statement starts with WITH and mentions INSERT, UPDATE, DELETE or MERGE. One that only
-/// mentions them (in a string, a comment) takes the CREATE TABLE AS path as well, with the same result.
-fn modifying_with(sql: &str) -> bool {
+/// SHOW, EXPLAIN or FETCH: through the simple query protocol, which takes no parameters and returns
+/// every value as text. The rows as a JSON array of objects, columns in their order.
+async fn utility(client: &Client, sql: &str, params: &[Value]) -> Result<String, Failure> {
+    if !params.is_empty() {
+        return Err("SHOW, EXPLAIN and FETCH take no parameters".into());
+    }
+    let mut rows = Vec::new();
+    for message in client.simple_query(sql).await? {
+        let tokio_postgres::SimpleQueryMessage::Row(row) = message else {
+            continue;
+        };
+        let columns: Vec<String> = row
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                let name = serde_json::Value::from(column.name());
+                let value = serde_json::Value::from(row.get(index));
+                format!("{name}:{value}")
+            })
+            .collect();
+        rows.push(format!("{{{}}}", columns.join(",")));
+    }
+    Ok(format!("[{}]", rows.join(",")))
+}
+
+/// The first word of the statement, lowercase, after comments.
+fn first_word(sql: &str) -> String {
+    words(skip_comments(sql))
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+fn skip_comments(sql: &str) -> &str {
     let mut rest = sql;
     loop {
         rest = rest.trim_start();
@@ -278,16 +314,24 @@ fn modifying_with(sql: &str) -> bool {
         } else if let Some(comment) = rest.strip_prefix("/*") {
             rest = comment.split_once("*/").map_or("", |(_, after)| after);
         } else {
-            break;
+            return rest;
         }
     }
-    let words = |text: &str| {
-        text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .map(str::to_ascii_lowercase)
-            .collect::<Vec<_>>()
-    };
-    words(rest).first().is_some_and(|word| word == "with")
-        && words(rest)
+}
+
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// Whether the statement starts with WITH and mentions INSERT, UPDATE, DELETE or MERGE. One that only
+/// mentions them (in a string, a comment) takes the CREATE TABLE AS path as well, with the same result.
+fn modifying_with(sql: &str) -> bool {
+    let words = words(skip_comments(sql));
+    words.first().is_some_and(|word| word == "with")
+        && words
             .iter()
             .any(|word| matches!(word.as_str(), "insert" | "update" | "delete" | "merge"))
 }
