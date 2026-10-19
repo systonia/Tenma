@@ -22,7 +22,7 @@ tenma --version
 | `tenma lsp`                        | the [language server](language-server.md), on stdin and stdout                                                           |
 | `tenma docs [paths] [--out <dir>]` | writes [reference pages](reference-docs.md), into `docs/reference` by default                                            |
 | `tenma --stubs [DIR]`              | prints Tenma's PHP API as stubs, or writes one file per class to DIR (see [Stubs for IDEs](#stubs-for-ides-and-phpstan)) |
-| `tenma --version`, `tenma -v`      | prints the Tenma and PHP versions, such as `tenma 0.1.19 (PHP 8.5.9)`                                                    |
+| `tenma --version`, `tenma -v`      | prints the Tenma and PHP versions, such as `tenma 0.1.20 (PHP 8.5.9)`                                                    |
 
 `lsp`, `docs`, `--stubs` and `--version` only count as the first argument. `build` comes after the options, so `tenma -d memory_limit=1G build` works.
 
