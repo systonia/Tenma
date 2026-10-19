@@ -44,12 +44,29 @@ tenma --tls-cert /etc/app/fullchain.pem --tls-key /etc/app/privkey.pem --workers
 ```
 
 - Both files are PEM. The certificate file holds the chain: the server certificate first, then the intermediates.
-- Tenma reads them once at the start. A renewed certificate takes effect after a restart.
+- `kill -HUP` reads both files again, for a renewed certificate. New connections get it, running ones keep theirs. If the new files are broken, Tenma logs it and keeps the previous certificate.
 - A wrong path, an empty file, or a key that does not belong to the certificate stops Tenma at the start with exit code 2.
 - TLS 1.2 and 1.3, HTTP/1.1 over TLS. WebSockets work as `wss://`.
 - `$request->https` is `true`. In classic mode, `$_SERVER['HTTPS']` is `on` and `$_SERVER['REQUEST_SCHEME']` is `https`.
 - A client that speaks plain HTTP to such a port gets no answer. Each worker does the handshakes of its own connections, within `--request-timeout`.
 - Ports 80 and 443 need root or the capability `CAP_NET_BIND_SERVICE` on Linux.
+
+With `--tls-port`, only the ports named speak HTTPS; the others stay plain HTTP. This serves the app on 443 and sends plain requests on 80 there:
+
+```php
+<?php
+
+use Tenma\Http\{Request, Response};
+
+Tenma::serve(80, fn (Request $request) => Response::redirect('https://' . $request->host() . $request->uri, 301));
+Tenma::serve(443, fn () => "Served over HTTPS\n");
+```
+
+```bash
+tenma --tls-cert fullchain.pem --tls-key privkey.pem --tls-port 443 index.php
+```
+
+`--tls-port` can be given several times. A port the script does not serve gets a warning at the start.
 
 ## Behind a reverse proxy
 
@@ -120,6 +137,7 @@ WantedBy=multi-user.target
 
 - `systemctl enable --now app` starts it. Logs go to the journal: `journalctl -u app -f`.
 - `ExecStartPre` runs a task of the same script before every start, here the migrations.
+- With `--tls-cert`, add `ExecReload=/bin/kill -HUP $MAINPID`: `systemctl reload app` then reads a renewed certificate without a restart. Without `--tls-cert`, SIGHUP ends Tenma.
 - `TimeoutStopSec` is above Tenma's 10-second drain, so running requests can finish.
 - The `.deb` installs the binary as `/usr/bin/tenma`. The tarball installs it into `~/.local/bin`; use that path instead.
 

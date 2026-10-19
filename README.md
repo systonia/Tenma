@@ -70,6 +70,7 @@ Everything after the script goes to the script's `$argv`.
 | `--pubsub redis://HOST`     | none               | `Tenma::publish()` through Redis, to every process      |
 | `--tls-cert FILE`           | none               | HTTPS with this certificate chain (PEM)                 |
 | `--tls-key FILE`            | none               | the private key for `--tls-cert` (PEM)                  |
+| `--tls-port N`              | every port         | HTTPS only on this port; any number of times            |
 | `--server-name NAME`        | `localhost`        | `$_SERVER['SERVER_NAME']` in classic mode               |
 | `-d name=value`             |                    | a PHP setting, as with `php -d`                         |
 | `-c FILE\|DIR`              |                    | a `php.ini`, as with `php -c`                           |

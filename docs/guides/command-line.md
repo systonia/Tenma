@@ -41,6 +41,7 @@ Options come before the script. Each takes its value as the next argument.
 | `--pubsub redis://HOST`        | none               | `Tenma::publish()` goes through Redis and reaches every process                                  |
 | `--tls-cert FILE`              | none               | serves HTTPS with this certificate chain (PEM); needs `--tls-key` ([HTTPS](deployment.md#https)) |
 | `--tls-key FILE`               | none               | the private key of the certificate (PEM)                                                         |
+| `--tls-port N`                 | every port         | HTTPS only on this port, plain HTTP on the others; any number of times                           |
 | `--server-name NAME`           | `localhost`        | `$_SERVER['SERVER_NAME']` in [classic mode](classic-mode.md)                                     |
 | `-d name=value`                |                    | a PHP setting, also written `-dname=value`; any number of times                                  |
 | `-c FILE\|DIR`                 |                    | the `php.ini` to read, or the directory that holds it                                            |

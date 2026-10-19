@@ -3584,9 +3584,9 @@ fn publish_through_redis_reaches_other_processes() {
     }
 }
 
-/// A request over TLS that trusts only the test CA of tests/fixtures/tls (cert.pem is for localhost
-/// and 127.0.0.1, valid until 2126; the CA key is not kept).
-fn get_tls(port: u16, path: &str) -> String {
+/// A connection over TLS that trusts only the test CA of tests/fixtures/tls (cert.pem and
+/// renewed.pem are for localhost and 127.0.0.1, valid until 2126; the CA key is not kept).
+fn tls_connect(port: u16) -> rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
     use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::PemObject;
 
@@ -3612,7 +3612,12 @@ fn get_tls(port: u16, path: &str) -> String {
             Err(error) => panic!("server does not respond: {error}"),
         }
     };
-    let mut stream = rustls::StreamOwned::new(client, socket);
+    rustls::StreamOwned::new(client, socket)
+}
+
+/// A GET over TLS; see tls_connect().
+fn get_tls(port: u16, path: &str) -> String {
+    let mut stream = tls_connect(port);
     let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).unwrap();
 
@@ -3620,6 +3625,23 @@ fn get_tls(port: u16, path: &str) -> String {
     // The server may close without close_notify after Connection: close: what came is the answer
     let _ = stream.read_to_end(&mut response);
     String::from_utf8_lossy(&response).into_owned()
+}
+
+/// The certificate the server on `port` shows in the handshake, DER.
+fn served_certificate(port: u16) -> Vec<u8> {
+    let mut stream = tls_connect(port);
+    let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    stream.write_all(request).unwrap();
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    stream.conn.peer_certificates().unwrap()[0].to_vec()
+}
+
+fn certificate_der(file: &str) -> Vec<u8> {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+
+    CertificateDer::from_pem_file(file).unwrap().to_vec()
 }
 
 #[test]
@@ -3720,6 +3742,13 @@ fn tls_options_are_checked_at_the_start() {
         "{error}"
     );
 
+    let (code, error) = run(&["--tls-port", "443"]);
+    assert_eq!(code, Some(2), "{error}");
+    assert!(
+        error.contains("--tls-port needs --tls-cert and --tls-key"),
+        "{error}"
+    );
+
     let (code, error) = run(&[
         "--tls-cert",
         "missing.pem",
@@ -3783,5 +3812,112 @@ Tenma::serve({port}, function ($request) {{
         refused.contains("127.0.0.1:1/: cannot connect: "),
         "{refused}"
     );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn tls_port_mixes_http_and_https() {
+    let (plain, secure) = (18_175, 18_176);
+    let directory = scratch("tls-ports");
+    let app = directory.join("app.php");
+    let handler =
+        "fn ($request) => ($request->https ? 'https ' : 'http ') . $request->serverPort . \"\\n\"";
+    std::fs::write(
+        &app,
+        format!("<?php\nTenma::serve({plain}, {handler});\nTenma::serve({secure}, {handler});\n"),
+    )
+    .unwrap();
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([
+                "--tls-cert",
+                "tests/fixtures/tls/cert.pem",
+                "--tls-key",
+                "tests/fixtures/tls/key.pem",
+                "--tls-port",
+                &secure.to_string(),
+            ])
+            .arg(&app)
+            .spawn()
+            .unwrap(),
+    );
+
+    let response = get(plain, "/");
+    assert!(
+        response.ends_with(&format!("\r\n\r\nhttp {plain}\n")),
+        "{response}"
+    );
+    let response = get_tls(secure, "/");
+    assert!(
+        response.ends_with(&format!("\r\n\r\nhttps {secure}\n")),
+        "{response}"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn sighup_reloads_the_certificate() {
+    let port = 18_177;
+    let directory = scratch("tls-reload");
+    let (certificate, key) = (directory.join("cert.pem"), directory.join("key.pem"));
+    std::fs::copy("tests/fixtures/tls/cert.pem", &certificate).unwrap();
+    std::fs::copy("tests/fixtures/tls/key.pem", &key).unwrap();
+    let app = directory.join("app.php");
+    std::fs::write(
+        &app,
+        format!("<?php\nTenma::serve({port}, fn () => \"ok\\n\");\n"),
+    )
+    .unwrap();
+    let log = directory.join("stderr.log");
+    let server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .arg("--tls-cert")
+            .arg(&certificate)
+            .arg("--tls-key")
+            .arg(&key)
+            .arg(&app)
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let hangup = || {
+        let pid = server.0.id().to_string();
+        let status = Command::new("kill").args(["-HUP", &pid]).status().unwrap();
+        assert!(status.success());
+    };
+    let first = certificate_der("tests/fixtures/tls/cert.pem");
+    let renewed = certificate_der("tests/fixtures/tls/renewed.pem");
+    assert!(served_certificate(port) == first);
+
+    // A renewal: new files, then SIGHUP
+    std::fs::copy("tests/fixtures/tls/renewed.pem", &certificate).unwrap();
+    std::fs::copy("tests/fixtures/tls/renewed-key.pem", &key).unwrap();
+    hangup();
+    let started = Instant::now();
+    while served_certificate(port) != renewed {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "still the old certificate"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Broken files: the renewed certificate stays, and tenma says so
+    std::fs::write(&certificate, "not a certificate").unwrap();
+    hangup();
+    let started = Instant::now();
+    while !std::fs::read_to_string(&log)
+        .unwrap()
+        .contains("keeping the previous certificate")
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no message about the broken file"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(served_certificate(port) == renewed);
+    assert!(get_tls(port, "/").ends_with("\r\n\r\nok\n"));
+    drop(server);
     let _ = std::fs::remove_dir_all(directory);
 }

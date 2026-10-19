@@ -41,7 +41,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--tls-cert FILE --tls-key FILE] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -274,6 +274,7 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
     let mut pool = None;
     let mut certificate = None;
     let mut key = None;
+    let mut tls_ports = Vec::new();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
@@ -348,6 +349,15 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
             "--pubsub" => pubsub::use_redis(&value("--pubsub")?)?,
             "--tls-cert" => certificate = Some(value("--tls-cert")?),
             "--tls-key" => key = Some(value("--tls-key")?),
+            "--tls-port" => {
+                let number = value("--tls-port")?;
+                let port = number
+                    .parse()
+                    .ok()
+                    .filter(|&port: &u16| port > 0)
+                    .ok_or(format!("--tls-port {number}: not a port"))?;
+                tls_ports.push(port);
+            }
             "--max-requests" => {
                 let number = value("--max-requests")?;
                 options.max_requests = Some(
@@ -375,8 +385,9 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         options.workers = 1;
     }
     match (certificate, key) {
-        (Some(certificate), Some(key)) => tls::configure(&certificate, &key)?,
-        (None, None) => {}
+        (Some(certificate), Some(key)) => tls::configure(certificate, key, tls_ports)?,
+        (None, None) if tls_ports.is_empty() => {}
+        (None, None) => return Err("--tls-port needs --tls-cert and --tls-key".into()),
         _ => return Err("--tls-cert and --tls-key go together".into()),
     }
     // About 20 connections in all by default, Postgres allows 100: ten workers with ten each ran out of them
@@ -490,6 +501,14 @@ fn run(argv: &[String], options: Options) -> u8 {
         .build()
         .expect("tokio does not start");
     runtime.block_on(async move {
+        for &port in tls::ports() {
+            if !ports.contains(&port) {
+                eprintln!("tenma: --tls-port {port}: the script serves no such port");
+            }
+        }
+        if tls::enabled() {
+            tokio::spawn(reload_certificate_on_hangup());
+        }
         for port in ports {
             tokio::spawn(accept(port, senders.clone()));
         }
@@ -614,6 +633,17 @@ fn spawn_worker(
 }
 
 /// Ctrl+C or SIGTERM, as sent by Docker, systemd and Kubernetes to stop.
+/// `kill -HUP`, as after a renewal: the certificate files are read again.
+async fn reload_certificate_on_hangup() {
+    let hangup = tokio::signal::unix::SignalKind::hangup();
+    let Ok(mut signals) = tokio::signal::unix::signal(hangup) else {
+        return;
+    };
+    while signals.recv().await.is_some() {
+        tls::reload();
+    }
+}
+
 async fn shutdown_signal() {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("cannot catch SIGTERM");
@@ -781,10 +811,10 @@ fn unavailable(connections: &mut UnboundedReceiver<Connection>, options: Options
         let stop = loop {
             tokio::select! {
                 connection = connections.recv() => {
-                    let Some((_, stream)) = connection else {
+                    let Some((port, stream)) = connection else {
                         break Stop::Closed;
                     };
-                    if let Some(refused) = refuse(stream, options, "The script failed to load, see the console. Waiting for changes.\n") {
+                    if let Some(refused) = refuse(port, stream, options, "The script failed to load, see the console. Waiting for changes.\n") {
                         answering.spawn(refused);
                     }
                     while answering.try_join_next().is_some() {}
@@ -810,6 +840,7 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
 /// Answers a connection no script serves with 503, without keep-alive: it gets its answer and ends.
 /// With --tls-cert after the handshake, or the client could not read the answer.
 fn refuse(
+    port: u16,
     stream: std::net::TcpStream,
     options: Options,
     message: &'static str,
@@ -826,7 +857,7 @@ fn refuse(
             .serve_connection(TokioIo::new(stream), service)
     };
     Some(async move {
-        let Some(acceptor) = tls::acceptor() else {
+        let Some(acceptor) = tls::acceptor(port) else {
             let _ = answer(Box::new(stream)).await;
             return;
         };
@@ -871,8 +902,8 @@ fn run_until_idle(
                     connection = connections.recv() => match connection {
                         None => break Err(Stop::Closed),
                         // With --watch the ports stay open while an edited script serves nothing
-                        Some((_, stream)) => {
-                            if let Some(refused) = refuse(stream, options, "The script serves no requests right now, see the console.\n") {
+                        Some((port, stream)) => {
+                            if let Some(refused) = refuse(port, stream, options, "The script serves no requests right now, see the console.\n") {
                                 tokio::task::spawn_local(refused);
                             }
                         }
@@ -972,7 +1003,7 @@ fn serve(
                     };
                     // Every connection holds memory and a file descriptor: beyond the limit a short answer
                     if open.get() >= options.max_connections {
-                        if let Some(refused) = refuse(stream, options, "Too many connections, try again later.\n") {
+                        if let Some(refused) = refuse(port, stream, options, "Too many connections, try again later.\n") {
                             tokio::task::spawn_local(refused);
                         }
                         continue;
@@ -991,7 +1022,7 @@ fn serve(
                     let open = Open::count(&open);
                     tokio::task::spawn_local(async move {
                         let _open = open;
-                        let Some(acceptor) = tls::acceptor() else {
+                        let Some(acceptor) = tls::acceptor(port) else {
                             serve_http(stream, service, options, drained).await;
                             return;
                         };
@@ -1242,7 +1273,7 @@ async fn respond(
         body: &body,
         remote: peers.0,
         local: peers.1,
-        https: tls::acceptor().is_some(),
+        https: tls::acceptor(peers.1.port()).is_some(),
     };
     // PHP runs on the loop thread until the handler responds or its fiber waits for an op
     let failed = || {
