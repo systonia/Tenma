@@ -23,7 +23,7 @@ final class Redis
         'BLPOP', 'BRPOP', 'BLMOVE', 'BRPOPLPUSH', 'BLMPOP', 'BZPOPMIN', 'BZPOPMAX', 'BZMPOP',
     ];
 
-    /** Any Redis command: $redis->command('INCR', 'orders:today'). */
+    /** Any Redis command: $redis->command('INCR', 'views:today'). */
     public function command(string $name, string|int|float ...$args): mixed
     {
         $upper = strtoupper($name);

@@ -33,7 +33,7 @@ public static function connect(string $url = 'redis://127.0.0.1:6379'): \Tenma\D
 public function command(string $name, string|int|float ...$args): mixed
 ```
 
-Any Redis command: $redis->command('INCR', 'orders:today').
+Any Redis command: $redis->command('INCR', 'views:today').
 
 **Parameters**
 

@@ -1,6 +1,6 @@
 ---
 title: "Elements"
-description: "A provider that also knows the element types of a class's array members where no PHPDoc names them, such as from attributes: tenma types the variable of a loop over such a member (`foreach ($order->lines as $line)`, also over a method's result and along chains) with them."
+description: "A provider that also knows the element types of a class's array members where no PHPDoc names them, such as from attributes: tenma types the variable of a loop over such a member (`foreach ($invoice->lines as $line)`, also over a method's result and along chains) with them."
 order: 100
 generated: true
 ---
@@ -13,7 +13,7 @@ interface Elements
 
 A provider that also knows the element types of a class's array members where no PHPDoc names
 them, such as from attributes: tenma types the variable of a loop over such a member (`foreach
-($order->lines as $line)`, also over a method's result and along chains) with them. A `@var` or
+($invoice->lines as $line)`, also over a method's result and along chains) with them. A `@var` or
 `@return` PHPDoc on the member wins. tenma asks every provider for every class it needs, whatever
 file is open, and keeps the answer until the worker restarts. Optional, next to Provider.
 

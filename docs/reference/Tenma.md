@@ -24,7 +24,7 @@ public static function serve(int $port, callable $handler, array|string|null $st
 
 Starts an HTTP server. It runs once the script has finished and keeps the process alive.
 The handler gets every request and returns a Response or a string.
-With $static, Tenma serves files itself (GET/HEAD, without PHP): ['/products' => __DIR__ . '/public/products',
+With $static, Tenma serves files itself (GET/HEAD, without PHP): ['/assets' => __DIR__ . '/public/assets',
 '/favicon.svg' => __DIR__ . '/public/favicon.svg']. Under a prefix it looks in the directory; for
 a file only its exact path matches; the longest prefix wins. Anything not found and all paths
 outside go to the handler, the latter without touching the file system. A string means ['/' => $path]:
@@ -75,7 +75,7 @@ public static function all(\Tenma\Task|callable ...$tasks): array
 ```
 
 Runs everything concurrently and returns the results with the same keys:
-Tenma::all(product: fn () => …, weather: fn () => …). If one fails, all() cancels
+Tenma::all(user: fn () => …, stats: fn () => …). If one fails, all() cancels
 the others, waits until they have cleaned up, and then throws the first error: nothing is left
 behind in the background that still uses connections, transactions or the stream.
 
@@ -92,8 +92,8 @@ public static function detach(callable $work): \Tenma\Task
 ```
 
 Like async(), but the task belongs to no request: if the client leaves or the request ends with
-exit(), it keeps running. For work that must not be left half done (payment and order,
-email after the response). A waiter that gets cancelled only stops waiting.
+exit(), it keeps running. For work that must not be left half done (a payment and its
+record, an email after the response). A waiter that gets cancelled only stops waiting.
 
 **Parameters**
 
@@ -130,7 +130,7 @@ public static function diagnostics(string $source, array $list): void
 Replaces the problems $source reports: the editor shows them at their line (through `tenma lsp`), and new
 ones go to stderr as `path:line:column: error: message`, the form problem matchers and quickfix read. An
 empty list clears them. Only under --watch, which also clears the script's lists when it reloads it;
-otherwise it does nothing. $source names the reporter: 'waypoint-live', 'bakery:checks'. A relative file
+otherwise it does nothing. $source names the reporter: 'waypoint-live', 'app:checks'. A relative file
 counts from the working directory.
 
 **Parameters**

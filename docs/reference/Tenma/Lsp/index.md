@@ -7,7 +7,7 @@ generated: true
 
 ## Types
 
-- [`Elements`](Elements.md) · interface: A provider that also knows the element types of a class's array members where no PHPDoc names them, such as from attributes: tenma types the variable of a loop over such a member (`foreach ($order->lines as $line)`, also over a method's result and along chains) with them.
+- [`Elements`](Elements.md) · interface: A provider that also knows the element types of a class's array members where no PHPDoc names them, such as from attributes: tenma types the variable of a loop over such a member (`foreach ($invoice->lines as $line)`, also over a method's result and along chains) with them.
 - [`Imports`](Imports.md) · interface: A provider that also names the imports of a file, such as a template that sees the names its class file imports: tenma resolves class names there with them (completion after `Name::`, hover, F12, `@var` types, the types of loop and assigned variables).
 - [`Provider`](Provider.md) · interface: What a package adds to `tenma lsp`, the language server that runs next to the editor's own PHP server.
 - [`Tokens`](Tokens.md) · interface: A provider that also colours what the editor's own grammar does not know, such as template syntax: tenma answers the editor's semantic tokens with these.
