@@ -23,7 +23,9 @@ case "$(uname -m)" in
   *) fail "$(uname -m) is not supported" ;;
 esac
 version=${TENMA_VERSION:-}
-[ -n "$version" ] || version=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+# The redirect of releases/latest names the tag; the API would count against its hourly limit per IP,
+# which shared CI runners use up
+[ -n "$version" ] || version=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest" | sed -n 's|.*/tag/v\(.*\)$|\1|p')
 [ -n "$version" ] || fail "cannot find the latest release"
 download="https://github.com/$repo/releases/download/v$version"
 temp=$(mktemp -d)
