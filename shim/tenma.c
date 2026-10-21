@@ -19,9 +19,14 @@
 #include <ext/standard/basic_functions.h>
 #include <ext/spl/spl_exceptions.h>
 #include <main/fopen_wrappers.h>
+#include <main/php_network.h>
 
 ZEND_EXTERN_MODULE_GLOBALS(filter)
+#include <errno.h>
+#include <pthread.h>
 #include <signal.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -709,6 +714,498 @@ static void tenma_ini_defaults(HashTable *configuration_hash) {
     }
 }
 
+/* ---------------------------------------------------------------------------------------------------
+ * Asynchronous socket streams. PHP's own transports (tcp, unix, ssl, tls) stay in charge of their
+ * descriptors and of OpenSSL; tenma only keeps every descriptor non-blocking and, wherever PHP would
+ * poll(), waits for it in an op (src/net.rs) so that only the fiber pauses. mysqlnd (PDO MySQL,
+ * mysqli), fsockopen(), stream_socket_client() and the http:// wrapper all go through here. Outside a
+ * fiber (script startup, classic mode) the wait is a poll(), as in PHP.
+ * ------------------------------------------------------------------------------------------------- */
+
+extern uint64_t tenma_rs_wait_fd(int fd, int events, int64_t timeout_ms);
+extern uint64_t tenma_rs_select(const int *fds, const int *events, size_t count, int64_t timeout_ms);
+extern int tenma_rs_looping(void);
+
+/* OpenSSL's SSL_want(): the direction a handshake or a record waits for; no header needed for one call */
+extern int SSL_want(const void *ssl);
+#define TENMA_SSL_WRITING 2
+#define TENMA_SSL_READING 3
+
+/* The start of ext/openssl's php_openssl_netstream_data_t (xp_ssl.c, PHP 8.5): what the TLS handshake needs */
+struct ssl_stream {
+    php_netstream_data_t s;
+    void *ssl_handle;
+    void *ctx;
+    struct timeval connect_timeout;
+    int enable_on_connect;
+    int is_client;
+    int ssl_active;
+    int method;
+};
+
+static int is_ssl_stream(const php_stream *stream) {
+    return stream->ops->label != NULL && strcmp(stream->ops->label, "tcp_socket/ssl") == 0;
+}
+
+/* The transport factories PHP registered, replaced by async_factory */
+static struct {
+    const char *name;
+    php_stream_transport_factory original;
+} transports[] = {
+    {"tcp", NULL}, {"unix", NULL}, {"ssl", NULL}, {"sslv3", NULL}, {"tls", NULL},
+    {"tlsv1.0", NULL}, {"tlsv1.1", NULL}, {"tlsv1.2", NULL}, {"tlsv1.3", NULL},
+};
+
+/* The ops of the streams those factories make, each with a copy whose read, write and set_option wait in ops */
+#define WRAPPED_MAX 6
+static struct {
+    const php_stream_ops *original;
+    php_stream_ops wrapped;
+} wrapped_ops[WRAPPED_MAX];
+static int wrapped_count = 0;
+static pthread_mutex_t wrapped_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static ssize_t async_read(php_stream *stream, char *buf, size_t count);
+static ssize_t async_write(php_stream *stream, const char *buf, size_t count);
+static int async_set_option(php_stream *stream, int option, int value, void *ptrparam);
+
+static const php_stream_ops *original_ops(const php_stream *stream) {
+    for (int i = 0; i < wrapped_count; i++) {
+        if (stream->ops == &wrapped_ops[i].wrapped) {
+            return wrapped_ops[i].original;
+        }
+    }
+    return stream->ops;
+}
+
+static void wrap_ops(php_stream *stream) {
+    pthread_mutex_lock(&wrapped_lock);
+    for (int i = 0; i < wrapped_count; i++) {
+        if (wrapped_ops[i].original == stream->ops || &wrapped_ops[i].wrapped == stream->ops) {
+            stream->ops = &wrapped_ops[i].wrapped;
+            pthread_mutex_unlock(&wrapped_lock);
+            return;
+        }
+    }
+    if (wrapped_count < WRAPPED_MAX) {
+        wrapped_ops[wrapped_count].original = stream->ops;
+        wrapped_ops[wrapped_count].wrapped = *stream->ops;
+        wrapped_ops[wrapped_count].wrapped.read = async_read;
+        wrapped_ops[wrapped_count].wrapped.write = async_write;
+        wrapped_ops[wrapped_count].wrapped.set_option = async_set_option;
+        stream->ops = &wrapped_ops[wrapped_count].wrapped;
+        wrapped_count++;
+    }
+    pthread_mutex_unlock(&wrapped_lock);
+}
+
+/** Calls Tenma\Internal\await($op) from C: 1 with the op's value in result, 0 if it threw (the exception is pending). */
+static int await_op(uint64_t op, zval *result) {
+    zval function, argument;
+    ZVAL_STRING(&function, "Tenma\\Internal\\await");
+    ZVAL_LONG(&argument, (zend_long) op);
+    ZVAL_UNDEF(result);
+    call_user_function(NULL, NULL, &function, result, 1, &argument);
+    zval_ptr_dtor(&function);
+    if (EG(exception)) {
+        zval_ptr_dtor(result);
+        return 0;
+    }
+    return 1;
+}
+
+static int64_t timeout_ms(const struct timeval *timeout) {
+    if (timeout == NULL || timeout->tv_sec < 0) {
+        return -1;
+    }
+    return (int64_t) timeout->tv_sec * 1000 + timeout->tv_usec / 1000;
+}
+
+/**
+ * Waits until fd is ready for events (POLLIN, POLLOUT): in a fiber as an op, so that other requests
+ * run meanwhile; otherwise with poll(). 1: ready. 0: timeout (NULL or tv_sec -1: none). -1: error,
+ * or a pending exception (the fiber was cancelled while waiting).
+ */
+static int wait_fd(int fd, int events, const struct timeval *timeout) {
+    if (EG(active_fiber) != NULL && !EG(exception) && tenma_rs_looping()) {
+        uint64_t op = tenma_rs_wait_fd(fd, events, timeout_ms(timeout));
+        if (op != 0) {
+            zval result;
+            if (!await_op(op, &result)) {
+                return -1;
+            }
+            int ready = Z_TYPE(result) == IS_STRING && zend_string_equals_literal(Z_STR(result), "ready");
+            zval_ptr_dtor(&result);
+            return ready;
+        }
+    }
+    struct timeval copy;
+    if (timeout != NULL && timeout->tv_sec >= 0) {
+        copy = *timeout;
+    }
+    for (;;) {
+        int n = php_pollfd_for(fd, events, timeout != NULL && timeout->tv_sec >= 0 ? &copy : NULL);
+        if (n > 0) {
+            return 1;
+        }
+        if (n == 0) {
+            return 0;
+        }
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+}
+
+static int would_block(ssize_t n) {
+    return n <= 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
+}
+
+/** What the socket must become for the operation to go on: for TLS the direction OpenSSL asks for. */
+static int direction(const php_stream *stream, int fallback) {
+    if (is_ssl_stream(stream)) {
+        const struct ssl_stream *ssl = stream->abstract;
+        if (ssl->ssl_active && ssl->ssl_handle != NULL) {
+            int want = SSL_want(ssl->ssl_handle);
+            if (want == TENMA_SSL_READING) {
+                return POLLIN | POLLPRI;
+            }
+            if (want == TENMA_SSL_WRITING) {
+                return POLLOUT;
+            }
+        }
+    }
+    return fallback;
+}
+
+static const struct timeval *read_timeout(const php_netstream_data_t *sock) {
+    return sock->timeout.tv_sec == -1 ? NULL : &sock->timeout;
+}
+
+static ssize_t async_read(php_stream *stream, char *buf, size_t count) {
+    const php_stream_ops *ops = original_ops(stream);
+    php_netstream_data_t *sock = stream->abstract;
+    // A stream the script set to non-blocking returns at once, as in PHP
+    if (sock == NULL || sock->socket == -1 || !sock->is_blocked) {
+        return ops->read(stream, buf, count);
+    }
+    for (;;) {
+        // The original ops poll() when they believe the stream blocks: told otherwise, they return at once
+        sock->is_blocked = 0;
+        errno = 0;
+        ssize_t n = ops->read(stream, buf, count);
+        sock->is_blocked = 1;
+        if (n > 0 || stream->eof || !would_block(n)) {
+            return n;
+        }
+        // PHP does not wait for more while the stream still holds data from an earlier read
+        if (stream->has_buffered_data) {
+            return 0;
+        }
+        int ready = wait_fd(sock->socket, direction(stream, POLLIN | POLLPRI), read_timeout(sock));
+        if (ready == 0) {
+            sock->timeout_event = 1;
+            return -1;
+        }
+        if (ready < 0) {
+            return -1;
+        }
+    }
+}
+
+static ssize_t async_write(php_stream *stream, const char *buf, size_t count) {
+    const php_stream_ops *ops = original_ops(stream);
+    php_netstream_data_t *sock = stream->abstract;
+    if (sock == NULL || sock->socket == -1 || !sock->is_blocked) {
+        return ops->write(stream, buf, count);
+    }
+    for (;;) {
+        sock->is_blocked = 0;
+        errno = 0;
+        ssize_t n = ops->write(stream, buf, count);
+        sock->is_blocked = 1;
+        if (n > 0 || count == 0 || !would_block(n)) {
+            return n;
+        }
+        int ready = wait_fd(sock->socket, direction(stream, POLLOUT), read_timeout(sock));
+        if (ready == 0) {
+            sock->timeout_event = 1;
+            return -1;
+        }
+        if (ready < 0) {
+            return -1;
+        }
+    }
+}
+
+/** The connect has begun on a non-blocking socket: waits for it and reads its outcome. */
+static void finish_connect(php_stream_xport_param *xparam, php_netstream_data_t *sock) {
+    int ready = wait_fd(sock->socket, POLLOUT, xparam->inputs.timeout);
+    if (ready <= 0) {
+        xparam->outputs.returncode = -1;
+        xparam->outputs.error_code = ready == 0 ? ETIMEDOUT : errno;
+        if (xparam->want_errortext) {
+            xparam->outputs.error_text = zend_string_init(ready == 0 ? "Connection timed out" : "Connection failed", ready == 0 ? 20 : 17, 0);
+        }
+        return;
+    }
+    int error = 0;
+    socklen_t len = sizeof(error);
+    if (getsockopt(sock->socket, SOL_SOCKET, SO_ERROR, &error, &len) != 0) {
+        error = errno;
+    }
+    xparam->outputs.returncode = error == 0 ? 0 : -1;
+    xparam->outputs.error_code = error;
+    if (error != 0 && xparam->want_errortext) {
+        char *text = php_socket_strerror(error, NULL, 0);
+        xparam->outputs.error_text = zend_string_init(text, strlen(text), 0);
+        efree(text);
+    }
+}
+
+static int async_set_option(php_stream *stream, int option, int value, void *ptrparam) {
+    const php_stream_ops *ops = original_ops(stream);
+    php_netstream_data_t *sock = stream->abstract;
+    if (sock == NULL) {
+        return ops->set_option(stream, option, value, ptrparam);
+    }
+    if (option == PHP_STREAM_OPTION_BLOCKING) {
+        // The descriptor stays non-blocking; the flag alone decides whether reads and writes wait
+        int before = sock->is_blocked;
+        sock->is_blocked = value != 0;
+        return before;
+    }
+    if (option == PHP_STREAM_OPTION_XPORT_API) {
+        php_stream_xport_param *xparam = ptrparam;
+        if (xparam->op != STREAM_XPORT_OP_CONNECT && xparam->op != STREAM_XPORT_OP_CONNECT_ASYNC) {
+            return ops->set_option(stream, option, value, ptrparam);
+        }
+        int wanted = xparam->op;
+        // ext/openssl would start the handshake on the connecting socket, which fails on macOS: after the
+        // connect instead, below
+        struct ssl_stream *ssl = is_ssl_stream(stream) ? stream->abstract : NULL;
+        int enable = ssl != NULL ? ssl->enable_on_connect : 0;
+        if (ssl != NULL) {
+            ssl->enable_on_connect = 0;
+        }
+        xparam->op = STREAM_XPORT_OP_CONNECT_ASYNC;
+        int result = ops->set_option(stream, option, value, ptrparam);
+        xparam->op = wanted;
+        if (xparam->outputs.returncode == 1 && wanted == STREAM_XPORT_OP_CONNECT) {
+            finish_connect(xparam, sock);
+            // ponytail: a name with several addresses (localhost: ::1 and 127.0.0.1) gets only its first one
+            // tried without blocking; if that fails, PHP's own connect tries the rest, blocking for the time
+            // they take. Resolving and trying every address here would remove that
+            if (xparam->outputs.returncode == -1 && !EG(exception) && sock->socket != -1) {
+                close(sock->socket);
+                sock->socket = -1;
+                if (xparam->outputs.error_text != NULL) {
+                    zend_string_release(xparam->outputs.error_text);
+                    xparam->outputs.error_text = NULL;
+                }
+                result = ops->set_option(stream, option, value, ptrparam);
+            }
+        }
+        if (ssl != NULL) {
+            ssl->enable_on_connect = enable;
+        }
+        if (sock->socket != -1) {
+            php_set_sock_blocking(sock->socket, 0);
+        }
+        if (xparam->outputs.returncode == 0 && ssl != NULL && enable && wanted == STREAM_XPORT_OP_CONNECT) {
+            if (php_stream_xport_crypto_setup(stream, ssl->method, NULL) < 0 || php_stream_xport_crypto_enable(stream, 1) < 0) {
+                php_error_docref(NULL, E_WARNING, "Failed to enable crypto");
+                xparam->outputs.returncode = -1;
+            }
+        }
+        return result;
+    }
+    if (option == PHP_STREAM_OPTION_CRYPTO_API) {
+        php_stream_xport_crypto_param *cparam = ptrparam;
+        if (cparam->op != STREAM_XPORT_CRYPTO_OP_ENABLE || !cparam->inputs.activate || !sock->is_blocked) {
+            return ops->set_option(stream, option, value, ptrparam);
+        }
+        struct ssl_stream *ssl = is_ssl_stream(stream) ? stream->abstract : NULL;
+        const struct timeval *timeout = ssl != NULL && ssl->is_client ? &ssl->connect_timeout : read_timeout(sock);
+        for (;;) {
+            sock->is_blocked = 0;
+            int result = ops->set_option(stream, option, value, ptrparam);
+            sock->is_blocked = 1;
+            // 1: done, -1: failed, 0: the handshake waits for the peer
+            if (cparam->outputs.returncode != 0) {
+                return result;
+            }
+            int ready = wait_fd(sock->socket, direction(stream, POLLIN | POLLPRI), timeout);
+            if (ready <= 0) {
+                if (ready == 0) {
+                    php_error_docref(NULL, E_WARNING, "SSL: Handshake timed out");
+                }
+                cparam->outputs.returncode = -1;
+                return result;
+            }
+        }
+    }
+    return ops->set_option(stream, option, value, ptrparam);
+}
+
+/** Makes the stream of PHP's own factory and gives it the waiting ops; servers (bind, listen) stay as they are. */
+static php_stream *async_factory(const char *proto, size_t protolen, const char *resourcename, size_t resourcenamelen,
+    const char *persistent_id, int options, int flags, struct timeval *timeout, php_stream_context *context STREAMS_DC) {
+    php_stream_transport_factory original = NULL;
+    for (size_t i = 0; i < sizeof(transports) / sizeof(transports[0]); i++) {
+        if (strlen(transports[i].name) == protolen && strncasecmp(transports[i].name, proto, protolen) == 0) {
+            original = transports[i].original;
+        }
+    }
+    if (original == NULL) {
+        return NULL;
+    }
+    php_stream *stream = original(proto, protolen, resourcename, resourcenamelen, persistent_id, options, flags, timeout, context STREAMS_REL_CC);
+    if (stream != NULL && (flags & STREAM_XPORT_SERVER) == 0 && (flags & (STREAM_XPORT_BIND | STREAM_XPORT_LISTEN)) == 0) {
+        wrap_ops(stream);
+        php_netstream_data_t *sock = stream->abstract;
+        if (sock != NULL && sock->socket != -1) {
+            php_set_sock_blocking(sock->socket, 0);
+        }
+    }
+    return stream;
+}
+
+static void register_async_transports(void) {
+    HashTable *hash = php_stream_xport_get_hash();
+    for (size_t i = 0; i < sizeof(transports) / sizeof(transports[0]); i++) {
+        php_stream_transport_factory original = zend_hash_str_find_ptr(hash, transports[i].name, strlen(transports[i].name));
+        if (original != NULL) {
+            transports[i].original = original;
+            php_stream_xport_register(transports[i].name, async_factory);
+        }
+    }
+}
+
+/* ---- stream_select() in a fiber: one op waits for the first ready descriptor ---- */
+
+static zif_handler original_stream_select = NULL;
+
+/** The descriptors of one array for select(), or -1 if a stream has none. */
+static int collect_fds(zval *array, int events, int *fds, int *fd_events, int *count, int capacity) {
+    zval *element;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(array), element) {
+        ZVAL_DEREF(element);
+        php_stream *stream;
+        php_stream_from_zval_no_verify(stream, element);
+        php_socket_t fd;
+        if (stream == NULL || *count == capacity
+            || php_stream_cast(stream, PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL, (void **) &fd, 1) == FAILURE) {
+            return -1;
+        }
+        fds[*count] = (int) fd;
+        fd_events[*count] = events;
+        (*count)++;
+    } ZEND_HASH_FOREACH_END();
+    return 0;
+}
+
+/** Keeps the streams whose byte in result has bit set; the array keeps its keys, as PHP's select does. */
+static int keep_ready(zval *array, const char *result, int *position, int bit) {
+    HashTable *kept = zend_new_array(zend_hash_num_elements(Z_ARRVAL_P(array)));
+    zend_ulong index;
+    zend_string *key;
+    zval *element;
+    int ready = 0;
+    ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(array), index, key, element) {
+        int mask = result[(*position)++] - '0';
+        if (mask & bit) {
+            zval *copy = key ? zend_hash_update(kept, key, element) : zend_hash_index_update(kept, index, element);
+            zval_add_ref(copy);
+            ready++;
+        }
+    } ZEND_HASH_FOREACH_END();
+    zval_ptr_dtor(array);
+    ZVAL_ARR(array, kept);
+    return ready;
+}
+
+/** Streams with data in their read buffer are ready at once, as in PHP's stream_select(). */
+static int buffered(zval *array) {
+    zval *element;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(array), element) {
+        ZVAL_DEREF(element);
+        php_stream *stream;
+        php_stream_from_zval_no_verify(stream, element);
+        if (stream != NULL && stream->writepos - stream->readpos > 0) {
+            return 1;
+        }
+    } ZEND_HASH_FOREACH_END();
+    return 0;
+}
+
+static ZEND_NAMED_FUNCTION(tenma_stream_select) {
+    zval *read, *write, *except;
+    zend_long sec, usec = 0;
+    bool sec_null, usec_null = 1;
+    if (EG(active_fiber) == NULL || !tenma_rs_looping()) {
+        original_stream_select(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+    ZEND_PARSE_PARAMETERS_START(4, 5)
+        Z_PARAM_ARRAY_EX2(read, 1, 1, 0)
+        Z_PARAM_ARRAY_EX2(write, 1, 1, 0)
+        Z_PARAM_ARRAY_EX2(except, 1, 1, 0)
+        Z_PARAM_LONG_OR_NULL(sec, sec_null)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG_OR_NULL(usec, usec_null)
+    ZEND_PARSE_PARAMETERS_END();
+
+    int fds[FD_SETSIZE], events[FD_SETSIZE], count = 0;
+    zval *arrays[3] = {read, write, except};
+    int bits[3] = {POLLIN | POLLPRI, POLLOUT, POLLPRI};
+    int unsupported = 0;
+    if (read != NULL && buffered(read)) {
+        unsupported = 1;
+    }
+    for (int i = 0; i < 3 && !unsupported; i++) {
+        if (arrays[i] != NULL && collect_fds(arrays[i], bits[i], fds, events, &count, FD_SETSIZE) < 0) {
+            unsupported = 1;
+        }
+    }
+    // Buffered data, a stream without a descriptor, bad arguments: PHP's own select handles them
+    if (unsupported || count == 0 || (!sec_null && (sec < 0 || usec < 0))) {
+        original_stream_select(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+    int64_t ms = sec_null ? -1 : sec * 1000 + usec / 1000;
+    uint64_t op = tenma_rs_select(fds, events, (size_t) count, ms);
+    if (op == 0) {
+        original_stream_select(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+    zval result;
+    if (!await_op(op, &result)) {
+        RETURN_THROWS();
+    }
+    if (Z_TYPE(result) != IS_STRING || Z_STRLEN(result) != (size_t) count) {
+        zval_ptr_dtor(&result);
+        RETURN_FALSE;
+    }
+    int ready = 0, position = 0;
+    int keep[3] = {1, 2, 1};
+    for (int i = 0; i < 3; i++) {
+        if (arrays[i] != NULL) {
+            ready += keep_ready(arrays[i], Z_STRVAL(result), &position, keep[i]);
+        }
+    }
+    zval_ptr_dtor(&result);
+    RETURN_LONG(ready);
+}
+
+static void wrap_stream_select(void) {
+    zend_function *function = zend_hash_str_find_ptr(CG(function_table), "stream_select", strlen("stream_select"));
+    if (function != NULL && function->type == ZEND_INTERNAL_FUNCTION) {
+        original_stream_select = function->internal_function.handler;
+        function->internal_function.handler = tenma_stream_select;
+    }
+}
+
 int tenma_start(void) {
     // Like console.log, echo reaches the console at once, even when stdout is a pipe
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -728,6 +1225,8 @@ int tenma_start(void) {
     }
     release_signals();
     wrap_exit();
+    register_async_transports();
+    wrap_stream_select();
     return 0;
 }
 

@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::c_int;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -66,6 +67,12 @@ extern "C" fn tenma_rs_op_cancel(op: u64) {
 /// Is this thread's event loop running right now? Outside of it, no ops work.
 pub fn looping() -> bool {
     IN_LOOP.get()
+}
+
+/// For the C layer: whether a wait can be an op right now.
+#[unsafe(no_mangle)]
+extern "C" fn tenma_rs_looping() -> c_int {
+    c_int::from(IN_LOOP.get())
 }
 
 pub fn in_loop<T>(run: impl FnOnce() -> T) -> T {

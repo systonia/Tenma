@@ -4025,3 +4025,116 @@ async fn http2_get_both(port: u16) -> (Vec<String>, Duration) {
     }
     (bodies, started.elapsed())
 }
+
+/// A server that answers every line half a second later; a line "never" is never answered.
+fn echo_server(port: u16) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = std::io::BufRead::read_line(&mut reader, &mut line);
+                if line.trim() == "never" {
+                    std::thread::sleep(Duration::from_secs(30));
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                let _ = stream.write_all(format!("echo:{line}").as_bytes());
+            });
+        }
+    });
+}
+
+#[test]
+fn php_sockets_suspend_only_the_fiber() {
+    let port = 18_180;
+    let echo = 18_181;
+    echo_server(echo);
+    let log = scratch("sockets").join("cancel.log");
+    let _ = std::fs::remove_file(&log);
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([
+                "--tls-cert",
+                "tests/fixtures/tls/cert.pem",
+                "--tls-key",
+                "tests/fixtures/tls/key.pem",
+                "tests/fixtures/sockets.php",
+            ])
+            .env("PORT", port.to_string())
+            .env("ECHO_PORT", echo.to_string())
+            .env("CANCEL_LOG", &log)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let tail = |path: &str| {
+        let response = get_tls(port, path);
+        response.split("\r\n\r\n").nth(1).unwrap_or("").to_owned()
+    };
+    // Three connections at once take as long as one
+    assert_eq!(tail("/three"), "echo:a,echo:b,echo:c 0.5s\n");
+    assert_eq!(tail("/select"), "select ok 0.5s\n");
+    assert_eq!(tail("/timeout"), "false timed_out=true 0.1s\n");
+    // TLS through ext/openssl, two fetches of the server's own slow page at once
+    assert_eq!(tail("/https"), "slowslow 0.5s\n");
+    assert_eq!(tail("/tls"), "tls slow 0.5s\n");
+    assert_eq!(tail("/unverified"), "refused\n");
+    // ECONNREFUSED is 61 on macOS and 111 on Linux
+    let refused = tail("/refused");
+    assert!(
+        refused == "refused 61 0s\n" || refused == "refused 111 0s\n",
+        "{refused}"
+    );
+    // The client leaves while the handler waits in fgets(): Cancelled is thrown there
+    let mut early = tls_connect(port);
+    early
+        .write_all(b"GET /cancelled HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    drop(early);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        "cancelled in fgets\n"
+    );
+    server.0.kill().unwrap();
+    let mut stdout = String::new();
+    server
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    assert_eq!(stdout, "echo:startup 0.5s\n");
+}
+
+#[test]
+fn mysql_through_mysqlnd_is_async() {
+    let port = 18_182;
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .arg("tests/fixtures/mysql.php")
+            .env("PORT", port.to_string())
+            .env(
+                "MYSQL_URL",
+                std::env::var("MYSQL_URL").unwrap_or("mysql://root@127.0.0.1:3306/tenma".into()),
+            )
+            .spawn()
+            .unwrap(),
+    );
+    if !get(port, "/setup").starts_with("HTTP/1.1 200") {
+        skip("no MySQL reachable");
+        return;
+    }
+    assert!(get(port, "/pdo").ends_with("first,first 0.5s\n"));
+    assert!(get(port, "/mysqli").ends_with("second,second 0.5s\n"));
+    let inserted = get(port, "/insert?name=pie");
+    assert!(
+        inserted.contains(r#""name": "pie""#) && inserted.contains(r#""amount": "9.99""#),
+        "{inserted}"
+    );
+}

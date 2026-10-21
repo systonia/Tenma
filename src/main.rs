@@ -12,6 +12,7 @@ mod dev;
 mod files;
 mod fs;
 mod inspect;
+mod net;
 mod ops;
 mod php;
 mod pubsub;
