@@ -28,5 +28,7 @@ new Server($port, function (Request $request) use ($port) {
         'pid' => getmypid(),
         'fetched' => $fetched->body,
         'marker' => getenv('JOURNAL_MARKER') ?: 'none',
+        // A replay runs with the recording's -d settings
+        'memory' => ini_get('memory_limit'),
     ]);
 })->start();

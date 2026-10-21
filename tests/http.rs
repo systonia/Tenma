@@ -4242,7 +4242,12 @@ fn pdo_pgsql_runs_on_tokio_postgres() {
 /// Records requests against tests/fixtures/journal.php into `directory` and returns the first journal.
 fn record_journal(port: u16, directory: &std::path::Path, extra: &[&str]) -> std::path::PathBuf {
     let user = std::env::var("USER").unwrap();
-    let mut args = vec!["--record", directory.to_str().unwrap()];
+    let mut args = vec![
+        "-d",
+        "memory_limit=77M",
+        "--record",
+        directory.to_str().unwrap(),
+    ];
     args.extend_from_slice(extra);
     args.push("tests/fixtures/journal.php");
     let mut server = Server(
@@ -4260,6 +4265,7 @@ fn record_journal(port: u16, directory: &std::path::Path, extra: &[&str]) -> std
     );
     let first = get(port, "/");
     assert!(first.contains(r#""marker": "recorded""#), "{first}");
+    assert!(first.contains(r#""memory": "77M""#), "{first}");
     if get(port, "/data").starts_with("HTTP/1.1 200") {
         assert!(get(port, "/data").contains(r#""n": 42"#));
     }

@@ -341,7 +341,12 @@ pub fn pdo_native() {
 }
 
 /// A setting like `php -d name=value`. Only before `start`.
+/// The PHP settings of the command line (-d, -c), as a journal's header records them.
+pub static SETTINGS: std::sync::Mutex<(Vec<String>, Option<String>)> =
+    std::sync::Mutex::new((Vec::new(), None));
+
 pub fn define_ini(entry: &str) -> Result<(), String> {
+    SETTINGS.lock().unwrap().0.push(entry.to_owned());
     let entry = CString::new(entry).map_err(|_| "setting contains a null byte")?;
     unsafe { tenma_define_ini(entry.as_ptr()) };
     Ok(())
@@ -349,6 +354,10 @@ pub fn define_ini(entry: &str) -> Result<(), String> {
 
 /// A php.ini like `php -c path`. Only before `start`.
 pub fn set_ini_path(path: &str) -> Result<(), String> {
+    SETTINGS.lock().unwrap().1 = Some(
+        std::fs::canonicalize(path)
+            .map_or_else(|_| path.to_owned(), |path| path.display().to_string()),
+    );
     let path = CString::new(path).map_err(|_| "path contains a null byte")?;
     unsafe { tenma_set_ini_path(path.as_ptr()) };
     Ok(())

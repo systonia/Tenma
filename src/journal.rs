@@ -514,7 +514,8 @@ impl Default for Settings {
 }
 
 /// The header of a journal: what ran where, as JSON.
-pub fn header(argv: &[String]) -> String {
+pub fn header(argv: &[String], watch: bool) -> String {
+    let (defines, ini_path) = crate::php::SETTINGS.lock().unwrap().clone();
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     let script = std::fs::canonicalize(&argv[0])
         .map_or_else(|_| argv[0].clone(), |path| path.display().to_string());
@@ -525,6 +526,10 @@ pub fn header(argv: &[String]) -> String {
         "argv": argv,
         "env": env,
         "cwd": std::env::current_dir().map_or(String::new(), |dir| dir.display().to_string()),
+        // What the PHP code can tell from its settings: --watch (tenma.watch), -d and -c
+        "watch": watch,
+        "defines": defines,
+        "ini_path": ini_path,
         "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs()),
     })
     .to_string()

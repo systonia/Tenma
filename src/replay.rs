@@ -485,6 +485,29 @@ pub fn plan(args: &[String]) -> Result<Plan, String> {
     Ok(plan)
 }
 
+/// The PHP settings of the recording from a journal's header: --watch, the -d settings, the -c path.
+pub fn recorded_settings(file: &str) -> Result<(bool, Vec<String>, Option<String>), String> {
+    let data = std::fs::read(file).map_err(|error| format!("{file}: {error}"))?;
+    let Some((Entry::Header(json), _)) = journal::decode(&data, 0) else {
+        return Err(format!("{file}: not a tenma journal"));
+    };
+    let header: serde_json::Value =
+        serde_json::from_str(&json).map_err(|error| format!("{file}: header: {error}"))?;
+    let defines = header["defines"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|d| d.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((
+        header["watch"].as_bool().unwrap_or(false),
+        defines,
+        header["ini_path"].as_str().map(str::to_owned),
+    ))
+}
+
 /// What the header says the recorded process ran: the script's argv, its environment and directory.
 pub fn recorded_run(plan: &Plan) -> Result<(Vec<String>, HashMap<String, String>, String), String> {
     let Some(Entry::Header(json)) = plan.entries.first() else {

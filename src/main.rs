@@ -167,6 +167,29 @@ fn main() -> ExitCode {
         }
     };
     streams::MAX_MESSAGE.store(options.max_body, std::sync::atomic::Ordering::Relaxed);
+    // A replay runs with the PHP settings of the recording: code that asks for tenma.watch or a -d
+    // setting takes the same branches
+    if argv.first().is_some_and(|first| first == "replay")
+        && let Some(file) = argv.get(1)
+    {
+        match replay::recorded_settings(file) {
+            Ok((watch, defines, ini_path)) => {
+                for define in defines {
+                    let _ = php::define_ini(&define);
+                }
+                if let Some(path) = ini_path {
+                    let _ = php::set_ini_path(&path);
+                }
+                if watch {
+                    watch::configure();
+                }
+            }
+            Err(message) => {
+                eprintln!("tenma: {message}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     if options.watch {
         watch::configure();
     }
@@ -929,7 +952,8 @@ fn worker(
     loop {
         if let Some(settings) = options.record
             && !dev
-            && let Err(message) = journal::start(settings, index, journal::header(argv))
+            && let Err(message) =
+                journal::start(settings, index, journal::header(argv, options.watch))
         {
             eprintln!("tenma: {message}");
             if first {
