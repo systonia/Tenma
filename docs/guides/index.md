@@ -37,6 +37,7 @@ module each, with examples you can save and run with `tenma <file>.php`. The
 - [Debugger](debugger.md): `--inspect` and editor setup
 - [Language server](language-server.md): `tenma lsp` and its provider interfaces
 - [Diagnostics](diagnostics.md): problems a running app reports to the editor
+- [Record and replay](replay.md): `--record`, `tenma replay`, stepping back in the debugger
 - [Reference pages](reference-docs.md): `tenma docs`
 
 ## Operations

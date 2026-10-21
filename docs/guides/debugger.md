@@ -91,6 +91,8 @@ Continue, step over, step into and step out work as usual. A step stays in its r
 
 Every request, timer and `Threading\Task::run()` task is a thread, named after its method and URI. While stopped, the editor lists them and shows where each waiting one waits.
 
+In a replay (`tenma --inspect-wait replay FILE`) the editor also offers step back and reverse continue: tenma replays the journal again up to the statement before, see [Record and replay](replay.md).
+
 ## Variables and evaluation
 
 - The variables of every frame show, with arrays and objects expandable.
