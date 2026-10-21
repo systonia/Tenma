@@ -234,6 +234,8 @@ thread_local! {
     static TARGET: Cell<Option<Moment>> = const { Cell::new(None) };
     /// A step back was asked for: the replay starts over once the worker gets there.
     static AGAIN: Cell<bool> = const { Cell::new(false) };
+    /// The furthest statement any pass of this replay ran: what lies before it was shown already.
+    static SEEN: Cell<u64> = const { Cell::new(0) };
 }
 
 /// A statement the worker arrived at: the same one in every replay, as the statement number, line
@@ -624,6 +626,9 @@ extern "C" fn tenma_rs_statement(
     fiber: usize,
 ) {
     STATEMENTS.set(STATEMENTS.get() + 1);
+    if !AGAIN.get() {
+        SEEN.set(SEEN.get().max(STATEMENTS.get()));
+    }
     if ENDING.load(Ordering::Relaxed) || PREVIOUS.replace((frame, line)) == (frame, line) {
         return;
     }
@@ -995,6 +1000,16 @@ extern "C" fn tenma_rs_output(text: *const u8, len: usize, log: i32) {
 
 fn output(text: &str, category: &str) {
     event("output", json!({"category": category, "output": text}));
+}
+
+/// In a replay that started over, PHP's output stays silent until it runs code no pass ran before: the
+/// editor and the terminal saw it already. Also silent while an old pass winds down.
+#[unsafe(no_mangle)]
+extern "C" fn tenma_rs_output_muted() -> std::ffi::c_int {
+    if !REPLAYING.load(Ordering::Relaxed) {
+        return 0;
+    }
+    std::ffi::c_int::from(AGAIN.get() || STATEMENTS.get() < SEEN.get())
 }
 
 /// Has a step that began at `depth` arrived at the current statement?

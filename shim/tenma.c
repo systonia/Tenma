@@ -136,7 +136,12 @@ static int inspect_mode = 0;
 /** tenma --inspect: output also goes to the editor's debug console; 1 for the error log. */
 extern void tenma_rs_output(const char *text, size_t len, int log);
 
+extern int tenma_rs_output_muted(void);
+
 static size_t tenma_ub_write(const char *str, size_t length) {
+    if (inspect_mode && tenma_rs_output_muted()) {
+        return length;
+    }
     if (classic_open) {
         smart_str_appendl(&classic_output, str, length);
         return length;
@@ -150,6 +155,9 @@ static size_t tenma_ub_write(const char *str, size_t length) {
 static void (*embed_log_message)(const char *message, int syslog_type) = NULL;
 
 static void tenma_log_message(const char *message, int syslog_type) {
+    if (tenma_rs_output_muted()) {
+        return;
+    }
     tenma_rs_output(message, strlen(message), 1);
     embed_log_message(message, syslog_type);
 }
