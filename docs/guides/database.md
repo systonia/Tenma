@@ -139,6 +139,8 @@ The default is 20 divided by the number of workers, at least 2 and at most 10 pe
 
 After every query, Tenma cleans the connection before it goes back to the pool. It runs a `ROLLBACK`, then what `DISCARD ALL` does, except dropping prepared statements. So `SET`, `SET ROLE`, `set_config()`, temporary tables, advisory locks and a forgotten `BEGIN` never leak into another request. Session state across several statements only exists inside `transaction()`.
 
+Every connection keeps the statements it prepared, up to 256. A query that ran on it before skips a round trip and the parsing in Postgres. Inside `transaction()` statements are prepared for each call, so a schema change in the transaction never meets an outdated one.
+
 ## Migrations
 
 `script()` runs a migration file as one batch. The script below applies the `.sql` files of `migrations/` in name order, each one once. All pending files run in one transaction, so a failing file leaves the database as it was. The advisory lock makes a second start wait for the first.

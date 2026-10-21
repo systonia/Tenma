@@ -15,13 +15,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::BytesMut;
 use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::{Format, IsNull, ToSql, Type, to_sql_checked};
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, NoTls, Statement};
 
 use crate::ops;
 use crate::php::{OpResult, bytes, text};
 
 type Failure = Box<dyn Error + Send + Sync>;
+
+/// The statements prepared on one connection, by SQL. They stay as long as the connection.
+type Statements = RefCell<HashMap<String, Statement>>;
+
+/// At most this many statements stay prepared per connection; beyond that a query prepares its
+/// statement for itself, as without the cache. Apps that build SQL from values fill it with one-offs.
+const STATEMENTS: usize = 256;
 
 /// At most this many Postgres connections per worker and URL (--db-pool, by default 20 / workers, from 2 to 10);
 /// anyone beyond that waits.
@@ -29,7 +37,7 @@ pub static POOL_SIZE: AtomicUsize = AtomicUsize::new(10);
 
 thread_local! {
     /// Idle Postgres connections per URL.
-    static IDLE: RefCell<HashMap<String, Vec<Client>>> = RefCell::new(HashMap::new());
+    static IDLE: RefCell<HashMap<String, Vec<(Client, Statements)>>> = RefCell::new(HashMap::new());
     /// Permits per URL: one per connection currently in use.
     static PERMITS: RefCell<HashMap<String, Arc<Semaphore>>> = RefCell::new(HashMap::new());
     /// Open transactions: a connection nobody else gets until commit or rollback.
@@ -65,8 +73,8 @@ struct Busy {
 }
 
 impl Busy {
-    fn client(&self) -> &Client {
-        &self.lease.as_ref().expect("held until done").client
+    fn lease(&self) -> &Lease {
+        self.lease.as_ref().expect("held until done")
     }
 
     /// The query is done: the connection goes back to its transaction, or to the pool.
@@ -98,9 +106,10 @@ impl Drop for Busy {
     }
 }
 
-/// A connection plus its permit from the pool; release returns both.
+/// A connection with its prepared statements, plus its permit from the pool; release returns both.
 struct Lease {
     client: Client,
+    statements: Statements,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -173,11 +182,11 @@ async fn connect(url: &str) -> Result<Lease, Failure> {
     })??;
     let idle = IDLE.with_borrow_mut(|idle| {
         idle.get_mut(url).and_then(|clients| {
-            std::iter::from_fn(|| clients.pop()).find(|client| !client.is_closed())
+            std::iter::from_fn(|| clients.pop()).find(|(client, _)| !client.is_closed())
         })
     });
-    let client = match idle {
-        Some(client) => client,
+    let (client, statements) = match idle {
+        Some(pooled) => pooled,
         None => {
             // ponytail: no TLS; postgres-native-tls once databases outside the own network come along
             let mut config: tokio_postgres::Config = url.parse()?;
@@ -186,18 +195,20 @@ async fn connect(url: &str) -> Result<Lease, Failure> {
             }
             let (client, connection) = config.connect(NoTls).await?;
             tokio::task::spawn_local(connection);
-            client
+            (client, Statements::default())
         }
     };
     Ok(Lease {
         client,
+        statements,
         _permit: permit,
     })
 }
 
 /// What DISCARD ALL does, except DEALLOCATE ALL: that would also drop the statements tokio-postgres
 /// prepared once per connection for looking up the app's own types (enums, domains), and the next
-/// new type on this connection would fail with "prepared statement does not exist". ROLLBACK first
+/// new type on this connection would fail with "prepared statement does not exist"; the same goes
+/// for the app's statements in Lease::statements. DISCARD PLANS keeps them and only plans them anew. ROLLBACK first
 /// ends a transaction the request left open; outside one it only warns.
 // ponytail: a statement made with SQL PREPARE stays on the connection; DEALLOCATE by name if apps use them
 const CLEANUP: &str = "ROLLBACK; CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; \
@@ -215,19 +226,28 @@ fn release(url: &str, lease: Lease) {
     // behind would free its place while the cleanup still runs, so the pool opens a connection more
     let Lease {
         client,
+        statements,
         _permit: permit,
     } = lease;
     tokio::task::spawn_local(async move {
         if client.batch_execute(CLEANUP).await.is_ok() {
-            IDLE.with_borrow_mut(|idle| idle.entry(url).or_default().push(client));
+            IDLE.with_borrow_mut(|idle| idle.entry(url).or_default().push((client, statements)));
         }
         drop(permit);
     });
 }
 
 /// Runs a query: "query" returns the rows as a JSON array, "execute" the number of affected rows,
-/// "script" runs several statements without parameters (simple query protocol).
-async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result<String, Failure> {
+/// "script" runs several statements without parameters (simple query protocol). `cached` keeps the
+/// statement prepared on the connection (outside transactions).
+async fn run(
+    lease: &Lease,
+    cached: bool,
+    mode: &str,
+    sql: &str,
+    params: &[Value],
+) -> Result<String, Failure> {
+    let client = &lease.client;
     if mode == "script" {
         client.batch_execute(sql).await?;
         return Ok("null".to_owned());
@@ -242,7 +262,11 @@ async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result
         .map(|param| param as &(dyn ToSql + Sync))
         .collect();
     if mode == "execute" {
-        let affected = client.execute(sql, &refs).await?;
+        let affected = prepared(lease, cached, sql, |statement| {
+            let refs = &refs;
+            async move { client.execute(&statement, refs).await }
+        })
+        .await?;
         return Ok(affected.to_string());
     }
     let sql = sql.trim().trim_end_matches(';');
@@ -262,13 +286,52 @@ async fn run(client: &Client, mode: &str, sql: &str, params: &[Value]) -> Result
     }
     // Newline before the parenthesis: otherwise a --comment at the end of the query swallows it.
     // MATERIALIZED: the rows come in the order the query returns them (ORDER BY)
-    let row = client
-        .query_one(
-            &format!("WITH tenma_query AS MATERIALIZED ({sql}\n) {AGGREGATE}"),
-            &refs,
-        )
-        .await?;
+    let wrapped = format!("WITH tenma_query AS MATERIALIZED ({sql}\n) {AGGREGATE}");
+    let row = prepared(lease, cached, &wrapped, |statement| {
+        let refs = &refs;
+        async move { client.query_one(&statement, refs).await }
+    })
+    .await?;
     Ok(exact_numbers(row.get(0)))
+}
+
+/// Runs `work` with the statement for `sql`. With `cached` it is prepared once per connection and
+/// kept, which saves a round trip and the parsing in Postgres; otherwise, or with a full cache, it is
+/// prepared for this call only. A kept statement whose result type changed since (ALTER TABLE under a
+/// SELECT *) fails with feature_not_supported: it is prepared anew and runs once more. Inside a
+/// transaction that error would abort the transaction, so transactions never use the cache.
+async fn prepared<T, F, Fut>(lease: &Lease, cached: bool, sql: &str, work: F) -> Result<T, Failure>
+where
+    F: Fn(Statement) -> Fut,
+    Fut: std::future::Future<Output = Result<T, tokio_postgres::Error>>,
+{
+    if !cached {
+        let statement = lease.client.prepare(sql).await?;
+        return Ok(work(statement).await?);
+    }
+    for attempt in 0..2 {
+        let kept = lease.statements.borrow().get(sql).cloned();
+        let statement = match kept {
+            Some(statement) => statement,
+            None => {
+                let statement = lease.client.prepare(sql).await?;
+                let mut statements = lease.statements.borrow_mut();
+                if statements.len() < STATEMENTS {
+                    statements.insert(sql.to_owned(), statement.clone());
+                }
+                statement
+            }
+        };
+        match work(statement).await {
+            Err(error)
+                if attempt == 0 && error.code() == Some(&SqlState::FEATURE_NOT_SUPPORTED) =>
+            {
+                lease.statements.borrow_mut().remove(sql);
+            }
+            result => return Ok(result?),
+        }
+    }
+    unreachable!("the second attempt returns")
 }
 
 /// SHOW, EXPLAIN or FETCH: through the simple query protocol, which takes no parameters and returns
@@ -462,7 +525,7 @@ async fn postgres(
             slot: Some(Rc::clone(&cell)),
             lease: Some(lease),
         };
-        let client = busy.client();
+        let client = &busy.lease().client;
         let result = if ending {
             client
                 .batch_execute(if mode == "commit" {
@@ -474,7 +537,7 @@ async fn postgres(
                 .map(|()| "null".to_owned())
                 .map_err(Failure::from)
         } else {
-            run(client, &mode, &sql, &params).await
+            run(busy.lease(), false, &mode, &sql, &params).await
         };
         if ending {
             TRANSACTIONS.with_borrow_mut(|txs| txs.remove(&id));
@@ -513,7 +576,7 @@ async fn postgres(
         slot: None,
         lease: Some(lease),
     };
-    let result = run(busy.client(), &mode, &sql, &params).await;
+    let result = run(busy.lease(), true, &mode, &sql, &params).await;
     busy.done();
     result
 }

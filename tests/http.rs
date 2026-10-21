@@ -1146,6 +1146,11 @@ fn postgres_connections_come_back_clean() {
         "{wrongtype}"
     );
 
+    let alter = get(port, "/alter");
+    assert!(
+        alter.contains(r#""a": 1,"#) && alter.contains(r#""b": 2"#),
+        "{alter}"
+    );
     assert!(get(port, "/taint").starts_with("HTTP/1.1 200"));
     // With only one connection in the pool everything would hang if exit() did not release it
     assert!(get(port, "/exit-tx").starts_with("HTTP/1.1 500"));

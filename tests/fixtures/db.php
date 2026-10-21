@@ -132,6 +132,19 @@ $table = 'tenma_test_' . getmypid();
             }
         })(),
         '/whoami' => $db->first("SELECT current_setting('application_name') AS name"),
+        // A statement kept on the connection whose result type changes: prepared anew, not an error
+        '/alter' => (function () use ($db, $table) {
+            $db->execute("CREATE TABLE {$table}_alter (a int)");
+            $db->execute("INSERT INTO {$table}_alter VALUES (1)");
+            $db->execute("UPDATE {$table}_alter SET a = a RETURNING *");
+            $before = $db->first("SELECT * FROM {$table}_alter");
+            $db->execute("ALTER TABLE {$table}_alter ADD COLUMN b int DEFAULT 2");
+            // RETURNING *: the kept statement's result type changed
+            $db->execute("UPDATE {$table}_alter SET a = a RETURNING *");
+            $after = $db->first("SELECT * FROM {$table}_alter");
+            $db->execute("DROP TABLE {$table}_alter");
+            return [$before, $after];
+        })(),
         '/backend' => $db->first('SELECT pg_backend_pid() AS pid'),
         // More digits than a float holds: a string, as PDO returns numeric; the rest stays a number
         // Its own data-modifying WITH, with a parameter, in order, also in a transaction
