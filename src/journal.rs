@@ -517,8 +517,10 @@ pub struct Recorder {
     prefix: Vec<u8>,
     prefix_entries: usize,
     prefix_done: bool,
-    /// Bytes in the current file, and where --record-max-size cuts it.
+    /// Bytes in the current file, those of its header and startup part, and where --record-max-size
+    /// cuts it: the startup part does not count, or a large one would cut after every response.
     size: u64,
+    startup_size: u64,
     max_size: u64,
     /// The file name without ".trace", and the number of the current file.
     base: std::path::PathBuf,
@@ -621,6 +623,7 @@ pub fn start(settings: &Settings, worker: usize, header: String) -> Result<(), S
         prefix_entries: 0,
         prefix_done: false,
         size: 0,
+        startup_size: 0,
         max_size: settings.max_size,
         base,
         part: 1,
@@ -687,6 +690,7 @@ impl Recorder {
         let prefix = std::mem::take(&mut self.prefix);
         let _ = self.file.write_all(&prefix);
         self.size += (header.len() + prefix.len()) as u64;
+        self.startup_size = self.size;
         self.prefix = prefix;
         self.write(&Entry::Note(format!(
             "the requests before this file are in {}: play one request at a time with --request",
@@ -733,6 +737,9 @@ pub fn record_request(rid: u64, mut request: RawRequest) {
             }
         }
         // The startup part ends with the first request
+        if !recorder.prefix_done {
+            recorder.startup_size = recorder.size;
+        }
         recorder.prefix_done = true;
         recorder.write(&Entry::Request { rid, request });
     });
@@ -748,7 +755,7 @@ pub fn record_response(rid: u64, reply: Reply) {
         recorder.write(&Entry::Response { rid, reply });
         // Whole up to here on disk: a journal is worth reading while its worker still runs
         let _ = recorder.file.flush();
-        if recorder.size > recorder.max_size {
+        if recorder.size.saturating_sub(recorder.startup_size) > recorder.max_size {
             recorder.cut();
         }
     });

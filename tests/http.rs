@@ -4751,50 +4751,52 @@ fn one_request_plays_alone_and_journals_are_cut() {
     unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
     let _ = server.0.wait();
 
-    // Cut at 20 KB: the current file and the one before it stay, the later one marked partial
+    // Cut at 20 KB: several files, the later ones marked partial; how many depends on the size of the
+    // header, which holds the environment. The file with /boom stays in any case
     let mut files: Vec<_> = std::fs::read_dir(&directory)
         .unwrap()
         .flatten()
         .map(|entry| entry.path())
         .collect();
-    files.sort_by_key(|path| std::fs::metadata(path).and_then(|m| m.modified()).unwrap());
-    assert_eq!(files.len(), 2, "{files:?}");
-    let last = files.last().unwrap();
-    assert!(last.to_string_lossy().ends_with(".trace"));
-    let listing = Command::new(env!("CARGO_BIN_EXE_tenma"))
-        .args(["replay", last.to_str().unwrap(), "--list"])
-        .output()
-        .unwrap();
-    let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
-    assert!(listing.starts_with("cut from an earlier file"), "{listing}");
+    files.sort();
+    assert!(files.len() >= 2, "{files:?}");
+    let list = |file: &std::path::Path| {
+        let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args(["replay", file.to_str().unwrap(), "--list"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let (file, listing) = files
+        .iter()
+        .map(|file| (file, list(file)))
+        .find(|(_, listing)| listing.contains("GET /boom"))
+        .unwrap_or_else(|| panic!("no file has /boom: {files:?}"));
     let boom = listing
         .lines()
         .find(|line| line.ends_with("GET /boom"))
-        .unwrap_or_else(|| panic!("{listing}"));
+        .unwrap();
     assert!(boom.contains(" 500 "), "{boom}");
     let number = boom.split_whitespace().next().unwrap();
+    let cut = files
+        .iter()
+        .find(|file| list(file).starts_with("cut from an earlier file"))
+        .unwrap_or_else(|| panic!("no file was cut: {files:?}"));
 
-    // The whole file cannot play: its start is in the file before
-    let (status, log) = replay(last, &[]);
+    // A cut file cannot play whole: its start is in the file before
+    let (status, log) = replay(cut, &[]);
     assert_eq!(status, 2, "{log}");
     assert!(log.contains("--request N"), "{log}");
     // One request alone: the startup part, then only its own ops and values
-    let (status, log) = replay(last, &["--request", number, "--check"]);
+    let (status, log) = replay(file, &["--request", number, "--check"]);
     assert_eq!(status, 0, "{log}");
     assert!(
         log.contains("1 request(s) replayed, 0 response(s) differ"),
         "{log}"
     );
-    let first = listing
-        .lines()
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap();
-    let (status, log) = replay(last, &["--request", first, "--check"]);
+    let (status, log) = replay(cut, &["--request", "1", "--check"]);
     assert_eq!(status, 0, "{log}");
-    let (status, log) = replay(last, &["--request", "999"]);
+    let (status, log) = replay(file, &["--request", "999"]);
     assert_eq!(status, 1, "{log}");
     assert!(log.contains("no request 999"), "{log}");
 }
