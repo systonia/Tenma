@@ -42,6 +42,15 @@ new Server($port, function (Request $request) use ($ask, $port, $echo) {
             // One or both answers may be in by now; the array keeps only the ready ones, under their keys
             $which = $ready >= 1 && count($read) === $ready && array_filter($read, fn ($s) => $s !== $x && $s !== $y) === [] ? 'ok' : 'wrong';
             return "select $which " . $seconds() . "\n";
+        case '/select-except':
+            // An except set goes to PHP's own select: ordinary data is not out-of-band
+            $socket = fsockopen('127.0.0.1', $echo);
+            fwrite($socket, "e\n");
+            $read = null;
+            $write = null;
+            $except = [$socket];
+            $ready = stream_select($read, $write, $except, 0, 300000);
+            return "except $ready " . $seconds() . "\n";
         case '/timeout':
             $socket = fsockopen('127.0.0.1', $echo);
             stream_set_timeout($socket, 0, 100000);

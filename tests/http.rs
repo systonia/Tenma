@@ -4084,6 +4084,7 @@ fn php_sockets_suspend_only_the_fiber() {
     // Three connections at once take as long as one
     assert_eq!(tail("/three"), "echo:a,echo:b,echo:c 0.5s\n");
     assert_eq!(tail("/select"), "select ok 0.5s\n");
+    assert_eq!(tail("/select-except"), "except 0 0.3s\n");
     assert_eq!(tail("/timeout"), "false timed_out=true 0.1s\n");
     // TLS through ext/openssl, two fetches of the server's own slow page at once
     assert_eq!(tail("/https"), "slowslow 0.5s\n");
@@ -4193,6 +4194,8 @@ fn pdo_pgsql_runs_on_tokio_postgres() {
         "{placeholders}"
     );
     assert!(get(port, "/scroll").ends_with("5 3 2 UTF8\n"));
+    let modifying = get(port, "/modifying-with");
+    assert!(modifying.ends_with("Pie 1\n"), "{modifying}");
     let mut early = TcpStream::connect(("127.0.0.1", port)).unwrap();
     early
         .write_all(b"GET /cancelled HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -4570,7 +4573,9 @@ fn native_plugins_answer_calls_adopt_sockets_and_shut_down() {
                 "--plugin",
                 plugin.to_str().unwrap(),
                 "--stop-timeout",
-                "2",
+                "5",
+                "--max-body",
+                "1k",
                 "tests/fixtures/plugin.php",
             ])
             .env("PORT", port.to_string())
@@ -4604,6 +4609,11 @@ fn native_plugins_answer_calls_adopt_sockets_and_shut_down() {
     assert_eq!(socket.read().unwrap(), Message::binary(vec![0, 1, 2]));
     socket.send(Message::text("buffered")).unwrap();
     assert!(socket.read().unwrap().to_string().starts_with("buffered "));
+    // More than --max-body in all: read by the plugin, so the unread limit never trips
+    for _ in 0..4 {
+        socket.send(Message::binary(vec![7; 400])).unwrap();
+        assert_eq!(socket.read().unwrap(), Message::binary(vec![7; 400]));
+    }
     socket.send(Message::text("bye")).unwrap();
     assert!(matches!(socket.read(), Ok(Message::Close(_)) | Err(_)));
     std::thread::sleep(Duration::from_millis(200));
@@ -4613,9 +4623,16 @@ fn native_plugins_answer_calls_adopt_sockets_and_shut_down() {
         "{events}"
     );
 
-    // SIGTERM: the PHP stop handler runs, then the plugin's shutdown
+    // SIGTERM: the PHP stop handler runs, then the plugin's shutdown; the subscription that is still
+    // open does not hold the stop up until --stop-timeout
+    let stopping = Instant::now();
     unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
     let _ = server.0.wait();
+    assert!(
+        stopping.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        stopping.elapsed()
+    );
     assert_eq!(
         std::fs::read_to_string(&log).unwrap(),
         "php stop handler ran\nplugin shut down\n"

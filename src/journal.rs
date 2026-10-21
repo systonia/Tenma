@@ -677,6 +677,35 @@ pub fn finish(files: Vec<(String, String)>) {
     }
 }
 
+/// A URL or connection string with its password replaced: what goes into an op's detail.
+pub fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let (before, after) = rest.split_at(at + 3);
+        out.push_str(before);
+        let authority_end = after.find(['/', '?', ' ']).unwrap_or(after.len());
+        let authority = &after[..authority_end];
+        if let Some(at_sign) = authority.rfind('@')
+            && let Some(colon) = authority[..at_sign].find(':')
+        {
+            out.push_str(&authority[..colon + 1]);
+            out.push_str("***");
+            out.push_str(&authority[at_sign..]);
+        } else {
+            out.push_str(authority);
+        }
+        rest = &after[authority_end..];
+    }
+    out.push_str(rest);
+    // libpq style: password=secret
+    if let Some(at) = out.find("password=") {
+        let end = out[at + 9..].find(' ').map_or(out.len(), |n| at + 9 + n);
+        out.replace_range(at + 9..end, "***");
+    }
+    out
+}
+
 /// SHA-256 of a file as hex, or "" if it cannot be read.
 pub fn hash_file(path: &str) -> String {
     match std::fs::read(path) {

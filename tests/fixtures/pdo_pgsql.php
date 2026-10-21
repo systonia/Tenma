@@ -72,6 +72,14 @@ new Server((int) getenv('PORT'), function (Request $request) use ($connect) {
             $third = $statement->fetch(PDO::FETCH_COLUMN, PDO::FETCH_ORI_ABS, 3);
             $prior = $statement->fetch(PDO::FETCH_COLUMN, PDO::FETCH_ORI_PRIOR);
             return "$last $third $prior " . $connect()->query('SHOW client_encoding')->fetchColumn() . "\n";
+        case '/modifying-with':
+            // A WITH that modifies data cannot stand inside the driver's wrapper: rows come through a temporary table
+            $pdo = $connect();
+            $statement = $pdo->prepare('WITH inserted AS (INSERT INTO tenma_pdo (name, amount) VALUES (?, 1) RETURNING id, name) SELECT name, (SELECT count(*) FROM tenma_pdo WHERE name = ?) AS n FROM inserted');
+            $statement->execute(['Pie', 'Pie']);
+            $statement->execute(['Pie', 'Pie']);
+            $row = $statement->fetch(PDO::FETCH_ASSOC);
+            return $row['name'] . ' ' . $row['n'] . "\n";
         case '/cancelled':
             // The client leaves while the query runs: the fiber is cancelled where it waits
             try {

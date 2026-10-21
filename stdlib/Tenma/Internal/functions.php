@@ -292,11 +292,14 @@ function stopping(): void
     $handlers = Shutdown::$handlers;
     Shutdown::$handlers = [];
     foreach ($handlers as $handler) {
+        \tenma_stop_handlers(1);
         \Threading\Task::start(static function () use ($handler): void {
             try {
                 $handler();
             } catch (\Throwable $error) {
                 error_log('Error in a stop handler: ' . $error);
+            } finally {
+                \tenma_stop_handlers(-1);
             }
         }, null, null, 'Shutdown');
     }

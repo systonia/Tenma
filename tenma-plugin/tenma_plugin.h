@@ -62,7 +62,7 @@ typedef struct {
 
 /* Plugin to tenma. Functions that may be NULL are optional. */
 typedef struct {
-    /* For errors and the name PHP uses: Native\Plugin::call('name', ...). */
+    /* For errors and the name PHP uses: Tenma\Plugin::call('name', ...). */
     const char *name;
     /* A synchronous call on the worker thread: for quick things. 0 on success; otherwise the reply is the error message. */
     int (*call)(const char *fn, size_t fn_len, const uint8_t *in, size_t in_len, TenmaReply *out);

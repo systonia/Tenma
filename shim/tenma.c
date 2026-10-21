@@ -389,6 +389,12 @@ PHP_FUNCTION(tenma_plugin_call);
 PHP_FUNCTION(tenma_op_plugin_await);
 PHP_FUNCTION(tenma_plugin_adopt);
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_stop_handlers, 0, 1, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, delta, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(tenma_stop_handlers);
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_shutdown, 0, 0, IS_VOID, 0)
 ZEND_END_ARG_INFO()
 
@@ -425,6 +431,7 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE(tenma_plugin_call, arginfo_tenma_plugin_call)
     ZEND_FE(tenma_op_plugin_await, arginfo_tenma_op_plugin_await)
     ZEND_FE(tenma_plugin_adopt, arginfo_tenma_plugin_adopt)
+    ZEND_FE(tenma_stop_handlers, arginfo_tenma_stop_handlers)
     ZEND_FE(tenma_debugger, arginfo_tenma_shutdown)
     ZEND_FE(tenma_reloaded_by, arginfo_tenma_reloaded_by)
     ZEND_FE(tenma_classic_begin, arginfo_tenma_shutdown)
@@ -1201,6 +1208,10 @@ static ZEND_NAMED_FUNCTION(tenma_stream_select) {
     int bits[3] = {POLLIN | POLLPRI, POLLOUT, POLLPRI};
     int unsupported = 0;
     if (read != NULL && buffered(read)) {
+        unsupported = 1;
+    }
+    // Out-of-band data has no readiness of its own in the op: PHP's own select handles an except set
+    if (except != NULL && zend_hash_num_elements(Z_ARRVAL_P(except)) > 0) {
         unsupported = 1;
     }
     for (int i = 0; i < 3 && !unsupported; i++) {
@@ -3848,6 +3859,23 @@ PHP_FUNCTION(tenma_op_durable) {
         Z_PARAM_DOUBLE(number)
     ZEND_PARSE_PARAMETERS_END();
     RETURN_LONG((zend_long) tenma_rs_durable(ZSTR_VAL(op), ZSTR_LEN(op), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(name), ZSTR_LEN(name), number));
+}
+
+/** Stop handlers of Process\Shutdown still running in this worker, counted by the PHP side. */
+static _Thread_local int stop_handlers = 0;
+
+/** tenma_stop_handlers(int $delta): int. A stop handler starts (1) or ends (-1); returns how many run. */
+PHP_FUNCTION(tenma_stop_handlers) {
+    zend_long delta;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(delta)
+    ZEND_PARSE_PARAMETERS_END();
+    stop_handlers += (int) delta;
+    RETURN_LONG(stop_handlers);
+}
+
+int tenma_stop_handlers_running(void) {
+    return stop_handlers;
 }
 
 /** tenma stops: Tenma\Internal\stopping() starts the handlers of Process\Shutdown::register(). -1: fatal. */

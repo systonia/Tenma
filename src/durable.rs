@@ -312,8 +312,22 @@ async fn wait(key: String, what: String, due: f64) -> Result<OpResult, String> {
         }
         None => {}
     }
-    // Live: a signal sent before the function asked for it answers at once
-    if let Some(signal) = what.strip_prefix("signal:") {
+    let (next, pending) = {
+        let mut run = run.borrow_mut();
+        (run.next, std::mem::take(&mut run.pending))
+    };
+    persist(&key, next, &pending).await?;
+    run.borrow_mut().next += pending.len() as i64;
+    let signal = what.strip_prefix("signal:");
+    // The timer row first: a send() from now on finds it. Then the signals kept from before: a send()
+    // in between went to one of the two, never past both
+    sql(
+        "execute",
+        "INSERT INTO tenma_timers (key, due, signal) VALUES ($1, to_timestamp($2), $3) ON CONFLICT (key) DO UPDATE SET due = EXCLUDED.due, signal = EXCLUDED.signal, payload = NULL, fired = false",
+        json!([key, due, signal]),
+    )
+    .await?;
+    if let Some(signal) = signal {
         let rows = sql(
             "query",
             "DELETE FROM tenma_signals WHERE signal = $1 RETURNING payload",
@@ -325,24 +339,20 @@ async fn wait(key: String, what: String, due: f64) -> Result<OpResult, String> {
             .and_then(|rows| rows.first())
             .and_then(|row| row["payload"].as_str())
         {
-            let result = OpResult::Text(payload.as_bytes().to_vec());
-            append(&run, &key, "durable.wait", &detail, &result).await?;
-            return Ok(result);
+            let deleted = sql(
+                "execute",
+                "DELETE FROM tenma_timers WHERE key = $1 AND fired = false",
+                json!([key]),
+            )
+            .await?;
+            // Fired meanwhile by a send() that hit the timer row: the poller delivers that one
+            if deleted.as_i64().unwrap_or(0) == 1 {
+                let result = OpResult::Text(payload.as_bytes().to_vec());
+                append(&run, &key, "durable.wait", &detail, &result).await?;
+                return Ok(result);
+            }
         }
     }
-    let (next, pending) = {
-        let mut run = run.borrow_mut();
-        (run.next, std::mem::take(&mut run.pending))
-    };
-    persist(&key, next, &pending).await?;
-    run.borrow_mut().next += pending.len() as i64;
-    let signal = what.strip_prefix("signal:");
-    sql(
-        "execute",
-        "INSERT INTO tenma_timers (key, due, signal) VALUES ($1, to_timestamp($2), $3) ON CONFLICT (key) DO UPDATE SET due = EXCLUDED.due, signal = EXCLUDED.signal, payload = NULL, fired = false",
-        json!([key, due, signal]),
-    )
-    .await?;
     sql(
         "execute",
         "UPDATE tenma_durable SET status = 'waiting', lease_until = NULL, updated = now() WHERE key = $1",
@@ -630,7 +640,7 @@ pub async fn poll() {
                 unsafe { tenma_resume_durable(name.as_ptr(), name.len(), key.as_ptr(), key.len()) };
             if code < 0 {
                 crate::interpreter_broken();
-                return;
+                continue;
             }
         }
     }

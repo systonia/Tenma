@@ -144,11 +144,12 @@ pub fn take_socket(
     mpsc::Sender<Message>,
     mpsc::Receiver<(Vec<u8>, bool)>,
     Arc<AtomicUsize>,
+    Rc<Cell<usize>>,
 )> {
     let socket = SOCKETS.with_borrow_mut(|sockets| sockets.remove(&rid))?;
     let receiver = socket.incoming.borrow_mut().take();
     match receiver {
-        Some(receiver) => Some((socket.outgoing, receiver, socket.queued)),
+        Some(receiver) => Some((socket.outgoing, receiver, socket.queued, socket.unread)),
         None => {
             SOCKETS.with_borrow_mut(|sockets| sockets.insert(rid, socket));
             None

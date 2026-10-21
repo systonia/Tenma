@@ -361,21 +361,37 @@ extern "C" fn tenma_rs_plugin_adopt(name: *const u8, name_len: usize, rid: u64) 
         eprintln!("tenma: plugin {name} does not adopt connections");
         return 0;
     };
-    let Some((outgoing, incoming, queued)) = crate::streams::take_socket(rid) else {
+    let Some((outgoing, incoming, queued, unread)) = crate::streams::take_socket(rid) else {
         eprintln!("tenma: request {rid} has no open WebSocket to adopt");
         return 0;
     };
     let conn = rid;
     adopted(|map| map.insert(conn, Adopted { outgoing, queued }));
     adopt(conn);
-    // Incoming messages go to the plugin on the worker's loop; the plugin writes from wherever it likes
+    // Incoming messages go to the plugin on the worker's loop; the plugin writes from wherever it likes.
+    // The guard tells the plugin when the connection is over, also when the worker restarts and drops
+    // this task
     tokio::task::spawn_local(async move {
+        let _over = Over { conn, closed };
         let mut incoming = incoming;
         while let Some((data, binary)) = incoming.recv().await {
+            // Read: the limit on unread bytes counts down as for PHP's receive()
+            unread.set(unread.get().saturating_sub(data.len()));
             message(conn, data.as_ptr(), data.len(), c_int::from(binary));
         }
-        adopted(|map| map.remove(&conn));
-        closed(conn);
     });
     conn
+}
+
+/// An adopted connection ends, however its task ends: the plugin hears closed() once.
+struct Over {
+    conn: u64,
+    closed: extern "C" fn(u64),
+}
+
+impl Drop for Over {
+    fn drop(&mut self) {
+        adopted(|map| map.remove(&self.conn));
+        (self.closed)(self.conn);
+    }
 }

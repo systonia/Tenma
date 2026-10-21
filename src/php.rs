@@ -59,6 +59,7 @@ unsafe extern "C" {
     fn tenma_set_server_name(name: *const c_char);
     fn tenma_set_pdo_native();
     fn tenma_stopping() -> c_int;
+    fn tenma_stop_handlers_running() -> c_int;
     fn tenma_stop();
     fn tenma_thread_start() -> c_int;
     fn tenma_thread_stop();
@@ -432,6 +433,13 @@ pub fn stopping() -> Result<(), ()> {
         Err(())
     } else {
         Ok(())
+    }
+}
+
+/// Resolves once every stop handler has finished; polls PHP's count, which the handlers keep.
+pub async fn stop_handlers_done() {
+    while unsafe { tenma_stop_handlers_running() } > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 

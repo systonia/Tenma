@@ -328,7 +328,7 @@ fn words(text: &str) -> Vec<String> {
 
 /// Whether the statement starts with WITH and mentions INSERT, UPDATE, DELETE or MERGE. One that only
 /// mentions them (in a string, a comment) takes the CREATE TABLE AS path as well, with the same result.
-fn modifying_with(sql: &str) -> bool {
+pub fn modifying_with(sql: &str) -> bool {
     let words = words(skip_comments(sql));
     words.first().is_some_and(|word| word == "with")
         && words
@@ -652,7 +652,7 @@ extern "C" fn tenma_rs_db(
     } else {
         ops::spawn
     };
-    let detail = format!("{op} {target} {sql}");
+    let detail = format!("{op} {} {sql}", crate::journal::redact(&target));
     spawn("db", detail, async move {
         let result = match op.split_once('.') {
             Some(("pg", mode)) => postgres(

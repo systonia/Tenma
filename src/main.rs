@@ -539,8 +539,19 @@ fn with_config(given: &[String]) -> Result<Vec<String>, String> {
             directory.join(value).display().to_string()
         }
     };
+    // A single value the command line also gives: the file's one is left out, so options that take
+    // only one value (--pubsub, --durable, --pdo-pgsql) see the command line's
+    let on_command_line: Vec<&str> = given
+        .iter()
+        .filter_map(|arg| arg.strip_prefix("--"))
+        .collect();
     let mut front = Vec::new();
     for (key, value) in &config {
+        if !matches!(key.as_str(), "plugins" | "tls-port" | "d")
+            && on_command_line.contains(&key.as_str())
+        {
+            continue;
+        }
         // -d and -c as on the command line, the rest as long options
         let option = if key.len() == 1 {
             format!("-{key}")
@@ -1275,8 +1286,16 @@ fn serve(
             return Stop::Closed;
         }
         // One worker per process fires the timers and signals of durable functions
-        static POLLER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if durable::enabled() && !POLLER.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        // One worker per process fires the timers and signals of durable functions, again after
+        // every restart of its interpreter
+        static CLAIMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        thread_local! {
+            static POLLER: Cell<bool> = const { Cell::new(false) };
+        }
+        if durable::enabled()
+            && (POLLER.get() || !CLAIMED.swap(true, std::sync::atomic::Ordering::Relaxed))
+        {
+            POLLER.set(true);
             tokio::task::spawn_local(durable::poll());
         }
         loop {
@@ -1350,7 +1369,7 @@ fn serve(
             if matches!(stop, Stop::Closed) && !BROKEN.get() {
                 if php::stopping().is_err() {
                     interpreter_broken();
-                } else if tokio::time::timeout(options.stop_timeout, ops::idle())
+                } else if tokio::time::timeout(options.stop_timeout, php::stop_handlers_done())
                     .await
                     .is_err()
                 {

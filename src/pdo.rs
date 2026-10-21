@@ -165,6 +165,9 @@ impl<'a> tokio_postgres::types::FromSql<'a> for Printed {
 /// casts every column to text. A statement without result columns runs as it is.
 async fn query(handle: &Handle, sql: &str, params: Vec<TextParam>) -> Result<Vec<u8>, Failure> {
     let client = handle.client.lock().await;
+    if crate::db::modifying_with(sql) {
+        return modifying(&client, sql, params).await;
+    }
     let mut statements = handle.statements.lock().await;
     if !statements.contains_key(sql) {
         let original = client.prepare(sql).await?;
@@ -205,6 +208,51 @@ async fn query(handle: &Handle, sql: &str, params: Vec<TextParam>) -> Result<Vec
     }
     let rows = client.query(&wrapped, &refs).await?;
     let values = rows
+        .iter()
+        .map(|row| {
+            (0..columns.len())
+                .map(|index| row.get::<_, Printed>(index).0)
+                .collect()
+        })
+        .collect::<Vec<Vec<Option<Vec<u8>>>>>();
+    let count = values.len() as u64;
+    Ok(result_buffer(&columns, values, count))
+}
+
+/// A WITH that modifies data must stay at the top level, so the wrapper cannot take it: its rows go
+/// into a temporary table first, then out as text. Three round trips, for the rare statement.
+async fn modifying(client: &Client, sql: &str, params: Vec<TextParam>) -> Result<Vec<u8>, Failure> {
+    let original = client.prepare(sql).await?;
+    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+        .iter()
+        .map(|param| param as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    let columns: Vec<(String, u32)> = original
+        .columns()
+        .iter()
+        .map(|column| (column.name().to_owned(), column.type_().oid()))
+        .collect();
+    if columns.is_empty() {
+        let affected = client.execute(&original, &refs).await?;
+        return Ok(result_buffer(&[], Vec::new(), affected));
+    }
+    let names: Vec<String> = (1..=columns.len()).map(|i| format!("c{i}")).collect();
+    let casts: Vec<String> = names.iter().map(|name| format!("{name}::text")).collect();
+    client
+        .execute(
+            &format!(
+                "CREATE TEMP TABLE tenma_pdo ({}) AS {}\n",
+                names.join(", "),
+                sql.trim().trim_end_matches(';')
+            ),
+            &refs,
+        )
+        .await?;
+    let rows = client
+        .query(&format!("SELECT {} FROM tenma_pdo", casts.join(", ")), &[])
+        .await;
+    client.batch_execute("DROP TABLE pg_temp.tenma_pdo").await?;
+    let values = rows?
         .iter()
         .map(|row| {
             (0..columns.len())
@@ -351,7 +399,7 @@ extern "C" fn tenma_rs_pdo(
     let op = text(op, op_len);
     let sql = text(sql, sql_len);
     let params = params(bytes(packed, params_len));
-    let detail = format!("{op} {id} {sql}");
+    let detail = format!("{op} {id} {}", crate::journal::redact(&sql));
     let future = run(op, id, sql, params);
     if blocking == 0 && ops::looping() {
         let (sender, receiver) = oneshot::channel::<Result<Vec<u8>, String>>();
