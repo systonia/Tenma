@@ -610,6 +610,8 @@ pub fn record_response(rid: u64, reply: Reply) {
             recorder.errored = true;
         }
         recorder.write(&Entry::Response { rid, reply });
+        // Whole up to here on disk: a journal is worth reading while its worker still runs
+        let _ = recorder.file.flush();
     });
 }
 
@@ -654,6 +656,7 @@ pub fn record_fatal() {
     with(|recorder| {
         recorder.errored = true;
         recorder.write(&Entry::Note("fatal error".into()));
+        let _ = recorder.file.flush();
     });
 }
 

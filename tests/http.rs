@@ -4264,6 +4264,18 @@ fn record_journal(port: u16, directory: &std::path::Path, extra: &[&str]) -> std
         assert!(get(port, "/data").contains(r#""n": 42"#));
     }
     assert!(get(port, "/boom").starts_with("HTTP/1.1 500"));
+    // On disk while the worker still runs: every response is flushed
+    let running: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .flatten()
+        .map(|entry| std::fs::read(entry.path()).unwrap())
+        .collect();
+    assert!(
+        running
+            .iter()
+            .any(|data| String::from_utf8_lossy(data).contains("boom")),
+        "the journal is not written yet"
+    );
     // SIGTERM: the worker closes its journal with the list of files
     unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
     let _ = server.0.wait();
