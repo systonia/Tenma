@@ -10,9 +10,14 @@ $user = $url['user'] ?? getenv('USER');
 $password = $url['pass'] ?? '';
 $connect = fn (array $options = []) => new PDO($dsn, $user, $password, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION] + $options);
 
-// At the top level: the connection and the query block, as in PHP
-$pdo = $connect();
-echo $pdo->getAttribute(PDO::ATTR_DRIVER_NAME), ' ', $pdo->query('SELECT 1 + 1')->fetchColumn(), "\n";
+// At the top level: the connection and the query block, as in PHP; without a database the server
+// still starts, so the test can tell and skip
+try {
+    $pdo = $connect();
+    echo $pdo->getAttribute(PDO::ATTR_DRIVER_NAME), ' ', $pdo->query('SELECT 1 + 1')->fetchColumn(), "\n";
+} catch (PDOException $error) {
+    echo "no database\n";
+}
 
 new Server((int) getenv('PORT'), function (Request $request) use ($connect) {
     $started = microtime(true);

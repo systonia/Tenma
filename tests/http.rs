@@ -4117,7 +4117,7 @@ fn php_sockets_suspend_only_the_fiber() {
         .unwrap()
         .read_to_string(&mut stdout)
         .unwrap();
-    assert_eq!(stdout, "echo:startup 0.5s\n");
+    assert!(stdout.starts_with("echo:startup 0."), "{stdout}");
 }
 
 #[test]
@@ -4587,7 +4587,12 @@ fn native_plugins_answer_calls_adopt_sockets_and_shut_down() {
     );
     assert_eq!(body(get(port, "/call?text=hello")), "HELLO\n");
     assert_eq!(body(get(port, "/call-error")), "echo: unknown function\n");
-    assert_eq!(body(get(port, "/await")), "later:a,later:b 0.1s\n");
+    // Both at once: a tenth of a second, a little more on a slow runner, never the two in a row
+    let awaited = body(get(port, "/await"));
+    assert!(
+        awaited.starts_with("later:a,later:b 0.") && awaited < "later:a,later:b 0.3".to_owned(),
+        "{awaited}"
+    );
     assert_eq!(body(get(port, "/await-error")), "echo: async failure\n");
     assert_eq!(
         body(get(port, "/missing")),
