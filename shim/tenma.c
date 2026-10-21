@@ -2163,6 +2163,16 @@ void tenma_set_journal_mode(int mode) {
     journal_mode = mode;
 }
 
+/** The request whose code runs right now, Tenma\Internal\Current::$request; 0 for none (startup, timers, detached tasks). */
+uint64_t tenma_current_request(void) {
+    zend_class_entry *ce = zend_hash_str_find_ptr(EG(class_table), ZEND_STRL("tenma\\internal\\current"));
+    if (ce == NULL) {
+        return 0;
+    }
+    zval *request = zend_read_static_property(ce, ZEND_STRL("request"), true);
+    return request != NULL && Z_TYPE_P(request) == IS_LONG ? (uint64_t) Z_LVAL_P(request) : 0;
+}
+
 static struct {
     const char *name;
     /** 1: the function blocks the worker; only noted, never replaced */

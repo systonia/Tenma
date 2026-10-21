@@ -6,6 +6,11 @@
 //!
 //! Format: entries one after another, each as a tag byte, a u32 length and the payload; strings and
 //! byte fields inside as u32 length and bytes, numbers little-endian. The first entry is the header.
+//! Ops and values carry the request they belong to (0: none), so one request can be played alone.
+//!
+//! A journal is cut at --record-max-size: the worker goes on in a new file that starts with the same
+//! header (marked partial) and the startup part of the old one, everything up to the first request.
+//! Such a file plays one request at a time (`tenma replay FILE --request N`).
 
 use std::cell::RefCell;
 use std::io::Write;
@@ -34,6 +39,7 @@ extern "C" fn tenma_rs_journal_value(
     crate::durable::keep_value(&name, value);
     if recording() {
         record(Entry::Value {
+            request: crate::php::current_request(),
             name,
             value: value.to_vec(),
         });
@@ -130,9 +136,10 @@ pub enum Entry {
         rid: u64,
         reply: Reply,
     },
-    /// An op finished: what it was and what PHP got.
+    /// An op finished: what it was, the request it belongs to (0: none) and what PHP got.
     Op {
         op: u64,
+        request: u64,
         kind: String,
         detail: String,
         result: OpResult,
@@ -141,8 +148,10 @@ pub enum Entry {
     Gone {
         rid: u64,
     },
-    /// A value PHP got from a function the C layer wraps (time(), random_int()), serialized.
+    /// A value PHP got from a function the C layer wraps (time(), random_int()), serialized, and the
+    /// request whose code asked (0: none).
     Value {
+        request: u64,
         name: String,
         value: Vec<u8>,
     },
@@ -161,6 +170,9 @@ const GONE: u8 = 6;
 const VALUE: u8 = 7;
 const FILES: u8 = 8;
 const NOTE: u8 = 9;
+/// Op and value with their request; 5 and 7 are the same without, from the first journals of 0.2.0.
+const OP_OF_REQUEST: u8 = 10;
+const VALUE_OF_REQUEST: u8 = 11;
 
 fn put_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
@@ -261,24 +273,31 @@ pub fn encode(entry: &Entry) -> Vec<u8> {
         }
         Entry::Op {
             op,
+            request,
             kind,
             detail,
             result,
         } => {
             put_u64(&mut payload, *op);
+            put_u64(&mut payload, *request);
             put_bytes(&mut payload, kind.as_bytes());
             put_bytes(&mut payload, detail.as_bytes());
             put_result(&mut payload, result);
-            OP
+            OP_OF_REQUEST
         }
         Entry::Gone { rid } => {
             put_u64(&mut payload, *rid);
             GONE
         }
-        Entry::Value { name, value } => {
+        Entry::Value {
+            request,
+            name,
+            value,
+        } => {
+            put_u64(&mut payload, *request);
             put_bytes(&mut payload, name.as_bytes());
             put_bytes(&mut payload, value);
-            VALUE
+            VALUE_OF_REQUEST
         }
         Entry::Files(files) => {
             put_u32(&mut payload, files.len() as u32);
@@ -421,12 +440,26 @@ pub fn decode(data: &[u8], at: usize) -> Option<(Entry, usize)> {
         }
         OP => Entry::Op {
             op: c.u64()?,
+            request: 0,
+            kind: c.string()?,
+            detail: c.string()?,
+            result: c.result()?,
+        },
+        OP_OF_REQUEST => Entry::Op {
+            op: c.u64()?,
+            request: c.u64()?,
             kind: c.string()?,
             detail: c.string()?,
             result: c.result()?,
         },
         GONE => Entry::Gone { rid: c.u64()? },
         VALUE => Entry::Value {
+            request: 0,
+            name: c.string()?,
+            value: c.bytes()?,
+        },
+        VALUE_OF_REQUEST => Entry::Value {
+            request: c.u64()?,
             name: c.string()?,
             value: c.bytes()?,
         },
@@ -442,6 +475,17 @@ pub fn decode(data: &[u8], at: usize) -> Option<(Entry, usize)> {
         _ => return None,
     };
     Some((entry, next))
+}
+
+/// The request an entry belongs to, if it belongs to one.
+pub fn request_of(entry: &Entry) -> Option<u64> {
+    match entry {
+        Entry::Request { rid, .. } | Entry::Response { rid, .. } | Entry::Gone { rid } => {
+            Some(*rid)
+        }
+        Entry::Op { request, .. } | Entry::Value { request, .. } if *request != 0 => Some(*request),
+        _ => None,
+    }
 }
 
 /// Every entry of a journal file; stops at the first entry that is cut off.
@@ -468,6 +512,19 @@ pub struct Recorder {
     redact: Vec<String>,
     /// Blocking functions already noted.
     blocking: std::collections::HashSet<String>,
+    /// The header, and every entry before the first request: the start of each file after a cut.
+    header: String,
+    prefix: Vec<u8>,
+    prefix_entries: usize,
+    prefix_done: bool,
+    /// Bytes in the current file, and where --record-max-size cuts it.
+    size: u64,
+    max_size: u64,
+    /// The file name without ".trace", and the number of the current file.
+    base: std::path::PathBuf,
+    part: u32,
+    /// The file before the current one, kept unless --record-on error deletes it: two files of history.
+    previous: Option<std::path::PathBuf>,
 }
 
 thread_local! {
@@ -500,6 +557,8 @@ pub struct Settings {
     pub only_on_error: bool,
     pub max_body: usize,
     pub redact: Vec<String>,
+    /// A file is cut at this size; the worker goes on in the next one.
+    pub max_size: u64,
 }
 
 impl Default for Settings {
@@ -509,6 +568,7 @@ impl Default for Settings {
             only_on_error: false,
             max_body: 1 << 20,
             redact: Vec::new(),
+            max_size: 50 << 20,
         }
     }
 }
@@ -540,10 +600,12 @@ pub fn start(settings: &Settings, worker: usize, header: String) -> Result<(), S
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_millis());
-    let name = format!("{}-{worker}-{started}.trace", std::process::id());
     std::fs::create_dir_all(&settings.directory)
         .map_err(|error| format!("--record {}: {error}", settings.directory.display()))?;
-    let path = settings.directory.join(name);
+    let base = settings
+        .directory
+        .join(format!("{}-{worker}-{started}", std::process::id()));
+    let path = base.with_extension("trace");
     let file =
         std::fs::File::create(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut recorder = Recorder {
@@ -554,8 +616,19 @@ pub fn start(settings: &Settings, worker: usize, header: String) -> Result<(), S
         max_body: settings.max_body,
         redact: settings.redact.clone(),
         blocking: std::collections::HashSet::new(),
+        header: header.clone(),
+        prefix: Vec::new(),
+        prefix_entries: 0,
+        prefix_done: false,
+        size: 0,
+        max_size: settings.max_size,
+        base,
+        part: 1,
+        previous: None,
     };
     recorder.write(&Entry::Header(header));
+    recorder.prefix.clear();
+    recorder.prefix_entries = 0;
     RECORDER.with_borrow_mut(|slot| *slot = Some(recorder));
     set_mode(1);
     Ok(())
@@ -563,7 +636,63 @@ pub fn start(settings: &Settings, worker: usize, header: String) -> Result<(), S
 
 impl Recorder {
     fn write(&mut self, entry: &Entry) {
-        let _ = self.file.write_all(&encode(entry));
+        let bytes = encode(entry);
+        let _ = self.file.write_all(&bytes);
+        self.size += bytes.len() as u64;
+        if !self.prefix_done {
+            self.prefix.extend_from_slice(&bytes);
+            self.prefix_entries += 1;
+        }
+    }
+
+    /// The file is at --record-max-size: the worker goes on in the next one, which starts with the same
+    /// header, marked partial, and the startup part. Of the files before, the last one stays; one with a
+    /// failure always stays, and with --record-on error one without is deleted.
+    fn cut(&mut self) {
+        let _ = self.file.flush();
+        let old = self.path.clone();
+        if self.errored {
+            eprintln!("tenma: journal written to {}", old.display());
+        } else if self.only_on_error {
+            let _ = std::fs::remove_file(&old);
+        } else if let Some(before) = self.previous.replace(old.clone()) {
+            let _ = std::fs::remove_file(before);
+        }
+        self.part += 1;
+        let name = format!(
+            "{}-{}.trace",
+            self.base
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            self.part
+        );
+        self.path = self.base.with_file_name(name);
+        let Ok(file) = std::fs::File::create(&self.path) else {
+            return;
+        };
+        self.file = std::io::BufWriter::new(file);
+        self.size = 0;
+        self.errored = false;
+        let mut header: serde_json::Value = serde_json::from_str(&self.header).unwrap_or_default();
+        header["partial"] = serde_json::json!(true);
+        header["part"] = serde_json::json!(self.part);
+        header["continues"] = serde_json::json!(
+            old.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        );
+        // Where the startup part ends: what follows are requests that began before the cut, and theirs
+        header["startup_entries"] = serde_json::json!(self.prefix_entries);
+        let header = encode(&Entry::Header(header.to_string()));
+        let _ = self.file.write_all(&header);
+        let prefix = std::mem::take(&mut self.prefix);
+        let _ = self.file.write_all(&prefix);
+        self.size += (header.len() + prefix.len()) as u64;
+        self.prefix = prefix;
+        self.write(&Entry::Note(format!(
+            "the requests before this file are in {}: play one request at a time with --request",
+            old.display()
+        )));
+        let _ = self.file.flush();
     }
 }
 
@@ -603,6 +732,8 @@ pub fn record_request(rid: u64, mut request: RawRequest) {
                 *value = b"[redacted]".to_vec();
             }
         }
+        // The startup part ends with the first request
+        recorder.prefix_done = true;
         recorder.write(&Entry::Request { rid, request });
     });
 }
@@ -617,11 +748,14 @@ pub fn record_response(rid: u64, reply: Reply) {
         recorder.write(&Entry::Response { rid, reply });
         // Whole up to here on disk: a journal is worth reading while its worker still runs
         let _ = recorder.file.flush();
+        if recorder.size > recorder.max_size {
+            recorder.cut();
+        }
     });
 }
 
 /// An op finished; a result above --record-max-body is cut and marked.
-pub fn record_op(op: u64, kind: &str, detail: &str, result: &OpResult) {
+pub fn record_op(op: u64, request: u64, kind: &str, detail: &str, result: &OpResult) {
     with(|recorder| {
         let max = recorder.max_body;
         let too_big = match result {
@@ -649,6 +783,7 @@ pub fn record_op(op: u64, kind: &str, detail: &str, result: &OpResult) {
         };
         recorder.write(&Entry::Op {
             op,
+            request,
             kind: kind.to_owned(),
             detail: detail.to_owned(),
             result,
@@ -754,6 +889,7 @@ mod tests {
             },
             Entry::Op {
                 op: 8,
+                request: 7,
                 kind: "fetch".into(),
                 detail: "GET http://x".into(),
                 result: OpResult::Http {
@@ -764,6 +900,7 @@ mod tests {
             },
             Entry::Op {
                 op: 9,
+                request: 0,
                 kind: "fs".into(),
                 detail: "read x".into(),
                 result: OpResult::Failure {
@@ -781,6 +918,7 @@ mod tests {
             },
             Entry::Gone { rid: 7 },
             Entry::Value {
+                request: 7,
                 name: "time".into(),
                 value: b"i:5;".to_vec(),
             },

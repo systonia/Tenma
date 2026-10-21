@@ -15,15 +15,16 @@ tenma --stubs [DIR]
 tenma --version
 ```
 
-| Command                                   | Does                                                                                                                     |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `tenma script.php`                        | runs the script; it serves if it starts an `Http\Server`                                                                 |
-| `tenma build [tenma.dev.php]`             | runs the [build hooks](watch.md#tenma-build) once, `./tenma.dev.php` by default                                          |
-| `tenma lsp`                               | the [language server](language-server.md), on stdin and stdout                                                           |
-| `tenma docs [paths] [--out <dir>]`        | writes [reference pages](reference-docs.md), into `docs/reference` by default                                            |
-| `tenma --stubs [DIR]`                     | prints Tenma's PHP API as stubs, or writes one file per class to DIR (see [Stubs for IDEs](#stubs-for-ides-and-phpstan)) |
-| `tenma replay FILE [--until N] [--check]` | plays a journal from `--record` into a fresh interpreter ([Record and replay](replay.md))                                |
-| `tenma --version`, `tenma -v`             | prints the Tenma and PHP versions, such as `tenma 0.2.0 (PHP 8.5.9)`                                                     |
+| Command                                                  | Does                                                                                                                     |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `tenma script.php`                                       | runs the script; it serves if it starts an `Http\Server`                                                                 |
+| `tenma build [tenma.dev.php]`                            | runs the [build hooks](watch.md#tenma-build) once, `./tenma.dev.php` by default                                          |
+| `tenma lsp`                                              | the [language server](language-server.md), on stdin and stdout                                                           |
+| `tenma docs [paths] [--out <dir>]`                       | writes [reference pages](reference-docs.md), into `docs/reference` by default                                            |
+| `tenma --stubs [DIR]`                                    | prints Tenma's PHP API as stubs, or writes one file per class to DIR (see [Stubs for IDEs](#stubs-for-ides-and-phpstan)) |
+| `tenma replay FILE [--until N \| --request N] [--check]` | plays a journal from `--record` into a fresh interpreter ([Record and replay](replay.md))                                |
+| `tenma replay FILE --list`                               | the requests of a journal, numbered for `--request`                                                                      |
+| `tenma --version`, `tenma -v`                            | prints the Tenma and PHP versions, such as `tenma 0.2.0 (PHP 8.5.9)`                                                     |
 
 `lsp`, `docs`, `--stubs` and `--version` only count as the first argument. `build` comes after the options, so `tenma -d memory_limit=1G build` works.
 
@@ -57,6 +58,7 @@ Options come before the script. Each takes its value as the next argument.
 | `--inspect-brk[=[HOST:]PORT]`  | `127.0.0.1:9229`                | the debugger; the script waits, then stops at its first line                                       |
 | `--record DIR`                 | none                            | every worker writes its journal there ([Record and replay](replay.md))                             |
 | `--record-on error`            | always                          | keeps a journal only after a 5xx or a fatal error                                                  |
+| `--record-max-size SIZE`       | `50m`                           | cuts a worker's journal and goes on in the next file                                               |
 | `--record-max-body SIZE`       | `1m`                            | cuts request bodies and op results above this in the journal                                       |
 | `--record-redact HEADER,...`   | none                            | replaces these request headers in the journal                                                      |
 

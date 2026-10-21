@@ -7,6 +7,11 @@
 //! `--check` compares every response with the recorded one, `--until N` stops after request N. With
 //! `--inspect` the debugger can also step back: src/inspect.rs restarts the worker, which replays
 //! again up to the statement before.
+//!
+//! `--request N` plays the startup part and then request N alone, without the requests before it: the
+//! ops and values that belong to it are answered in their order, everything else waits forever. If
+//! the request depended on what earlier requests left in memory, it starts other ops than recorded
+//! and the replay says so. `--list` shows the requests of a file.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -23,13 +28,28 @@ pub struct Plan {
     pub entries: Vec<Entry>,
     pub until: Option<u64>,
     pub check: bool,
+    /// --request N: the N-th request of the file alone, after the startup part.
+    pub request: Option<usize>,
+}
+
+/// Where a --request replay is: the startup part as recorded, then the chosen request alone.
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Everything,
+    Startup,
+    Alone(u64),
 }
 
 struct State {
     entries: Rc<Vec<Entry>>,
     at: usize,
-    /// Ops PHP has started and waits for: what they are, by ID.
-    pending: HashMap<u64, (String, String)>,
+    phase: Phase,
+    /// --request N.
+    wanted: Option<usize>,
+    /// In a file cut from an earlier one: the index where its startup part ends.
+    startup_end: Option<usize>,
+    /// Ops PHP has started and waits for: what they are and the request they belong to, by ID.
+    pending: std::collections::BTreeMap<u64, (String, String, u64)>,
     started: Rc<Notify>,
     diverged: Option<String>,
     check: bool,
@@ -59,7 +79,14 @@ pub fn prepare(plan: &Plan) {
             entries: Rc::new(plan.entries.clone()),
             // After the header, which replay_journal has read already
             at: 1,
-            pending: HashMap::new(),
+            phase: if plan.request.is_some() {
+                Phase::Startup
+            } else {
+                Phase::Everything
+            },
+            wanted: plan.request,
+            startup_end: startup_entries(&plan.entries).map(|count| count + 1),
+            pending: std::collections::BTreeMap::new(),
             started: Rc::new(Notify::new()),
             diverged: None,
             check: plan.check,
@@ -86,9 +113,16 @@ fn peek(state: &State) -> Option<&Entry> {
 pub fn intercept(kind: &str, detail: &str) -> Option<u64> {
     with(|state| {
         let op = php::next_id();
+        let request = php::current_request();
+        // Alone: an op of other code (a timer, a background task) waits forever, it would not have run
+        if let Phase::Alone(rid) = state.phase
+            && request != rid
+        {
+            return op;
+        }
         state
             .pending
-            .insert(op, (kind.to_owned(), detail.to_owned()));
+            .insert(op, (kind.to_owned(), detail.to_owned(), request));
         state.started.notify_one();
         op
     })
@@ -100,6 +134,13 @@ pub fn take_value(name: &str) -> Option<Vec<u8>> {
         if state.diverged.is_some() {
             return None;
         }
+        // Alone: only the chosen request's values come from the journal, other code gets real ones
+        if let Phase::Alone(rid) = state.phase {
+            if php::current_request() != rid {
+                return None;
+            }
+            skip_others(state, rid);
+        }
         // Notes stand between the entries and say nothing about the order
         while let Some(Entry::Note(text)) = peek(state) {
             eprintln!("tenma replay: note: {text}");
@@ -109,6 +150,7 @@ pub fn take_value(name: &str) -> Option<Vec<u8>> {
             Some(Entry::Value {
                 name: recorded,
                 value,
+                ..
             }) if recorded == name => {
                 let value = value.clone();
                 state.at += 1;
@@ -128,6 +170,16 @@ pub fn take_value(name: &str) -> Option<Vec<u8>> {
         }
     })
     .flatten()
+}
+
+/// Alone: moves past the entries that do not belong to request `rid`.
+fn skip_others(state: &mut State, rid: u64) {
+    while let Some(entry) = state.entries.get(state.at) {
+        if journal::request_of(entry) == Some(rid) {
+            break;
+        }
+        state.at += 1;
+    }
 }
 
 /// A blocking function ran during the replay: once per name, a warning.
@@ -174,12 +226,42 @@ pub async fn drive() -> u8 {
             eprintln!("tenma replay: diverged: {message}");
             return 1;
         }
+        // Alone: the entries of other requests and of background code are not played
+        if let Some(Phase::Alone(rid)) = with(|state| state.phase) {
+            with(|state| skip_others(state, rid));
+        }
         let Some(at) = with(|state| state.at) else {
             return 1;
         };
         let Some(entry) = entries.get(at) else {
             break;
         };
+        // The startup part is over at the first request, or where a cut file says: from the chosen
+        // request on, it plays alone
+        let startup_over = match with(|state| (state.phase, state.startup_end)) {
+            Some((Phase::Startup, Some(end))) => at >= end,
+            Some((Phase::Startup, None)) => matches!(entry, Entry::Request { .. }),
+            _ => false,
+        };
+        if startup_over {
+            let wanted = with(|state| state.wanted).flatten().unwrap_or(1);
+            let chosen = entries
+                .iter()
+                .enumerate()
+                .skip(at)
+                .filter(|(_, entry)| matches!(entry, Entry::Request { .. }))
+                .nth(wanted - 1);
+            let Some((index, Entry::Request { rid, .. })) = chosen else {
+                eprintln!("tenma replay: the file has no request {wanted}, see --list");
+                return 1;
+            };
+            let rid = *rid;
+            with(|state| {
+                state.at = index;
+                state.phase = Phase::Alone(rid);
+            });
+            continue;
+        }
         match entry {
             Entry::Header(_) | Entry::Note(_) => {
                 if let Entry::Note(text) = entry {
@@ -205,8 +287,10 @@ pub async fn drive() -> u8 {
                     state.expected.insert(*rid, reply.clone());
                 });
                 compare(*rid);
-                let done = with(|state| state.until.is_some_and(|until| state.responses >= until))
-                    .unwrap_or(true);
+                let alone = with(|state| matches!(state.phase, Phase::Alone(_))).unwrap_or(false);
+                let done = alone
+                    || with(|state| state.until.is_some_and(|until| state.responses >= until))
+                        .unwrap_or(true);
                 if done {
                     eprintln!(
                         "tenma replay: stopped after request {}",
@@ -220,11 +304,28 @@ pub async fn drive() -> u8 {
                 kind,
                 detail,
                 result,
+                ..
             } => {
-                // PHP starts an op synchronously while it runs; wait until it has started this one
+                // PHP starts an op synchronously while it runs; wait until it has started this one. Alone,
+                // the ops have other IDs than recorded: the request's oldest one waiting stands for it
+                let alone = with(|state| state.phase).and_then(|phase| match phase {
+                    Phase::Alone(rid) => Some(rid),
+                    _ => None,
+                });
                 let waited = tokio::time::timeout(START_WAIT, async {
                     loop {
-                        let found = with(|state| state.pending.remove(op)).flatten();
+                        let found = with(|state| match alone {
+                            Some(rid) => {
+                                let id = state
+                                    .pending
+                                    .iter()
+                                    .find(|(_, (_, _, request))| *request == rid)
+                                    .map(|(id, _)| *id)?;
+                                state.pending.remove(&id).map(|found| (id, found))
+                            }
+                            None => state.pending.remove(op).map(|found| (*op, found)),
+                        })
+                        .flatten();
                         if let Some(found) = found {
                             return Some(found);
                         }
@@ -232,12 +333,12 @@ pub async fn drive() -> u8 {
                     }
                 })
                 .await;
-                let Ok(Some((started_kind, started_detail))) = waited else {
+                let Ok(Some((started_op, (started_kind, started_detail, _)))) = waited else {
                     let others = with(|state| {
                         state
                             .pending
                             .values()
-                            .map(|(kind, detail)| format!("{kind} {detail}"))
+                            .map(|(kind, detail, _)| format!("{kind} {detail}"))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
@@ -258,7 +359,7 @@ pub async fn drive() -> u8 {
                     return 1;
                 }
                 with(|state| state.at += 1);
-                if php::complete(*op, result.clone()).is_err() {
+                if php::complete(started_op, result.clone()).is_err() {
                     eprintln!("tenma replay: fatal error while resuming op {op}");
                     return 1;
                 }
@@ -466,6 +567,7 @@ pub fn plan(args: &[String]) -> Result<Plan, String> {
         entries,
         until: None,
         check: false,
+        request: None,
     };
     let mut rest = args[1..].iter();
     while let Some(arg) = rest.next() {
@@ -481,10 +583,90 @@ pub fn plan(args: &[String]) -> Result<Plan, String> {
                         .ok_or(format!("--until {number}: not a number above 0"))?,
                 );
             }
+            "--request" => {
+                let number = rest
+                    .next()
+                    .ok_or("--request needs a request number, see --list")?;
+                plan.request = Some(
+                    number
+                        .parse()
+                        .ok()
+                        .filter(|&n| n > 0)
+                        .ok_or(format!("--request {number}: not a number above 0"))?,
+                );
+            }
             other => return Err(format!("tenma replay: unknown option {other}")),
         }
     }
+    if plan.request.is_none() && partial(&plan.entries) {
+        return Err(format!(
+            "{file} starts after its worker's start (the journal was cut at --record-max-size): play one request with --request N, see --list"
+        ));
+    }
     Ok(plan)
+}
+
+/// In a file cut from an earlier one: how many entries after the header are its startup part.
+fn startup_entries(entries: &[Entry]) -> Option<usize> {
+    let Some(Entry::Header(json)) = entries.first() else {
+        return None;
+    };
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .get("startup_entries")?
+        .as_u64()
+        .map(|count| count as usize)
+}
+
+/// Whether the header says the file was cut from an earlier one.
+fn partial(entries: &[Entry]) -> bool {
+    let Some(Entry::Header(json)) = entries.first() else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(json)
+        .is_ok_and(|header| header["partial"].as_bool() == Some(true))
+}
+
+/// `tenma replay FILE --list`: the requests of the file, with the number --request takes.
+pub fn list(file: &str) -> Result<String, String> {
+    let data = std::fs::read(file).map_err(|error| format!("{file}: {error}"))?;
+    let entries = journal::read_all(&data);
+    if !matches!(entries.first(), Some(Entry::Header(_))) {
+        return Err(format!("{file}: not a tenma journal"));
+    }
+    let statuses: HashMap<u64, String> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Response { rid, reply } => Some((
+                *rid,
+                match reply {
+                    Reply::Full { status, .. } | Reply::Stream { status, .. } => status.to_string(),
+                    Reply::Upgrade => "101".into(),
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+    let mut out = String::new();
+    if partial(&entries) {
+        out.push_str("cut from an earlier file: play one request at a time with --request N\n");
+    }
+    let mut number = 0;
+    for entry in &entries {
+        if let Entry::Request { rid, request } = entry {
+            number += 1;
+            out.push_str(&format!(
+                "{number:>5}  {:>3}  {} {}\n",
+                statuses.get(rid).map_or("-", String::as_str),
+                String::from_utf8_lossy(&request.method),
+                String::from_utf8_lossy(&request.uri)
+            ));
+        }
+    }
+    if number == 0 {
+        out.push_str("no requests\n");
+    }
+    Ok(out)
 }
 
 /// The PHP settings of the recording from a journal's header: --watch, the -d settings, the -c path.

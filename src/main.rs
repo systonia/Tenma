@@ -47,7 +47,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--durable postgres://URL] [--plugin FILE] [--config tenma.json] [--stop-timeout SECONDS] [--record DIR [--record-on error] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N] [--check] [--inspect]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--durable postgres://URL] [--plugin FILE] [--config tenma.json] [--stop-timeout SECONDS] [--record DIR [--record-on error] [--record-max-size SIZE] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N | --request N] [--check]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma replay FILE --list   (the requests of a journal, numbered for --request)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -407,6 +407,10 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
                 "always" => record.get_or_insert_with(Default::default).only_on_error = false,
                 other => return Err(format!("--record-on {other}: error or always")),
             },
+            "--record-max-size" => {
+                record.get_or_insert_with(Default::default).max_size =
+                    parse_size(&value("--record-max-size")?)? as u64;
+            }
             "--record-max-body" => {
                 record.get_or_insert_with(Default::default).max_body =
                     parse_size(&value("--record-max-body")?)?;
@@ -600,8 +604,8 @@ fn with_config(given: &[String]) -> Result<Vec<String>, String> {
         match key.as_str() {
             "workers" | "max-body" | "max-requests" | "max-connections" | "request-timeout"
             | "db-pool" | "pubsub" | "pdo-pgsql" | "durable" | "server-name" | "tls-cert"
-            | "tls-key" | "c" | "record" | "record-on" | "record-max-body" | "record-redact"
-            | "stop-timeout" => {
+            | "tls-key" | "c" | "record" | "record-on" | "record-max-body" | "record-max-size"
+            | "record-redact" | "stop-timeout" => {
                 front.push(option);
                 front.push(scalar(value)?);
             }
@@ -657,6 +661,19 @@ fn run(argv: &[String], options: Options) -> u8 {
         return build(argv.get(1).map_or(dev::FILE, String::as_str), options);
     }
     if argv[0] == "replay" {
+        if argv.get(2).is_some_and(|arg| arg == "--list") {
+            return match argv.get(1).map(|file| replay::list(file)) {
+                Some(Ok(listing)) => {
+                    print!("{listing}");
+                    0
+                }
+                Some(Err(message)) => {
+                    eprintln!("tenma: {message}");
+                    2
+                }
+                None => 2,
+            };
+        }
         return replay_journal(&argv[1..], options);
     }
     let mut changes = if options.watch {

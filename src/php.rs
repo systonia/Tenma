@@ -59,6 +59,7 @@ unsafe extern "C" {
     fn tenma_set_server_name(name: *const c_char);
     fn tenma_set_pdo_native();
     fn tenma_stopping() -> c_int;
+    fn tenma_current_request() -> u64;
     fn tenma_stop_handlers_running() -> c_int;
     fn tenma_stop();
     fn tenma_thread_start() -> c_int;
@@ -117,6 +118,12 @@ pub fn text(ptr: *const u8, len: usize) -> String {
 /// A new ID for requests and ops, never 0.
 pub fn next_id() -> u64 {
     NEXT_ID.replace(NEXT_ID.get() + 1)
+}
+
+/// The request whose code runs right now; 0 for none (startup, timers, detached tasks). Only while
+/// PHP runs on this thread.
+pub fn current_request() -> u64 {
+    unsafe { tenma_current_request() }
 }
 
 /// A replay gives requests and ops the IDs the journal recorded.

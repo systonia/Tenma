@@ -381,6 +381,7 @@ async fn append(
     };
     entries.push(Entry::Op {
         op: 0,
+        request: 0,
         kind: kind.to_owned(),
         detail: detail.to_owned(),
         result: result.clone(),
@@ -495,6 +496,7 @@ pub fn take_value(name: &str) -> Option<Vec<u8>> {
         Some(Entry::Value {
             name: recorded,
             value,
+            ..
         }) if recorded == name => {
             let value = value.clone();
             run.entries.pop_front();
@@ -512,6 +514,7 @@ pub fn keep_value(name: &str, value: &[u8]) -> bool {
         return false;
     };
     run.borrow_mut().pending.push(Entry::Value {
+        request: 0,
         name: name.to_owned(),
         value: value.to_vec(),
     });
@@ -595,6 +598,7 @@ pub async fn poll() {
             .unwrap_or(0);
             let entry = Entry::Op {
                 op: 0,
+                request: 0,
                 kind: "durable.wait".into(),
                 detail,
                 result,

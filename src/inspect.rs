@@ -232,6 +232,8 @@ thread_local! {
     static LAST: RefCell<HashMap<usize, Vec<Moment>>> = RefCell::new(HashMap::new());
     /// Replaying again: stop at this statement, nowhere before.
     static TARGET: Cell<Option<Moment>> = const { Cell::new(None) };
+    /// The fiber of the last statement: where an exception was thrown.
+    static LAST_FIBER: Cell<usize> = const { Cell::new(0) };
     /// A step back was asked for: the replay starts over once the worker gets there.
     static AGAIN: Cell<bool> = const { Cell::new(false) };
     /// The furthest statement any pass of this replay ran: what lies before it was shown already.
@@ -669,6 +671,7 @@ fn arrive(file: &[u8], line: u32, fiber: usize, entry: bool) {
         line,
         depth: unsafe { tenma_inspect_depth() },
     };
+    LAST_FIBER.set(fiber);
     LAST.with_borrow_mut(|last| {
         let history = last.entry(fiber).or_default();
         history.push(here);
@@ -706,6 +709,12 @@ fn arrive(file: &[u8], line: u32, fiber: usize, entry: bool) {
 
 /// Stops, and after a step stops again where it arrives.
 fn stop_here(body: Value, fiber: usize) {
+    stop_at(body, fiber, false);
+}
+
+/// Stops; `thrown`: at an exception, where a step back goes to the statement that threw, and a step
+/// forward acts as continue.
+fn stop_at(body: Value, fiber: usize, thrown: bool) {
     STEPPING.set(None);
     let now = LAST
         .with_borrow(|last| last.get(&fiber).and_then(|history| history.last().copied()))
@@ -723,7 +732,9 @@ fn stop_here(body: Value, fiber: usize) {
         // Back in time: the replay starts over and runs up to the moment wanted, the statement
         // before this one in its fiber, or the last stop before it
         Some(Step::Back | Step::Reverse) => {
-            let target = if step == Some(Step::Back) {
+            let target = if step == Some(Step::Back) && thrown {
+                Some(now)
+            } else if step == Some(Step::Back) {
                 LAST.with_borrow(|last| {
                     last.get(&fiber).and_then(|history| {
                         history
@@ -752,6 +763,8 @@ fn stop_here(body: Value, fiber: usize) {
             AGAIN.set(true);
             crate::request_restart();
         }
+        // ponytail: a step from an exception acts as continue; stepping into the catch block needs the depth it lands at
+        _ if thrown => {}
         other => STEPPING.set(other.map(|step| (step, fiber, unsafe { tenma_inspect_depth() }))),
     }
 }
@@ -759,7 +772,11 @@ fn stop_here(body: Value, fiber: usize) {
 /// `Debugger::break()`: stops if an editor is connected.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_debugger(fiber: usize) {
-    if ENDING.load(Ordering::Relaxed) || CLIENT.lock().unwrap().is_none() {
+    if ENDING.load(Ordering::Relaxed)
+        || AGAIN.get()
+        || TARGET.get().is_some()
+        || CLIENT.lock().unwrap().is_none()
+    {
         return;
     }
     stop_here(
@@ -783,7 +800,12 @@ extern "C" fn tenma_rs_exception(
         .filter(|class| !class.is_empty())
         .map(|class| class_key(&String::from_utf8_lossy(class)))
         .collect();
-    if ENDING.load(Ordering::Relaxed) || !EXCEPTIONS.lock().unwrap().stop(&classes, uncaught) {
+    // Nothing stops on the way back to a statement, nor while an old pass of a replay winds down
+    if ENDING.load(Ordering::Relaxed)
+        || AGAIN.get()
+        || TARGET.get().is_some()
+        || !EXCEPTIONS.lock().unwrap().stop(&classes, uncaught)
+    {
         return;
     }
     let description = String::from_utf8_lossy(bytes(description, description_len)).into_owned();
@@ -792,10 +814,12 @@ extern "C" fn tenma_rs_exception(
     } else {
         "Paused on exception"
     };
-    // ponytail: a step from here acts as continue; stepping into the catch block needs the fiber and depth
-    STEPPING.set(None);
     // The editor shows the text at the exception (class and message), the description in the call stack
-    let _ = stop(json!({"reason": "exception", "description": reason, "text": description}));
+    stop_at(
+        json!({"reason": "exception", "description": reason, "text": description}),
+        LAST_FIBER.get(),
+        true,
+    );
 }
 
 /// The breakpoints that stop at this line; copies: evaluating a condition must not hold the lock.

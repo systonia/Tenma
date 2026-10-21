@@ -144,6 +144,7 @@ fn spawn_task(
         return 0;
     }
     let op = php::next_id();
+    let request = php::current_request();
     // The task owns the guard from the start: even a task aborted before it ever ran cleans up
     // RUNNING
     let finished = Finished(op);
@@ -156,7 +157,7 @@ fn spawn_task(
         {
             result = OpResult::Error(format!("cannot write the durable journal: {error}"));
         }
-        crate::journal::record_op(op, kind, &detail, &result);
+        crate::journal::record_op(op, request, kind, &detail, &result);
         // After a fatal error the interpreter is unusable until the worker has restarted
         if !crate::broken() && php::complete(op, result).is_err() {
             crate::interpreter_broken();

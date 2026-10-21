@@ -55,6 +55,7 @@ tenma lsp                            # language server for editors
 tenma docs [<path>...] [--out <dir>] # Markdown reference pages
 tenma --stubs [DIR]                  # the PHP API as stubs
 tenma replay FILE [--check]          # play a journal from --record again
+tenma replay FILE --list             # its requests, for --request N
 tenma --version
 ```
 
