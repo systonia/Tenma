@@ -4227,7 +4227,8 @@ fn pdo_pgsql_runs_on_tokio_postgres() {
         ])
         .env(
             "DATABASE_URL",
-            format!("postgres://{user}@localhost/postgres"),
+            std::env::var("DATABASE_URL")
+                .unwrap_or(format!("postgres://{user}@localhost/postgres")),
         )
         .output()
         .unwrap();
