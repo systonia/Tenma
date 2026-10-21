@@ -30,10 +30,14 @@ extern "C" fn tenma_rs_journal_value(
     len: usize,
 ) {
     let name = String::from_utf8_lossy(bytes(name, name_len)).into_owned();
-    record(Entry::Value {
-        name,
-        value: bytes(value, len).to_vec(),
-    });
+    let value = bytes(value, len);
+    crate::durable::keep_value(&name, value);
+    if recording() {
+        record(Entry::Value {
+            name,
+            value: value.to_vec(),
+        });
+    }
 }
 
 /// A replay: the recorded value of the wrapped function `name`, if the journal has it next; the C
@@ -46,7 +50,7 @@ extern "C" fn tenma_rs_journal_take(
     len: *mut usize,
 ) -> std::ffi::c_int {
     let name = String::from_utf8_lossy(bytes(name, name_len)).into_owned();
-    match crate::replay::take_value(&name) {
+    match crate::durable::take_value(&name).or_else(|| crate::replay::take_value(&name)) {
         Some(bytes) => {
             let mut bytes = std::mem::ManuallyDrop::new(bytes.into_boxed_slice());
             unsafe {
@@ -666,6 +670,10 @@ pub fn finish(files: Vec<(String, String)>) {
         let _ = std::fs::remove_file(&recorder.path);
     } else {
         eprintln!("tenma: journal written to {}", recorder.path.display());
+    }
+    // Durable functions still need the wrapped functions to report
+    if crate::durable::enabled() {
+        set_mode(1);
     }
 }
 

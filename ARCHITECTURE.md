@@ -35,6 +35,7 @@ Rust:
 | `src/inspect.rs` | `--inspect`: the debugger, stops a worker inside PHP's statement handler                                                    |
 | `src/journal.rs` | `--record`: the event journal of a worker life, its format, and the values of the wrapped PHP functions                     |
 | `src/replay.rs`  | `tenma replay`: plays a journal into a fresh interpreter, answers every op from it, checks responses                        |
+| `src/durable.rs` | `--durable`: the journal of a durable function in Postgres, its lease, its timers and signals, the poller                   |
 
 PHP, in `stdlib/`: one file per class, folders by namespace, the functions of a namespace in its
 `functions.php`. `build.rs` embeds every file; `src/stdlib.rs` loads them.

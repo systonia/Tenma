@@ -41,6 +41,7 @@ Options come before the script. Each takes its value as the next argument.
 | `--db-pool N`                  | 20 / workers, 2–10 | Postgres connections per worker and URL                                                            |
 | `--pubsub redis://HOST`        | none               | messages of `Messaging\Channel` go through Redis and reach every process                           |
 | `--pdo-pgsql native`           | `tenma`            | PDO keeps ext/pdo_pgsql and libpq for `pgsql:` DSNs, see [Plain PHP under tenma](compatibility.md) |
+| `--durable postgres://URL`     | none               | the database of [durable functions](durable.md)                                                    |
 | `--tls-cert FILE`              | none               | serves HTTPS with this certificate chain (PEM); needs `--tls-key` ([HTTPS](deployment.md#https))   |
 | `--tls-key FILE`               | none               | the private key of the certificate (PEM)                                                           |
 | `--tls-port N`                 | every port         | HTTPS only on this port, plain HTTP on the others; any number of times                             |

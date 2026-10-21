@@ -29,6 +29,13 @@ fn get(port: u16, path: &str) -> String {
     )
 }
 
+/// The body of a raw HTTP response.
+fn body(response: String) -> String {
+    response
+        .split_once("\r\n\r\n")
+        .map_or(response.clone(), |(_, body)| body.to_owned())
+}
+
 fn request(port: u16, raw: &str) -> String {
     let started = Instant::now();
     let mut stream = loop {
@@ -4410,4 +4417,119 @@ fn replay_steps_back_in_the_debugger() {
     dap.command("reverseContinue");
     assert_eq!(dap.stopped().line, 21);
     dap.command("continue");
+}
+
+#[test]
+fn durable_functions_survive_a_crash_and_finish_elsewhere() {
+    let user = std::env::var("USER").unwrap();
+    let url =
+        std::env::var("DATABASE_URL").unwrap_or(format!("postgres://{user}@localhost/postgres"));
+    if TcpStream::connect("127.0.0.1:5432").is_err() {
+        skip("no Postgres reachable");
+        return;
+    }
+    let directory = scratch("durable");
+    let marker = directory.join("steps.log");
+    let run = |port: u16, who: &str, version: &str| {
+        Server(
+            Command::new(env!("CARGO_BIN_EXE_tenma"))
+                .args(["--durable", &url, "tests/fixtures/durable.php"])
+                .env("PORT", port.to_string())
+                .env("WHO", who)
+                .env("VERSION", version)
+                .env("MARKER", &marker)
+                .spawn()
+                .unwrap(),
+        )
+    };
+    // The tables are shared with earlier runs: keys of this run only, and only their lines
+    let suffix = std::process::id().to_string();
+    let key = |name: &str| format!("{name}-{suffix}");
+    let steps = || {
+        let mut current = String::new();
+        let mut mine = false;
+        for line in std::fs::read_to_string(&marker).unwrap_or_default().lines() {
+            if line.starts_with("started ") {
+                mine = line.contains(&suffix);
+            }
+            if mine {
+                current.push_str(line);
+                current.push('\n');
+            }
+        }
+        current
+    };
+
+    let mut first = run(18_188, "A", "1");
+    assert_eq!(
+        body(get(18_188, &format!("/start?key={}", key("one")))),
+        "started\n"
+    );
+    assert_eq!(
+        body(get(18_188, &format!("/start?key={}", key("one")))),
+        "not started\n"
+    );
+    // A signal nobody waits for yet is kept
+    assert_eq!(
+        body(get(18_188, &format!("/early?key={}", key("early")))),
+        "sent\n"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        steps().contains(&format!("started {} by A", key("one"))),
+        "{}",
+        steps()
+    );
+    // The process dies with the function waiting for its payment
+    first.0.kill().unwrap();
+    let _ = first.0.wait();
+
+    let _second = run(18_189, "B", "1");
+    assert_eq!(
+        body(get(18_189, &format!("/pay?key={}", key("one")))),
+        "sent\n"
+    );
+    assert_eq!(
+        body(get(18_189, &format!("/start?key={}", key("early")))),
+        "started\n"
+    );
+    // The poller wakes both within a second, the timer of 1.5 s later
+    std::thread::sleep(Duration::from_millis(4500));
+    let log = steps();
+    for expected in [
+        &format!("paid {{\"failed\":false,\"amount\":42}} by B"),
+        "paid \"kept\" by B",
+        "timer by B",
+        &format!("done {}", key("one")),
+        &format!("done {}", key("early")),
+    ] {
+        assert!(log.contains(expected), "missing {expected} in:\n{log}");
+    }
+    assert_eq!(
+        log.matches(&format!("done {}", key("one"))).count(),
+        1,
+        "{log}"
+    );
+    // The random value is journaled: it appears once per function, the same whenever the code runs again
+    assert_eq!(log.matches("random ").count(), 2, "{log}");
+
+    // A journal of version 1 refuses to run with version 2
+    assert_eq!(
+        body(get(18_189, &format!("/start?key={}", key("two")))),
+        "started\n"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let mut third = run(18_190, "C", "2");
+    assert_eq!(
+        body(get(18_190, &format!("/pay?key={}", key("two")))),
+        "sent\n"
+    );
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(
+        !steps().contains(&format!("done {}", key("two"))),
+        "{}",
+        steps()
+    );
+    third.0.kill().unwrap();
+    let _ = third.0.wait();
 }

@@ -9,6 +9,7 @@
 
 mod db;
 mod dev;
+mod durable;
 mod files;
 mod fs;
 mod inspect;
@@ -45,7 +46,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--record DIR [--record-on error] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N] [--check] [--inspect]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--durable postgres://URL] [--record DIR [--record-on error] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N] [--check] [--inspect]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -387,6 +388,13 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
                     .map(|name| name.trim().to_ascii_lowercase())
                     .filter(|name| !name.is_empty())
                     .collect();
+            }
+            "--durable" => {
+                let url = value("--durable")?;
+                if !url.starts_with("postgres://") && !url.starts_with("postgresql://") {
+                    return Err(format!("--durable {url}: a postgres:// URL"));
+                }
+                durable::configure(&url);
             }
             "--pdo-pgsql" => match value("--pdo-pgsql")?.as_str() {
                 "native" => php::pdo_native(),
@@ -793,6 +801,9 @@ fn worker(
         if options.inspect.is_some() && !dev {
             inspect::thread();
         }
+        if durable::enabled() && !dev {
+            journal::set_mode(1);
+        }
         BROKEN.set(false);
         HANDLED.set(0);
         watch::forget();
@@ -1124,6 +1135,11 @@ fn serve(
             eprintln!("tenma: fatal error in the script's startup work, shutting down");
             php::request_exit(255);
             return Stop::Closed;
+        }
+        // One worker per process fires the timers and signals of durable functions
+        static POLLER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if durable::enabled() && !POLLER.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tokio::task::spawn_local(durable::poll());
         }
         loop {
             tokio::select! {

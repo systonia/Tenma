@@ -105,6 +105,15 @@ pub fn spawn_uncancellable(
     spawn_with(kind, detail, future, false)
 }
 
+/// An op of the durable machinery itself: never answered from a journal, never recorded in one.
+pub fn spawn_plain(
+    kind: &'static str,
+    detail: String,
+    future: impl Future<Output = OpResult> + 'static,
+) -> u64 {
+    spawn_task(kind, detail, future, true, None)
+}
+
 fn spawn_with(
     kind: &'static str,
     detail: String,
@@ -114,9 +123,25 @@ fn spawn_with(
     if !IN_LOOP.get() {
         return 0;
     }
-    // A replay answers from the journal instead of running the op
+    // A replay, or a durable function with entries left, answers from the journal instead of running the op
     if let Some(op) = crate::replay::intercept(kind, &detail) {
         return op;
+    }
+    if let Some(op) = crate::durable::intercept(kind, &detail) {
+        return op;
+    }
+    spawn_task(kind, detail, future, abortable, crate::durable::starting())
+}
+
+fn spawn_task(
+    kind: &'static str,
+    detail: String,
+    future: impl Future<Output = OpResult> + 'static,
+    abortable: bool,
+    durable: Option<String>,
+) -> u64 {
+    if !IN_LOOP.get() {
+        return 0;
     }
     let op = php::next_id();
     // The task owns the guard from the start: even a task aborted before it ever ran cleans up
@@ -124,7 +149,13 @@ fn spawn_with(
     let finished = Finished(op);
     let task = tokio::task::spawn_local(async move {
         let _finished = finished;
-        let result = future.await;
+        let mut result = future.await;
+        // A durable function sees the result only once its journal holds it
+        if let Some(key) = durable
+            && let Err(error) = crate::durable::record(&key, kind, &detail, &result).await
+        {
+            result = OpResult::Error(format!("cannot write the durable journal: {error}"));
+        }
         crate::journal::record_op(op, kind, &detail, &result);
         // After a fatal error the interpreter is unusable until the worker has restarted
         if !crate::broken() && php::complete(op, result).is_err() {

@@ -78,7 +78,9 @@ record, an email after the response). A waiter that gets cancelled only stops wa
 public static function delay(float $seconds): void
 ```
 
-Waits $seconds without blocking the server. Other requests keep running.
+Waits $seconds without blocking the server. Other requests keep running. Inside a durable
+function, a wait of a second or more is kept in the database: the function goes on after it even
+if the process stops meanwhile.
 
 **Parameters**
 

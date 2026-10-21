@@ -25,6 +25,8 @@ final class Task
     public array $context;
     /** @internal What tenma --inspect calls the task: method and URI of a request, Timer, Task. */
     public string $label = 'Task';
+    /** @internal The durable function this task runs, by key. */
+    public ?string $durable = null;
 
     /** @param array<int, mixed>|null $context null: that of the running code */
     private function __construct(?int $request, ?array $context = null)
@@ -110,10 +112,18 @@ final class Task
         return self::start($work, null);
     }
 
-    /** Waits $seconds without blocking the server. Other requests keep running. */
+    /**
+     * Waits $seconds without blocking the server. Other requests keep running. Inside a durable
+     * function, a wait of a second or more is kept in the database: the function goes on after it even
+     * if the process stops meanwhile.
+     */
     public static function delay(float $seconds): void
     {
         \Tenma\Internal\requireFiber();
+        if (\Tenma\Internal\Current::$durable !== null && $seconds >= Durable::TIMER) {
+            Durable::wait('timer', microtime(true) + $seconds);
+            return;
+        }
         \Tenma\Internal\await(\tenma_op_sleep(\Tenma\Internal\milliseconds($seconds)));
     }
 
@@ -148,10 +158,11 @@ final class Task
      * @internal Starts $work right away; runs until the first op, then the caller continues. The
      * task belongs to $request (default: the current one) and is cancelled with it.
      */
-    public static function start(callable $work, int|null|false $request = false, ?array $context = null, string $label = 'Task'): self
+    public static function start(callable $work, int|null|false $request = false, ?array $context = null, string $label = 'Task', ?string $durable = null): self
     {
         $task = new self($request === false ? \Tenma\Internal\Current::$request : $request, $context);
         $task->label = $label;
+        $task->durable = $durable;
         $task->begin($work);
         return $task;
     }
@@ -172,8 +183,10 @@ final class Task
         }
         $task = $this;
         $request = $this->request;
-        $this->fiber = new \Fiber(static function () use ($task, $work, $request): void {
+        $durable = $this->durable;
+        $this->fiber = new \Fiber(static function () use ($task, $work, $request, $durable): void {
             \Tenma\Internal\Current::$request = $request;
+            \Tenma\Internal\enterDurable($durable);
             try {
                 $result = $work();
             } catch (\Throwable $error) {
@@ -189,8 +202,10 @@ final class Task
         }
         // The caller's request, not the task's: after Task::detach() that would be null
         $caller = \Tenma\Internal\Current::$request;
+        $callerDurable = \Tenma\Internal\Current::$durable;
         $this->fiber->start();
         \Tenma\Internal\Current::$request = $caller;
+        \Tenma\Internal\enterDurable($callerDurable);
     }
 
     /** @internal */

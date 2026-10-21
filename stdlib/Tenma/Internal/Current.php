@@ -6,6 +6,8 @@ namespace Tenma\Internal;
 final class Current
 {
     public static ?int $request = null;
+    /** The durable function (Threading\Durable) whose fiber runs right now, by key. */
+    public static ?string $durable = null;
     /** A classic request that still has to respond. */
     public static ?int $classic = null;
     /** The classic request ended with an exception. */

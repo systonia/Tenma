@@ -354,6 +354,20 @@ ZEND_END_ARG_INFO()
 
 PHP_FUNCTION(tenma_pubsub);
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_durable_context, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_op_durable, 0, 4, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, op, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, number, IS_DOUBLE, 0)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(tenma_durable_context);
+PHP_FUNCTION(tenma_op_durable);
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_shutdown, 0, 0, IS_VOID, 0)
 ZEND_END_ARG_INFO()
 
@@ -385,6 +399,8 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE(tenma_op_fs, arginfo_tenma_op_fs)
     ZEND_FE(tenma_op_dev, arginfo_tenma_op_dev)
     ZEND_FE(tenma_pubsub, arginfo_tenma_pubsub)
+    ZEND_FE(tenma_durable_context, arginfo_tenma_durable_context)
+    ZEND_FE(tenma_op_durable, arginfo_tenma_op_durable)
     ZEND_FE(tenma_debugger, arginfo_tenma_shutdown)
     ZEND_FE(tenma_reloaded_by, arginfo_tenma_reloaded_by)
     ZEND_FE(tenma_classic_begin, arginfo_tenma_shutdown)
@@ -2097,7 +2113,7 @@ extern int tenma_rs_journal_take(const char *name, size_t name_len, char **value
 extern void tenma_rs_journal_free(char *value, size_t len);
 extern void tenma_rs_journal_note(const char *name, size_t name_len);
 
-/** 0: nothing. 1: recording. 2: replaying. Per worker thread, set from src/journal.rs and src/replay.rs. */
+/** 0: nothing. Otherwise the wrapped functions report to src/journal.rs, which records, replays or keeps for a durable function. */
 static _Thread_local int journal_mode = 0;
 
 void tenma_set_journal_mode(int mode) {
@@ -2137,7 +2153,7 @@ static ZEND_NAMED_FUNCTION(journaled_function) {
     if (journal_mode != 0 && blocking) {
         tenma_rs_journal_note(ZSTR_VAL(name), ZSTR_LEN(name));
     }
-    if (journal_mode == 2 && !blocking) {
+    if (journal_mode != 0 && !blocking) {
         char *value;
         size_t len;
         if (tenma_rs_journal_take(ZSTR_VAL(name), ZSTR_LEN(name), &value, &len)) {
@@ -2155,7 +2171,7 @@ static ZEND_NAMED_FUNCTION(journaled_function) {
         }
     }
     original(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-    if (journal_mode == 1 && !blocking && EG(exception) == NULL) {
+    if (journal_mode != 0 && !blocking && EG(exception) == NULL) {
         smart_str buffer = {0};
         php_serialize_data_t data;
         PHP_VAR_SERIALIZE_INIT(data);
@@ -3728,6 +3744,45 @@ static int fiber_result(enum outcome result) {
         return code;
     }
     return drain_ready() < 0 ? -1 : code;
+}
+
+/* ---- Durable functions (src/durable.rs) ---- */
+
+extern void tenma_rs_durable_context(const char *key, size_t len);
+extern uint64_t tenma_rs_durable(const char *op, size_t op_len, const char *key, size_t key_len,
+    const char *name, size_t name_len, double number);
+
+/** tenma_durable_context(string $key): void. The durable function whose fiber runs now, '' for none. */
+PHP_FUNCTION(tenma_durable_context) {
+    zend_string *key;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(key)
+    ZEND_PARSE_PARAMETERS_END();
+    tenma_rs_durable_context(ZSTR_VAL(key), ZSTR_LEN(key));
+}
+
+/** tenma_op_durable(string $op, string $key, string $name, float $number): int. An op of the durable machinery. */
+PHP_FUNCTION(tenma_op_durable) {
+    zend_string *op, *key, *name;
+    double number;
+    ZEND_PARSE_PARAMETERS_START(4, 4)
+        Z_PARAM_STR(op)
+        Z_PARAM_STR(key)
+        Z_PARAM_STR(name)
+        Z_PARAM_DOUBLE(number)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_LONG((zend_long) tenma_rs_durable(ZSTR_VAL(op), ZSTR_LEN(op), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(name), ZSTR_LEN(name), number));
+}
+
+/** The poller resumes a durable function: Threading\Durable::resume($name, $key). -1: fatal. */
+int tenma_resume_durable(const char *name, size_t name_len, const char *key, size_t key_len) {
+    zval arguments[2];
+    ZVAL_STRINGL(&arguments[0], name, name_len);
+    ZVAL_STRINGL(&arguments[1], key, key_len);
+    int result = fiber_result(call_stdlib("Threading\\Durable::resume", 2, arguments));
+    zval_ptr_dtor(&arguments[0]);
+    zval_ptr_dtor(&arguments[1]);
+    return result < 0 ? -1 : 0;
 }
 
 /** The event loop is running: Tenma\Internal\started() starts timers and tasks from script startup. -1: fatal. */

@@ -518,6 +518,16 @@ async fn postgres(
     result
 }
 
+/// For the durable machinery: a query ("query", rows as JSON), a statement ("execute", the count) or a
+/// script on the pool of `url`.
+pub async fn run_sql(url: &str, mode: &str, sql: &str, params: Value) -> Result<String, Failure> {
+    let params = match params {
+        Value::Array(list) => list,
+        _ => Vec::new(),
+    };
+    postgres(mode.to_owned(), url.to_owned(), sql.to_owned(), params).await
+}
+
 /// $args: the command and its arguments as "<length>:<bytes>" one after another, so that any bytes
 /// pass. The reply comes back in PHP's serialize() format, binary-safe as well.
 async fn redis_command(url: String, args: Vec<u8>) -> Result<Vec<u8>, Failure> {

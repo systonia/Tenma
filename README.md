@@ -71,6 +71,7 @@ Everything after the script goes to the script's `$argv`.
 | `--pubsub redis://HOST`     | none               | `Messaging\Channel::publish()` through Redis, to every process |
 | `--pdo-pgsql native`        | `tenma`            | PDO keeps libpq for Postgres instead of tenma's driver         |
 | `--record DIR`              | none               | every worker writes its journal there, for `tenma replay`      |
+| `--durable postgres://URL`  | none               | the database of durable functions (`Threading\Durable`)        |
 | `--tls-cert FILE`           | none               | HTTPS with this certificate chain (PEM)                        |
 | `--tls-key FILE`            | none               | the private key for `--tls-cert` (PEM)                         |
 | `--tls-port N`              | every port         | HTTPS only on this port; any number of times                   |

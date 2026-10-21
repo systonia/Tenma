@@ -65,7 +65,7 @@ function suspend(string $token, ?\Closure $onCancel = null): mixed
         $onCancel && $onCancel();
         throw $cancelled;
     }
-    Scheduler::$waiting[$id] = [$token, Current::$request];
+    Scheduler::$waiting[$id] = [$token, Current::$request, Current::$durable];
     try {
         $value = \Fiber::suspend();
     } finally {
@@ -91,10 +91,12 @@ function drain(): void
         [$fiber, $token, $value] = Scheduler::$ready[Scheduler::$head];
         Scheduler::$ready[Scheduler::$head] = null;
         Scheduler::$head++;
-        [$waitingFor, $request] = Scheduler::$waiting[spl_object_id($fiber)] ?? [null, null];
+        [$waitingFor, $request, $durable] = Scheduler::$waiting[spl_object_id($fiber)] ?? [null, null, null];
         if ($waitingFor === $token && $fiber->isSuspended()) {
             Current::$request = $request;
+            enterDurable($durable);
             $fiber->resume($value);
+            enterDurable(null);
         }
     }
     Scheduler::$ready = [];
@@ -108,7 +110,7 @@ function drain(): void
 function interrupt(\Fiber $fiber, \Throwable $error): bool
 {
     $id = spl_object_id($fiber);
-    [$token, $request] = Scheduler::$waiting[$id] ?? [null, null];
+    [$token, $request, $durable] = Scheduler::$waiting[$id] ?? [null, null, null];
     if ($token === null) {
         return false;
     }
@@ -120,7 +122,7 @@ function interrupt(\Fiber $fiber, \Throwable $error): bool
     // A fresh token: a wake already queued with the old one (for example the op's result)
     // is now stale and does not overtake the cancellation
     $fresh = token('interrupt');
-    Scheduler::$waiting[$id] = [$fresh, $request];
+    Scheduler::$waiting[$id] = [$fresh, $request, $durable];
     wake($fiber, $fresh, $error);
     return true;
 }
@@ -275,6 +277,13 @@ function fs(string $op, string $path, string $second = '', bool $flag = false, s
         'exists', 'stat', 'copy' => json_decode($result, true, flags: JSON_THROW_ON_ERROR),
         default => null,
     };
+}
+
+/** The fiber of the durable function $key runs now (null: none): the ops and values it asks for belong to its journal. */
+function enterDurable(?string $key): void
+{
+    Current::$durable = $key;
+    \tenma_durable_context($key ?? '');
 }
 
 /** Seconds for timers and sleep() as milliseconds, validated: INF, NAN and negative values are errors. */
