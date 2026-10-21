@@ -8,8 +8,8 @@
 # On Linux from the distribution's -dev packages (Debian's are in the Dockerfile).
 # ponytail: the binary only runs where these libraries are installed; the Docker image brings them
 set -eu
-VERSION=8.5.9
-SHA256=0db7855f25bcd0ab1d592cdb35e284d6f6a5d2ae0f6f621122e364cc39b708f4
+VERSION=8.5.12
+SHA256=08bc2eba2a588654ade1357174aa646b761556c862dda0678345ee29ed481209
 cd "$(dirname "$0")"
 
 if [ ! -f "php-$VERSION.tar.xz" ]; then

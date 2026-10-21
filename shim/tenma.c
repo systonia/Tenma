@@ -750,6 +750,8 @@ void tenma_set_watch(void) {
  * Defaults that a php.ini or -d can override. Tenma limits the size of bodies and uploads itself
  * (--max-body). Errors go to the log, which is stderr for tenma, never into a response:
  * in PHP, display_errors=stderr only applies to the cli, cgi and phpdbg SAPIs.
+ * Upload progress and fatal error backtraces keep state across requests of one worker, the
+ * attack paths of CVE-2026-109619; tenma's worker lives as long as the process, so both are off.
  */
 static void tenma_ini_defaults(HashTable *configuration_hash) {
     zval tmp;
@@ -757,6 +759,8 @@ static void tenma_ini_defaults(HashTable *configuration_hash) {
     INI_DEFAULT("upload_max_filesize", "0");
     INI_DEFAULT("display_errors", "0");
     INI_DEFAULT("log_errors", "1");
+    INI_DEFAULT("session.upload_progress.enabled", "0");
+    INI_DEFAULT("fatal_error_backtraces", "0");
     if (watch_mode) {
         // Opcache checks timestamps only every 2 s by default and would load the old code right after saving
         INI_DEFAULT("opcache.revalidate_freq", "0");
@@ -3733,6 +3737,9 @@ static enum outcome after_bailout(void) {
     // The longjmp skipped the frames; the pointer points into a C stack that no longer exists.
     // PHP itself resets it at this point (php_request_shutdown: "points into nirvana").
     EG(current_execute_data) = NULL;
+    // A handled out-of-memory error stays set until php_request_shutdown resets it, before the
+    // shutdown functions; until then every call into PHP fails, and Tenma's request never ends
+    EG(delayed_oom).state = ZEND_OOM_STATE_NONE;
     if (PG(last_error_type) & E_FATAL_ERRORS) {
         return CALL_FATAL;
     }
