@@ -7,6 +7,15 @@ use std::time::{Duration, Instant};
 
 struct Server(Child);
 
+/// A test that needs a service tenma is not running next to: skipped on a laptop, failed where TENMA_SERVICES is set:
+/// the Linux job starts the service and a skip would hide a broken database path.
+fn skip(reason: &str) {
+    if std::env::var_os("TENMA_SERVICES").is_some() {
+        panic!("{reason}, but TENMA_SERVICES says it is running");
+    }
+    eprintln!("{reason}, test skipped");
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -808,7 +817,7 @@ fn postgres_and_redis_async() {
             .unwrap(),
     );
     if !get(port, "/setup").starts_with("HTTP/1.1 200") {
-        eprintln!("no Postgres reachable, test skipped");
+        skip("no Postgres reachable");
         return;
     }
 
@@ -1101,7 +1110,7 @@ fn postgres_connections_come_back_clean() {
     if !get(port, "/").starts_with("HTTP/1.1 200")
         || !get(port, "/whoami").starts_with("HTTP/1.1 200")
     {
-        eprintln!("no Postgres reachable, test skipped");
+        skip("no Postgres reachable");
         return;
     }
     // Redis connection gone: tenma rebuilds it on the next command instead of failing forever
@@ -3539,8 +3548,9 @@ fn publish_reaches_every_worker() {
 
 #[test]
 fn publish_through_redis_reaches_other_processes() {
-    if TcpStream::connect("127.0.0.1:6379").is_err() {
-        eprintln!("no Redis reachable, test skipped");
+    let redis = std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into());
+    if TcpStream::connect(redis.trim_start_matches("redis://")).is_err() {
+        skip("no Redis reachable");
         return;
     }
     let ports = [18_133, 18_134];
@@ -3551,7 +3561,7 @@ fn publish_through_redis_reaches_other_processes() {
                     "--workers",
                     "2",
                     "--pubsub",
-                    "redis://127.0.0.1:6379",
+                    &redis,
                     "tests/fixtures/pubsub.php",
                 ])
                 .env("PORT", port.to_string())

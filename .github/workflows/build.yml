@@ -63,12 +63,34 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    env:
+      DATABASE_URL: postgres://postgres:tenma@127.0.0.1:5432/postgres
+      REDIS_URL: redis://127.0.0.1:6379
+      MYSQL_URL: mysql://root:tenma@127.0.0.1:3306/tenma
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: tenma
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: tenma
+          MYSQL_DATABASE: tenma
+        ports: ["3306:3306"]
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -ptenma" --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t tenma .
       # A one-line script proves the binary starts with the image's libraries
       - run: docker run --rm --entrypoint sh tenma -c 'echo "<?php echo PHP_VERSION;" > /tmp/v.php && tenma /tmp/v.php'
-      - run: docker build --target build -t tenma-build . && docker run --rm -e USER=root tenma-build cargo test --release -- --test-threads 4
+      - run: docker build --target build -t tenma-build . && docker run --rm --network host -e USER=root -e TENMA_SERVICES=1 -e DATABASE_URL -e REDIS_URL -e MYSQL_URL tenma-build cargo test --release -- --test-threads 4
       - run: |
           docker cp "$(docker create tenma)":/usr/local/bin/tenma tenma
           tar czf tenma-linux-${{ matrix.arch }}.tar.gz tenma NOTICE LICENSE-MIT LICENSE-APACHE
