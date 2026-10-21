@@ -2,7 +2,7 @@
 
 namespace Tenma\Internal\Lsp;
 
-use Tenma\Lsp\Provider;
+use Lsp\Provider;
 
 /** The worker's answers: what the providers say, and `$this->` from the class they name. */
 final class Answers
@@ -17,7 +17,7 @@ final class Answers
             'definition' => $this->definition(...$args),
             'hover' => $this->hover(...$args),
             'diagnostics' => $this->collect(static fn (Provider $p) => $p->diagnostics(...$args)),
-            'tokens' => $this->collect(static fn (Provider $p) => $p instanceof \Tenma\Lsp\Tokens ? $p->tokens(...$args) : []),
+            'tokens' => $this->collect(static fn (Provider $p) => $p instanceof \Lsp\Tokens ? $p->tokens(...$args) : []),
             default => null,
         };
     }
@@ -181,7 +181,7 @@ final class Answers
 
     /**
      * @return array<string, string> The variables the providers type in $file, by name: `$this` from thisClass(),
-     *     the others from Tenma\Lsp\Variables (the first provider wins); empty in a file no provider binds
+     *     the others from Lsp\Variables (the first provider wins); empty in a file no provider binds
      */
     private function types(string $file, string $text): array
     {
@@ -191,7 +191,7 @@ final class Answers
             $types['this'] = $bound;
         }
         foreach ($this->providers as $provider) {
-            $given = $provider instanceof \Tenma\Lsp\Variables ? $this->guard(static fn () => $provider->variables($file, $text)) : null;
+            $given = $provider instanceof \Lsp\Variables ? $this->guard(static fn () => $provider->variables($file, $text)) : null;
             foreach (is_array($given) ? $given : [] as $name => $class) {
                 $class = is_string($class) ? trim($class, '\\') : '';
                 if (class_exists($class) || interface_exists($class)) {
@@ -204,7 +204,7 @@ final class Answers
 
     /**
      * The class of `$name` in the text before the cursor. `$this` is the class a provider binds, and a variable
-     * a provider types (Tenma\Lsp\Variables) has that class unless the file introduces it above. In a file a
+     * a provider types (Lsp\Variables) has that class unless the file introduces it above. In a file a
      * provider binds, another variable gets its type from the last foreach or assignment above that introduces
      * it: a foreach over `$this->items` (or another such variable) gives the element type of `items`, from its
      * PHPDoc (`list<Item>`, `array<int, Item>`, `Item[]`); `$name = $this->item;`, `$name = $this->item();` and
@@ -256,7 +256,7 @@ final class Answers
 
     /**
      * The class of the elements a property or method holds: from `@var` or `@return`, else (no such PHPDoc, or
-     * one that names no class) from the providers' Tenma\Lsp\Elements for the class that declares it.
+     * one that names no class) from the providers' Lsp\Elements for the class that declares it.
      */
     private function elementClass(\ReflectionProperty|\ReflectionMethod $member): ?string
     {
@@ -282,7 +282,7 @@ final class Answers
     private array $elements = [];
 
     /**
-     * @return array<string, string> What the providers' Tenma\Lsp\Elements say about $class: a property by its name,
+     * @return array<string, string> What the providers' Lsp\Elements say about $class: a property by its name,
      *     a method by its name and `()`, => the class of its elements (the first provider wins). Every provider is
      *     asked, not only those that bind the file: the type belongs to the class. A saved class ends the worker,
      *     so the cache cannot go stale.
@@ -294,7 +294,7 @@ final class Answers
         }
         $elements = [];
         foreach ($this->providers as $provider) {
-            $given = $provider instanceof \Tenma\Lsp\Elements ? $this->guard(static fn () => $provider->elements($class)) : null;
+            $given = $provider instanceof \Lsp\Elements ? $this->guard(static fn () => $provider->elements($class)) : null;
             foreach (is_array($given) ? $given : [] as $member => $element) {
                 $element = is_string($element) ? trim($element, '\\') : '';
                 if (class_exists($element) || interface_exists($element)) {
@@ -322,13 +322,13 @@ final class Answers
 
     /**
      * @return array<string, string> The names a file sees, by lower-case alias, its namespace under '': its own `use`
-     *     statements and namespace, and for what it has not, the providers' Tenma\Lsp\Imports (the first one wins)
+     *     statements and namespace, and for what it has not, the providers' Lsp\Imports (the first one wins)
      */
     private function imports(string $file, string $text): array
     {
         $imports = self::own($text);
         foreach ($this->providers as $provider) {
-            $given = $provider instanceof \Tenma\Lsp\Imports ? $this->guard(static fn () => $provider->imports($file, $text)) : null;
+            $given = $provider instanceof \Lsp\Imports ? $this->guard(static fn () => $provider->imports($file, $text)) : null;
             foreach (is_array($given) ? $given : [] as $alias => $class) {
                 if (is_string($class)) {
                     $imports[strtolower((string) $alias)] ??= trim($class, '\\');

@@ -2,7 +2,7 @@
 // For tests/http.rs: what a classic request changes, the next one does not see
 ini_set('precision', '10');   // set at startup: stays
 $kept = null;
-Tenma::serveClassic((int) getenv('PORT'), function () use (&$kept) {
+(new \Http\ClassicServer((int) getenv('PORT'), function () use (&$kept) {
     if (parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/set') {
         ini_set('precision', '3');
         set_time_limit(5);
@@ -17,4 +17,4 @@ Tenma::serveClassic((int) getenv('PORT'), function () use (&$kept) {
         $read = 'closed';
     }
     echo ini_get('precision'), ' ', ini_get('max_execution_time'), ' ', $read;
-});
+}))->start();

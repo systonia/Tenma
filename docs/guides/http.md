@@ -1,33 +1,33 @@
 ---
 title: HTTP server
-description: Start a server with Tenma::serve(), read requests, build responses, set cookies, take uploads and serve static files.
+description: Start a server with Http\Server, read requests, build responses, set cookies, take uploads and serve static files.
 order: 200
 ---
 
-`Tenma::serve()` starts an HTTP server on a port and calls a handler for every request. Each request runs in its own fiber. The handler gets a `Request` and returns a response.
+`Http\Server` starts an HTTP server on a port and calls a handler for every request. Each request runs in its own fiber. The handler gets a `Request` and returns a response.
 
-| Function or class                                                         | Does                                                                      |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| [`Tenma::serve($port, $handler, static: …)`](../reference/Tenma.md#serve) | registers a server; it starts once the script has run to its end          |
-| [`Request`](../reference/Tenma/Http/Request.md)                           | method, URI, path, query, headers, body, cookies, form fields and uploads |
-| [`Response`](../reference/Tenma/Http/Response.md)                         | status, headers and body; `json()`, `html()`, `redirect()`, `cookie()`    |
-| [`UploadedFile`](../reference/Tenma/Http/UploadedFile.md)                 | one uploaded file, held in memory                                         |
-| [`Response::stream()`, `Response::events()`](streams.md)                  | a body sent bit by bit, server-sent events                                |
-| [`Response::websocket()`](websockets.md)                                  | turns the request into a WebSocket                                        |
+| Class or method                                                                       | Does                                                                      |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| [`new Http\Server($port, $handler, static: …)->start()`](../reference/Http/Server.md) | registers a server; it starts once the script has run to its end          |
+| [`Request`](../reference/Http/Request.md)                                             | method, URI, path, query, headers, body, cookies, form fields and uploads |
+| [`Response`](../reference/Http/Response.md)                                           | status, headers and body; `json()`, `html()`, `redirect()`, `cookie()`    |
+| [`UploadedFile`](../reference/Http/UploadedFile.md)                                   | one uploaded file, held in memory                                         |
+| [`Response::stream()`, `Response::events()`](streams.md)                              | a body sent bit by bit, server-sent events                                |
+| [`Response::websocket()`](websockets.md)                                              | turns the request into a WebSocket                                        |
 
 ## Starting a server
 
 ```php
 <?php
 
-use Tenma\Http\Request;
+use Http\{Request, Server};
 
-Tenma::serve(8080, function (Request $request): string {
+new Server(8080, function (Request $request): string {
     return "{$request->method} {$request->path}\n";
-});
+})->start();
 ```
 
-`tenma server.php` runs the script, then opens port 8080. The script itself does not block: `Tenma::serve()` only registers the server. A script may call it for several ports.
+`tenma server.php` runs the script, then opens port 8080. The script itself does not block: `start()` only registers the server. A script may start several servers on different ports.
 
 Code outside the handler runs once, when the script starts. Put the expensive setup there: configuration, routes, templates, database connections.
 
@@ -45,9 +45,9 @@ The handler returns one of these:
 ```php
 <?php
 
-use Tenma\Http\{Request, Response};
+use Http\{Request, Response, Server};
 
-Tenma::serve(8080, function (Request $request): Response {
+new Server(8080, function (Request $request): Response {
     return Response::json([
         'method' => $request->method,              // GET, POST, ...
         'uri' => $request->uri,                    // /users?page=2
@@ -58,7 +58,7 @@ Tenma::serve(8080, function (Request $request): Response {
         'client' => $request->remoteAddress,       // IP of the client or proxy
         'session' => $request->cookie('session'),  // null if not set
     ]);
-});
+})->start();
 ```
 
 | Property or method            | Holds                                                                                  |
@@ -84,9 +84,9 @@ Tenma::serve(8080, function (Request $request): Response {
 ```php
 <?php
 
-use Tenma\Http\{Request, Response};
+use Http\{Request, Response, Server};
 
-Tenma::serve(8080, function (Request $request): Response {
+new Server(8080, function (Request $request): Response {
     if ($request->path === '/login' && $request->method === 'POST') {
         $name = $request->form()['name'] ?? 'guest';
         $response = Response::redirect('/', 303);
@@ -108,7 +108,7 @@ Tenma::serve(8080, function (Request $request): Response {
     }
 
     return new Response("Not found\n", 404);
-});
+})->start();
 ```
 
 | Method                                   | Does                                                                              |
@@ -133,7 +133,7 @@ Reading works with `$request->cookie($name)` and `$request->cookies()`. Of sever
 ```php
 <?php
 
-use Tenma\Http\{Request, Response};
+use Http\{Request, Response, Server};
 
 $uploads = __DIR__ . '/uploads';
 @mkdir($uploads);
@@ -141,7 +141,7 @@ $uploads = __DIR__ . '/uploads';
 $form = '<form method="post" enctype="multipart/form-data">'
     . '<input type="file" name="file"><button>Upload</button></form>';
 
-Tenma::serve(8080, function (Request $request) use ($uploads, $form) {
+new Server(8080, function (Request $request) use ($uploads, $form) {
     if ($request->method === 'GET') {
         return Response::html($form);
     }
@@ -155,7 +155,7 @@ Tenma::serve(8080, function (Request $request) use ($uploads, $form) {
     $file->moveTo("$uploads/$name");
 
     return Response::json(['stored' => $name, 'type' => $file->type, 'bytes' => $file->size()]);
-});
+})->start();
 ```
 
 `curl -F file=@photo.jpg localhost:8080` uploads a file. An `UploadedFile` has:
@@ -174,10 +174,12 @@ With `static:`, Tenma serves files itself, without calling PHP.
 ```php
 <?php
 
-Tenma::serve(8080, fn () => "from PHP\n", static: [
+use Http\Server;
+
+new Server(8080, fn () => "from PHP\n", static: [
     '/assets' => __DIR__ . '/public/assets',
     '/favicon.ico' => __DIR__ . '/public/favicon.ico',
-]);
+])->start();
 ```
 
 - Under a directory prefix, Tenma looks in the directory: `/assets/app.css` is `public/assets/app.css`.
@@ -208,15 +210,15 @@ The script runs once, so variables and objects live as long as the process. That
 ```php
 <?php
 
-use Tenma\Http\Request;
+use Http\{Request, Server};
 
 $squares = [];
 
-Tenma::serve(8080, function (Request $request) use (&$squares) {
+new Server(8080, function (Request $request) use (&$squares) {
     $n = (int) ($request->query['n'] ?? 0);
 
     return $squares[$n] ??= ($n * $n) . "\n";   // computed once per worker
-});
+})->start();
 ```
 
 Many requests run at the same time in one process. Never keep the state of one request in a global, a static or a singleton: another request would see it. Pass it along as an argument, or use [`AsyncLocal`](async.md#values-that-follow-a-request).
@@ -225,7 +227,7 @@ With `--workers N`, each worker has its own copy of the state: see [workers](dep
 
 ## Behaviour
 
-- `Tenma::serve()` does not block. The server starts once the script has run to its end and keeps the process alive.
+- `start()` does not block. The server starts once the script has run to its end and keeps the process alive.
 - The body is read completely before the handler runs. A body above `--max-body` (default 10 MB) gets 413.
 - Headers and body must arrive within `--request-timeout` (default 30 s), otherwise the client is disconnected.
 - A worker accepts at most `--max-connections` connections (default 1024). More get 503 at once.
@@ -237,4 +239,4 @@ With `--workers N`, each worker has its own copy of the state: see [workers](dep
 - `exit()` in a handler ends only that request, with 500.
 - When the client disconnects, the request and its work are cancelled: see [Lifetime of a request](request-lifetime.md).
 
-See also: [`Tenma::serve()`](../reference/Tenma.md#serve), [`Request`](../reference/Tenma/Http/Request.md), [`Response`](../reference/Tenma/Http/Response.md), [`UploadedFile`](../reference/Tenma/Http/UploadedFile.md), [Classic mode](classic-mode.md).
+See also: [`Http\Server`](../reference/Http/Server.md), [`Request`](../reference/Http/Request.md), [`Response`](../reference/Http/Response.md), [`UploadedFile`](../reference/Http/UploadedFile.md), [Classic mode](classic-mode.md).

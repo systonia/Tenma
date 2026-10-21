@@ -1,20 +1,20 @@
 ---
 title: Language server
-description: Run tenma lsp next to the editor's PHP server, and extend it from a package with Tenma\Lsp\Provider, Tenma\Lsp\Tokens, Tenma\Lsp\Imports, Tenma\Lsp\Variables and Tenma\Lsp\Elements.
+description: Run tenma lsp next to the editor's PHP server, and extend it from a package with Lsp\Provider, Lsp\Tokens, Lsp\Imports, Lsp\Variables and Lsp\Elements.
 order: 330
 ---
 
 `tenma lsp` is a language server (LSP over stdin and stdout). It answers what the editor's own PHP language server cannot know, such as the class `$this` stands for in a template. It runs next to that server (Intelephense or PHP Tools), not instead of it, and the editor merges the answers of both.
 
-Out of the box it shows the problems a running app reports with [`Tenma::diagnostics()`](diagnostics.md). Packages add the rest through providers.
+Out of the box it shows the problems a running app reports with [`Development\Problems::report()`](diagnostics.md). Packages add the rest through providers.
 
-| Interface                                                    | Adds                                                                        |
-| ------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| [`Tenma\Lsp\Provider`](../reference/Tenma/Lsp/Provider.md)   | the class of `$this`, completions, go to definition, diagnostics (required) |
-| [`Tenma\Lsp\Tokens`](../reference/Tenma/Lsp/Tokens.md)       | semantic highlighting for syntax the editor's grammar does not know         |
-| [`Tenma\Lsp\Imports`](../reference/Tenma/Lsp/Imports.md)     | the `use` imports and namespace a file sees without declaring them          |
-| [`Tenma\Lsp\Variables`](../reference/Tenma/Lsp/Variables.md) | the classes of variables other than `$this`                                 |
-| [`Tenma\Lsp\Elements`](../reference/Tenma/Lsp/Elements.md)   | the element classes of array properties and methods without a PHPDoc type   |
+| Interface                                        | Adds                                                                        |
+| ------------------------------------------------ | --------------------------------------------------------------------------- |
+| [`Lsp\Provider`](../reference/Lsp/Provider.md)   | the class of `$this`, completions, go to definition, diagnostics (required) |
+| [`Lsp\Tokens`](../reference/Lsp/Tokens.md)       | semantic highlighting for syntax the editor's grammar does not know         |
+| [`Lsp\Imports`](../reference/Lsp/Imports.md)     | the `use` imports and namespace a file sees without declaring them          |
+| [`Lsp\Variables`](../reference/Lsp/Variables.md) | the classes of variables other than `$this`                                 |
+| [`Lsp\Elements`](../reference/Lsp/Elements.md)   | the element classes of array properties and methods without a PHPDoc type   |
 
 `Tokens`, `Imports`, `Variables` and `Elements` are optional. A class implements them next to `Provider`.
 
@@ -60,7 +60,7 @@ A package names its provider class in its `composer.json`, under `extra.tenma.ls
 
 ## Provider
 
-[`Tenma\Lsp\Provider`](../reference/Tenma/Lsp/Provider.md) is the interface every provider implements.
+[`Lsp\Provider`](../reference/Lsp/Provider.md) is the interface every provider implements.
 
 | Method                               | Returns                                                                                         |
 | ------------------------------------ | ----------------------------------------------------------------------------------------------- |
@@ -78,7 +78,7 @@ This provider binds templates such as `src/Components/Menu.Template.php` to the 
 
 namespace App;
 
-use Tenma\Lsp\Provider;
+use Lsp\Provider;
 
 final class Editor implements Provider
 {
@@ -124,7 +124,7 @@ Once `thisClass()` names a class, Tenma does the rest by reflection:
 
 ## Tokens
 
-[`Tenma\Lsp\Tokens`](../reference/Tenma/Lsp/Tokens.md) colours what the editor's grammar does not know, such as template directives. `tokens($file, $text)` returns a list of `['line' => …, 'column' => …, 'length' => …, 'type' => …]`.
+[`Lsp\Tokens`](../reference/Lsp/Tokens.md) colours what the editor's grammar does not know, such as template directives. `tokens($file, $text)` returns a list of `['line' => …, 'column' => …, 'length' => …, 'type' => …]`.
 
 ```php
 public function tokens(string $file, string $text): array
@@ -153,7 +153,7 @@ public function tokens(string $file, string $text): array
 
 ## Imports
 
-A template has no `use` statements of its own, so `Status::` in it would complete nothing. [`Tenma\Lsp\Imports`](../reference/Tenma/Lsp/Imports.md) names the imports a file sees. `imports($file, $text)` returns alias => fully qualified class name, and the namespace under the key `''`.
+A template has no `use` statements of its own, so `Status::` in it would complete nothing. [`Lsp\Imports`](../reference/Lsp/Imports.md) names the imports a file sees. `imports($file, $text)` returns alias => fully qualified class name, and the namespace under the key `''`.
 
 ```php
 public function imports(string $file, string $text): array
@@ -177,7 +177,7 @@ The file's own `use` statements and `namespace` come first. The provider fills i
 
 ## Variables
 
-A template often gets more than `$this`, such as a model as `$model`. [`Tenma\Lsp\Variables`](../reference/Tenma/Lsp/Variables.md) names the class of such variables. `variables($file, $text)` returns variable name (without `$`) => fully qualified class name.
+A template often gets more than `$this`, such as a model as `$model`. [`Lsp\Variables`](../reference/Lsp/Variables.md) names the class of such variables. `variables($file, $text)` returns variable name (without `$`) => fully qualified class name.
 
 ```php
 public function variables(string $file, string $text): array
@@ -199,7 +199,7 @@ public function variables(string $file, string $text): array
 
 ## Elements
 
-Tenma reads the element type of an array member from its PHPDoc (`@var list<Line>`, `@return Line[]`). A package that documents it another way, with attributes for example, tells Tenma through [`Tenma\Lsp\Elements`](../reference/Tenma/Lsp/Elements.md).
+Tenma reads the element type of an array member from its PHPDoc (`@var list<Line>`, `@return Line[]`). A package that documents it another way, with attributes for example, tells Tenma through [`Lsp\Elements`](../reference/Lsp/Elements.md).
 
 `elements($class)` returns member => fully qualified class of its elements. A property is named by its name, a method by its name followed by `()`. Here an attribute `#[ListOf(Line::class)]` names the class:
 
@@ -233,4 +233,4 @@ public function elements(string $class): array
 - A provider that throws is logged on stderr and left out. One that takes longer than 5 seconds ends the worker.
 - When several providers name the same alias, variable or member, the first one wins.
 
-See also: [`Tenma\Lsp\Provider`](../reference/Tenma/Lsp/Provider.md), [Diagnostics](diagnostics.md), [Debugger](debugger.md).
+See also: [`Lsp\Provider`](../reference/Lsp/Provider.md), [Diagnostics](diagnostics.md), [Debugger](debugger.md).

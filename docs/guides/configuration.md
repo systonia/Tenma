@@ -83,7 +83,7 @@ $production = getenv('APP_ENV') === 'production';
 
 $mode = $production ? 'production' : 'development';
 
-Tenma::serve($port, fn () => "running in $mode\n");
+new Http\Server($port, fn () => "running in $mode\n")->start();
 ```
 
 The script reads them once at startup. Changing them needs a restart.

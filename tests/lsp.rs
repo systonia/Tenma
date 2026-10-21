@@ -264,7 +264,7 @@ fn what_the_running_app_publishes_shows_next_to_the_providers_problems() {
     let before = lsp.open(&template, "ä<?= $this->nope ?> TODO");
     let published = root.join(".tenma/diagnostics");
     std::fs::create_dir_all(&published).unwrap();
-    // As Tenma::diagnostics() writes it under --watch
+    // As \\Development\\Problems::report() writes it under --watch
     // Column 7 in bytes is the "$" after "ä<?= ", the sixth UTF-16 unit
     let list = json!([{ "file": template.to_str().unwrap(), "line": 1, "column": 7, "severity": "warning", "message": "slow render" }]);
     std::fs::write(published.join("app.my-app.json"), list.to_string()).unwrap();

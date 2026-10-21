@@ -3,4 +3,4 @@
 // in the symbol table itself, not in a variable slot of this script
 require __DIR__ . '/inspect_config.php';
 $port = (int) getenv('PORT');
-Tenma::serve($port, fn () => "ok\n");
+(new \Http\Server($port, fn () => "ok\n"))->start();

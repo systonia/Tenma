@@ -23,11 +23,11 @@ final class Dev
     public static function load(mixed $list): void
     {
         if (!is_array($list) || !array_is_list($list)) {
-            throw new DevError('tenma.dev.php must return a list of Tenma\Hook, not ' . get_debug_type($list));
+            throw new DevError('tenma.dev.php must return a list of Development\Hook, not ' . get_debug_type($list));
         }
         foreach ($list as $index => $hook) {
-            if (!$hook instanceof \Tenma\Hook) {
-                throw new DevError("tenma.dev.php: entry $index is " . get_debug_type($hook) . ', not a Tenma\Hook');
+            if (!$hook instanceof \Development\Hook) {
+                throw new DevError("tenma.dev.php: entry $index is " . get_debug_type($hook) . ', not a Development\Hook');
             }
             $inputs = array_map(self::absolute(...), $hook->inputs);
             self::$hooks[] = [

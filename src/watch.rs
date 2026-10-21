@@ -119,7 +119,7 @@ pub fn configure() {
     unsafe { tenma_set_watch() }
 }
 
-/// The change behind the last reload of the script, for Tenma::reloadedBy().
+/// The change behind the last reload of the script, for Watch::reloadedBy().
 static RELOADED_BY: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 thread_local! {
@@ -166,7 +166,7 @@ fn copy_path(reloaded: Option<&Path>, buffer: *mut u8, capacity: usize) -> usize
     bytes.len()
 }
 
-/// Removes the Tenma::diagnostics() lists that `group` ("app": the script, "dev": tenma.dev.php) published in the
+/// Removes the Problems::report() lists that `group` ("app": the script, "dev": tenma.dev.php) published in the
 /// project of `file`: when that group reloads, a fixed problem goes without its reporter clearing it, and what is
 /// still wrong is published again. The stdlib finds the project the same way (Diagnostics::project).
 pub fn clear_diagnostics(file: &Path, group: &str) {

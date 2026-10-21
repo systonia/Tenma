@@ -2,7 +2,7 @@
 
 namespace Tenma\Internal\Lsp;
 
-use Tenma\Lsp\Provider;
+use Lsp\Provider;
 
 /** The process that loads the project: one JSON line per question and per answer. */
 final class Worker

@@ -6,35 +6,36 @@ order: 230
 
 A streamed response sends its headers at once and every chunk right after it is written. The writer runs in the request's fiber. When a client cannot keep up, only that fiber waits, so a slow reader never fills the memory.
 
-| Method or class                                                                              | Does                                                     |
-| -------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| [`Response::stream($writer, $status, $headers)`](../reference/Tenma/Http/Response.md#stream) | a response whose body `$writer` produces with a `Stream` |
-| [`Response::events($writer)`](../reference/Tenma/Http/Response.md#events)                    | a `text/event-stream` whose writer gets an `EventStream` |
-| [`Stream`](../reference/Tenma/Http/Stream.md)                                                | `write($chunk)`                                          |
-| [`EventStream`](../reference/Tenma/Http/EventStream.md)                                      | `send($data, event:, id:)`, `comment($text)`             |
-| [`StreamedResponse`](../reference/Tenma/Http/StreamedResponse.md)                            | what `stream()` and `events()` return                    |
-| [`ConnectionClosed`](../reference/Tenma/Http/ConnectionClosed.md)                            | thrown by a write after the client has gone              |
+| Method or class                                                                        | Does                                                     |
+| -------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| [`Response::stream($writer, $status, $headers)`](../reference/Http/Response.md#stream) | a response whose body `$writer` produces with a `Stream` |
+| [`Response::events($writer)`](../reference/Http/Response.md#events)                    | a `text/event-stream` whose writer gets an `EventStream` |
+| [`Stream`](../reference/Http/Stream.md)                                                | `write($chunk)`                                          |
+| [`EventStream`](../reference/Http/EventStream.md)                                      | `send($data, event:, id:)`, `comment($text)`             |
+| [`StreamedResponse`](../reference/Http/StreamedResponse.md)                            | what `stream()` and `events()` return                    |
+| [`ConnectionClosed`](../reference/Http/ConnectionClosed.md)                            | thrown by a write after the client has gone              |
 
 ## Streaming a body
 
 ```php
 <?php
 
-use Tenma\Http\{Response, Stream};
+use Http\{Response, Server, Stream};
+use Threading\Task;
 
 $headers = [
     'content-type' => 'text/csv',
     'content-disposition' => 'attachment; filename="users.csv"',
 ];
 
-Tenma::serve(8080, fn () => Response::stream(function (Stream $out) {
+new Server(8080, fn () => Response::stream(function (Stream $out) {
     $out->write("id,name\n");
 
     foreach (['ada', 'bob', 'eve'] as $i => $name) {
-        Tenma::sleep(0.2);               // stands for fetching the next page of rows
+        Task::delay(0.2);                // stands for fetching the next page of rows
         $out->write("$i,$name\n");       // reaches the client right away
     }
-}, headers: $headers));
+}, headers: $headers))->start();
 ```
 
 `curl -N localhost:8080` shows the lines arriving one by one. The response ends when the writer returns.
@@ -50,7 +51,8 @@ Tenma::serve(8080, fn () => Response::stream(function (Stream $out) {
 ```php
 <?php
 
-use Tenma\Http\{EventStream, Request, Response};
+use Http\{EventStream, Request, Response, Server};
+use Threading\Task;
 
 $page = <<<'HTML'
 <!doctype html>
@@ -68,17 +70,17 @@ HTML;
 $ticks = function (EventStream $events): void {
     for ($id = 1; ; $id++) {
         $events->send(date('H:i:s'), event: 'tick', id: (string) $id);
-        Tenma::sleep(1);
+        Task::delay(1);
     }
 };
 
-Tenma::serve(8080, function (Request $request) use ($page, $ticks) {
+new Server(8080, function (Request $request) use ($page, $ticks) {
     if ($request->path === '/events') {
         return Response::events($ticks);
     }
 
     return Response::html($page);
-});
+})->start();
 ```
 
 - `send($data, event: …, id: …)` writes one event. A line break in `$data` becomes several `data:` lines.
@@ -90,12 +92,13 @@ The writer above never returns by itself. That is fine: when the browser goes aw
 
 ## When the client leaves
 
-A write to a connection the client has closed throws [`ConnectionClosed`](../reference/Tenma/Http/ConnectionClosed.md). Let it end the writer, or catch it to clean up.
+A write to a connection the client has closed throws [`ConnectionClosed`](../reference/Http/ConnectionClosed.md). Let it end the writer, or catch it to clean up.
 
 ```php
 <?php
 
-use Tenma\Http\{ConnectionClosed, EventStream, Response};
+use Http\{ConnectionClosed, EventStream, Response, Server};
+use Threading\Task;
 
 $open = 0;
 
@@ -105,7 +108,7 @@ $count = function (EventStream $events) use (&$open): void {
     try {
         while (true) {
             $events->send("$open clients connected");
-            Tenma::sleep(2);
+            Task::delay(2);
         }
     } catch (ConnectionClosed) {
         // the client is gone; nothing to send to anymore
@@ -114,38 +117,42 @@ $count = function (EventStream $events) use (&$open): void {
     }
 };
 
-Tenma::serve(8080, fn () => Response::events($count));
+new Server(8080, fn () => Response::events($count))->start();
 ```
 
-If the client disconnects while the writer waits for something else (a sleep, a query), the writer gets [`Tenma\Cancelled`](../reference/Tenma/Cancelled.md) there instead. The `finally` block runs in both cases.
+If the client disconnects while the writer waits for something else (a sleep, a query), the writer gets [`Threading\Cancelled`](../reference/Threading/Cancelled.md) there instead. The `finally` block runs in both cases.
 
 ## Events for many clients
 
-To push the same event to every open stream, subscribe each stream to a channel and publish to it. The subscription ends with the stream.
+To push the same event to every open stream, subscribe each stream to a [`Channel`](../reference/Messaging/Channel.md) and publish to it. The subscription ends with the stream.
 
 ```php
 <?php
 
-use Tenma\Http\{EventStream, Request, Response};
+use Http\{EventStream, Request, Response, Server};
+use Messaging\Channel;
+use Threading\Task;
 
-$listen = function (EventStream $events): void {
-    Tenma::subscribe('news', fn (string $text) => $events->send($text, event: 'news'));
+$news = new Channel('news');
+
+$listen = function (EventStream $events) use ($news): void {
+    $news->subscribe(fn (string $text) => $events->send($text, event: 'news'));
 
     while (true) {
         $events->comment('keep-alive');   // also notices when the client is gone
-        Tenma::sleep(15);
+        Task::delay(15);
     }
 };
 
-Tenma::serve(8080, function (Request $request) use ($listen) {
+new Server(8080, function (Request $request) use ($listen, $news) {
     if ($request->path === '/listen') {
         return Response::events($listen);
     }
 
-    Tenma::publish('news', $request->query['text'] ?? 'hello');
+    $news->publish($request->query['text'] ?? 'hello');
 
     return "published\n";
-});
+})->start();
 ```
 
 Run `curl -N localhost:8080/listen` in one terminal and `curl 'localhost:8080/?text=hi'` in another. With several workers or processes, see [messages between workers](database.md#messages-between-workers).
@@ -161,4 +168,4 @@ Run `curl -N localhost:8080/listen` in one terminal and `curl 'localhost:8080/?t
 - `send()` throws an `InvalidArgumentException` when `event` or `id` contains a line break.
 - Timers, tasks and subscriptions the writer started end with the connection: see [Lifetime of a request](request-lifetime.md).
 
-See also: [`Response`](../reference/Tenma/Http/Response.md), [`Stream`](../reference/Tenma/Http/Stream.md), [`EventStream`](../reference/Tenma/Http/EventStream.md), [`StreamedResponse`](../reference/Tenma/Http/StreamedResponse.md), [`ConnectionClosed`](../reference/Tenma/Http/ConnectionClosed.md), [`Tenma::subscribe()`](../reference/Tenma.md#subscribe).
+See also: [`Response`](../reference/Http/Response.md), [`Stream`](../reference/Http/Stream.md), [`EventStream`](../reference/Http/EventStream.md), [`StreamedResponse`](../reference/Http/StreamedResponse.md), [`ConnectionClosed`](../reference/Http/ConnectionClosed.md), [`Channel::subscribe()`](../reference/Messaging/Channel.md#subscribe).

@@ -165,18 +165,18 @@ fn documents_tenmas_own_api_without_paths() {
     let out = scratch("builtin");
     docs(&[], &out);
     let pages = files(&out);
-    let socket = &pages["Tenma/Http/WebSocket.md"];
+    let socket = &pages["Http/WebSocket.md"];
     assert!(
         socket.contains("### receive()")
             && socket.contains("public function send(string $data): void"),
         "{socket}"
     );
-    assert!(pages["Tenma.md"].contains("### serve()"));
+    assert!(pages["Http/Server.md"].contains("### start()"));
     assert!(
-        pages["Tenma.md"].contains("[`Request`](Tenma/Http/Request.md)"),
+        pages["Http/Server.md"].contains("[`Request`](Request.md)"),
         "cross-links"
     );
-    assert!(pages.contains_key("Tenma/Lsp/Provider.md") && pages.contains_key("Tenma/Db/index.md"));
+    assert!(pages.contains_key("Lsp/Provider.md") && pages.contains_key("Data/index.md"));
     assert!(
         !pages.keys().any(|name| name.contains("Internal")),
         "{:?}",

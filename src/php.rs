@@ -381,7 +381,7 @@ pub fn exit_status() -> Option<u8> {
     u8::try_from(EXIT_STATUS.load(std::sync::atomic::Ordering::Relaxed)).ok()
 }
 
-/// The event loop is running: PHP starts what the script scheduled at startup (timers, Tenma::async()).
+/// The event loop is running: PHP starts what the script scheduled at startup (timers, Task::run()).
 /// Err if PHP fails fatally while doing so.
 pub fn started() -> Result<(), ()> {
     if unsafe { tenma_started() } < 0 {

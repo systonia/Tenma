@@ -11,14 +11,14 @@ tenma --watch app.php    # serve and reload on changes
 tenma build              # run the hooks of ./tenma.dev.php once
 ```
 
-| Feature                                                   | Does                                                                      |
-| --------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `--watch`                                                 | reloads the workers when a loaded file changes                            |
-| [`Tenma::reloadedBy()`](../reference/Tenma.md#reloadedby) | the file whose change caused the current run, or `null` on the first run  |
-| `tenma.dev.php`                                           | returns a list of [`Tenma\Hook`](../reference/Tenma/Hook.md): build steps |
-| `.tenma-ignore`                                           | paths the hooks never look at                                             |
-| `tenma build [tenma.dev.php]`                             | runs every hook once, for CI and Docker                                   |
-| [`Tenma::diagnostics()`](diagnostics.md)                  | under `--watch`, problems the app reports appear in the editor            |
+| Feature                                                                           | Does                                                                                  |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `--watch`                                                                         | reloads the workers when a loaded file changes                                        |
+| [`Development\Watch::reloadedBy()`](../reference/Development/Watch.md#reloadedby) | the file whose change caused the current run, or `null` on the first run              |
+| `tenma.dev.php`                                                                   | returns a list of [`Development\Hook`](../reference/Development/Hook.md): build steps |
+| `.tenma-ignore`                                                                   | paths the hooks never look at                                                         |
+| `tenma build [tenma.dev.php]`                                                     | runs every hook once, for CI and Docker                                               |
+| [`Development\Problems::report()`](diagnostics.md)                                | under `--watch`, problems the app reports appear in the editor                        |
 
 `--watch` is for development. In production, deploy and restart instead.
 
@@ -28,23 +28,25 @@ Tenma watches every file the script loaded. That includes classes the autoloader
 
 A change means different content, not just a new timestamp. Saving without changes does not reload, and neither does switching git branches back and forth.
 
-`Tenma::reloadedBy()` returns the file whose change caused the current run. A framework can use it to rebuild only what that file affects:
+`Development\Watch::reloadedBy()` returns the file whose change caused the current run. A framework can use it to rebuild only what that file affects:
 
 ```php
 <?php
 
-$changed = Tenma::reloadedBy();
+use Development\Watch;
+
+$changed = Watch::reloadedBy();
 
 if ($changed !== null) {
     error_log("reloaded because $changed changed");
 }
 
-Tenma::serve(8080, fn () => "ok\n");
+new Http\Server(8080, fn () => "ok\n")->start();
 ```
 
 ## Build hooks: tenma.dev.php
 
-A `tenma.dev.php` next to the script returns a list of [`Tenma\Hook`](../reference/Tenma/Hook.md). Production code never loads it.
+A `tenma.dev.php` next to the script returns a list of [`Development\Hook`](../reference/Development/Hook.md). Production code never loads it.
 
 | Parameter | Does                                                                                  |
 | --------- | ------------------------------------------------------------------------------------- |
@@ -59,8 +61,10 @@ A command hook runs the program as its own process, without a shell, in the dire
 <?php
 // tenma.dev.php
 
+use Development\Hook;
+
 return [
-    new Tenma\Hook(
+    new Hook(
         inputs: ['assets/app.css', 'views/**/*.php', 'src/**/*.php'],
         outputs: ['public/app.css'],
         run: ['tailwindcss', '-i', 'assets/app.css', '-o', 'public/app.css', '--minify'],
@@ -75,8 +79,10 @@ Any program works the same way, such as a script of the project that writes a ca
 <?php
 // tenma.dev.php
 
+use Development\Hook;
+
 return [
-    new Tenma\Hook(
+    new Hook(
         inputs: ['src/**/*.php'],
         outputs: ['var/routes.php'],
         run: ['php', 'bin/routes.php'],
@@ -91,7 +97,8 @@ A PHP hook gets the changed paths, an empty list on the first run. It may use Te
 <?php
 // tenma.dev.php
 
-use Tenma\Hook;
+use Development\Hook;
+use FileSystem\FileInfo;
 
 function listIcons(array $changed): void
 {
@@ -101,7 +108,7 @@ function listIcons(array $changed): void
     }
 
     $code = '<?php return ' . var_export($icons, true) . ';';
-    Tenma\Fs::writeFile(__DIR__ . '/var/icons.php', $code);
+    new FileInfo(__DIR__ . '/var/icons.php')->write($code);
 }
 
 return [
@@ -143,7 +150,7 @@ RUN tenma build
 
 ## Problems in the editor
 
-Under `--watch`, problems the app reports with `Tenma::diagnostics()` appear in the editor next to the code. See [Diagnostics](diagnostics.md).
+Under `--watch`, problems the app reports with `Development\Problems::report()` appear in the editor next to the code. See [Diagnostics](diagnostics.md).
 
 ## Behaviour
 
@@ -168,4 +175,4 @@ Hooks:
 - `exit()` in a hook ends Tenma.
 - `tenma build` exits with status 1 if a hook fails or the hooks form a cycle.
 
-See also: [`Tenma\Hook`](../reference/Tenma/Hook.md), [`Tenma::reloadedBy()`](../reference/Tenma.md#reloadedby), [Command line](command-line.md), [Debugger](debugger.md).
+See also: [`Development\Hook`](../reference/Development/Hook.md), [`Development\Watch::reloadedBy()`](../reference/Development/Watch.md#reloadedby), [Command line](command-line.md), [Debugger](debugger.md).

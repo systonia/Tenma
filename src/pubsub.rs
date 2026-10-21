@@ -1,4 +1,4 @@
-//! Messages between workers: Tenma::publish() hands a message to every subscription of its channel,
+//! Messages between workers: Messaging\Channel::publish() hands a message to every subscription of its channel,
 //! in every worker of this process, the publishing one included. A subscription is a channel per
 //! worker; PHP fetches the next message with an op and runs its callback in a fiber.
 //!

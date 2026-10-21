@@ -1,0 +1,104 @@
+<?php
+
+namespace Data;
+
+/**
+ * Postgres, asynchronous: while a query runs, only this request's Fiber waits.
+ * Placeholders $1, $2, … as in Postgres; parameters are sent as text, the server determines the type.
+ * Only in asynchronous code (handlers, tasks, timers); at script startup, wrap queries in Task::run().
+ */
+final class Postgres
+{
+    /** The last transaction ID of this interpreter. */
+    private static int $transactions = 0;
+
+    private function __construct(private readonly string $target) {}
+
+    /** @param string $url postgres://user:password@host:5432/database */
+    public static function connect(string $url): self
+    {
+        return new self($url);
+    }
+
+    /**
+     * Rows as a list of associative arrays, values with Postgres' JSON types. SHOW, EXPLAIN and FETCH
+     * take no parameters and return every value as a string.
+     *
+     * @param list<mixed> $params
+     * @return list<array<string, mixed>>
+     */
+    public function query(string $sql, array $params = []): array
+    {
+        return $this->call('query', $sql, $params);
+    }
+
+    /**
+     * @param list<mixed> $params
+     * @return array<string, mixed>|null
+     */
+    public function first(string $sql, array $params = []): ?array
+    {
+        return $this->query($sql, $params)[0] ?? null;
+    }
+
+    /**
+     * Several statements separated by semicolons, without parameters, such as a migration file. They run as
+     * one: a failing statement undoes the ones before it, inside transaction() as part of that transaction.
+     * Therefore no COMMIT or ROLLBACK in it, and nothing that refuses to run in a transaction (CREATE INDEX
+     * CONCURRENTLY, VACUUM, CREATE DATABASE). Never build it from input: without parameters, anything in it
+     * is SQL.
+     */
+    public function script(string $sql): void
+    {
+        $this->call('script', $sql, []);
+    }
+
+    /**
+     * For statements without a result; returns the number of affected rows.
+     *
+     * @param list<mixed> $params
+     */
+    public function execute(string $sql, array $params = []): int
+    {
+        return $this->call('execute', $sql, $params);
+    }
+
+    /**
+     * Runs $work in a transaction: commit if $work completes, otherwise rollback.
+     *
+     * @template T
+     * @param callable(self): T $work
+     * @return T
+     */
+    public function transaction(callable $work): mixed
+    {
+        $id = ++self::$transactions;
+        $transaction = new self("tx:$id");
+        try {
+            $this->call('begin', '', [\Tenma\Internal\Current::$request ?? 0, $id]);
+        } catch (\Throwable $error) {
+            // Cancelled just as BEGIN succeeded: the transaction exists, but nobody would end it
+            try {
+                $transaction->call('rollback', '', []);
+            } catch (\Throwable) {
+            }
+            throw $error;
+        }
+        try {
+            $result = $work($transaction);
+        } catch (\Throwable $error) {
+            $transaction->call('rollback', '', []);
+            throw $error;
+        }
+        $transaction->call('commit', '', []);
+        return $result;
+    }
+
+    /** @param list<mixed> $params */
+    private function call(string $mode, string $sql, array $params): mixed
+    {
+        \Tenma\Internal\requireFiber();
+        $json = \Tenma\Internal\await(\tenma_op_db("pg.$mode", $this->target, $sql, json_encode(array_values($params), JSON_THROW_ON_ERROR)));
+        return json_decode($json, true, flags: JSON_THROW_ON_ERROR | JSON_BIGINT_AS_STRING);
+    }
+}

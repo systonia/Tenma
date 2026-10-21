@@ -6,7 +6,7 @@ order: 1
 
 Tenma runs PHP 8.5 as one long-running process with a built-in HTTP server. The process has worker threads, and each worker has its own PHP interpreter and its own event loop. Every request runs in its own fiber, so a request that waits does not hold up the others.
 
-Tenma is a single binary with PHP 8.5 (ZTS) and its usual extensions built in. Its PHP API (`Tenma`, `Tenma\Http`, `Tenma\Db`, `Tenma\Fs`) is part of the binary, not a Composer package.
+Tenma is a single binary with PHP 8.5 (ZTS) and its usual extensions built in. Its PHP API lives in the top-level namespaces `Http`, `Threading`, `FileSystem`, `Messaging`, `Data`, `Development` and `Lsp`. It is part of the binary, not a Composer package.
 
 ## Install
 
@@ -32,7 +32,7 @@ Save this as `app.php`:
 ```php
 <?php
 
-Tenma::serve(8080, fn () => "Hello, world\n");
+new Http\Server(8080, fn () => "Hello, world\n")->start();
 
 echo "Listening on http://localhost:8080\n";
 ```

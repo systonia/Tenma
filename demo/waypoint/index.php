@@ -13,5 +13,5 @@ use Waypoint\Waypoint;
 $app = Waypoint::create();
 $app->attach([HomeController::class, WaypointController::class]);
 
-Tenma::serve(8080, $app);
+new Http\Server(8080, $app)->start();
 echo "Waypoint on tenma: http://localhost:8080\n";

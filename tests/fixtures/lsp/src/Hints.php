@@ -2,7 +2,7 @@
 
 namespace Fixture;
 
-use Tenma\Lsp\Provider;
+use Lsp\Provider;
 
 /** The provider of an installed package: one completion in a text that asks for hints. */
 final class Hints implements Provider

@@ -2,7 +2,7 @@
 
 namespace Tenma\Internal\Lsp;
 
-use Tenma\Lsp\Provider;
+use Lsp\Provider;
 
 final class Server
 {
@@ -34,7 +34,7 @@ final class Server
     public function __construct(private readonly string $binary, private $out) {}
 
     /**
-     * Reads again the lists Tenma::diagnostics() keeps in the projects of the open documents, if they changed,
+     * Reads again the lists Problems::report() keeps in the projects of the open documents, if they changed,
      * and publishes the files whose problems changed.
      */
     public function tick(): void

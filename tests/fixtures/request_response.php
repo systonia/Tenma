@@ -1,9 +1,9 @@
 <?php
 // For tests/http.rs: cookies, forms, uploads and response helpers in fiber mode
-use Tenma\Http\{Request, Response, UploadedFile};
+use Http\{Request, Response, UploadedFile};
 
 
-Tenma::serve((int) getenv('PORT'), function (Request $request): Response {
+(new \Http\Server((int) getenv('PORT'), function (Request $request): Response {
     switch ($request->path) {
         case '/cookies':
             return Response::json([$request->cookies(), $request->cookie('sid')]);
@@ -17,8 +17,9 @@ Tenma::serve((int) getenv('PORT'), function (Request $request): Response {
         case '/move':
             $target = sys_get_temp_dir() . '/tenma-upload-' . getmypid();
             $request->files()['file']->moveTo($target);
-            $moved = Tenma\Fs::readFile($target);
-            Tenma\Fs::remove($target);
+            $file = new FileSystem\FileInfo($target);
+            $moved = $file->read();
+            $file->delete();
             return new Response($moved);
         case '/set-cookie':
             return Response::redirect('/target', 303)
@@ -42,4 +43,4 @@ Tenma::serve((int) getenv('PORT'), function (Request $request): Response {
         default:
             return new Response("ok\n");
     }
-});
+}))->start();

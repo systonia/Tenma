@@ -1,7 +1,7 @@
 <?php
 
-// `tenma --stubs`: prints Tenma's public PHP API (the class Tenma and everything under Tenma\ except
-// Tenma\Internal and members marked @internal) as a stub file for IDEs and static analysis. Signatures
+// `tenma --stubs`: prints Tenma's public PHP API (the namespaces of Tenma\Internal\NAMESPACES
+// without members marked @internal) as a stub file for IDEs and static analysis. Signatures
 // and doc comments come from reflection over the standard library this binary embeds; bodies are empty.
 
 namespace Tenma\Internal\Stubs;
@@ -140,8 +140,7 @@ function stubs(): array
     $byNamespace = [];
     foreach ([...get_declared_classes(), ...get_declared_interfaces()] as $name) {
         $class = new \ReflectionClass($name);
-        $public = $name === 'Tenma' || (str_starts_with($name, 'Tenma\\') && !str_starts_with($name, 'Tenma\\Internal\\'));
-        if ($class->isInternal() || !$public || internal($class)) {
+        if ($class->isInternal() || !\Tenma\Internal\isPublic($name) || internal($class)) {
             continue;
         }
         $byNamespace[$class->getNamespaceName()][$class->getShortName()] = render($class);
@@ -154,8 +153,8 @@ function stubs(): array
 }
 
 /**
- * Prints the stubs as one file, or writes one file per class below $directory: Tenma.php,
- * Tenma/Http/Request.php and so on. Files of classes that are gone are not removed.
+ * Prints the stubs as one file, or writes one file per class below $directory: Http/Request.php,
+ * Threading/Task.php and so on. Files of classes that are gone are not removed.
  */
 function main(?string $directory = null): void
 {

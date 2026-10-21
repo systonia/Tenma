@@ -15,15 +15,15 @@ tenma --inspect=0.0.0.0:9229 index.php  # another address
 tenma --inspect --watch index.php  # keeps the editor connected across reloads
 ```
 
-| Feature                                               | Does                                                                 |
-| ----------------------------------------------------- | -------------------------------------------------------------------- |
-| [Breakpoints](#breakpoints)                           | on lines, with conditions, hit counts and logpoints                  |
-| [`Tenma::debugger()`](../reference/Tenma.md#debugger) | stops at that line when an editor is connected                       |
-| [Exceptions](#exceptions)                             | stops where an uncaught (or any) exception is thrown                 |
-| [Stepping](#stepping-and-threads)                     | continue, step over, into, out, within one request                   |
-| [Threads](#stepping-and-threads)                      | every request, timer and `Tenma::async()` task                       |
-| [Variables](#variables-and-evaluation)                | every frame, expandable and editable                                 |
-| [Evaluate](#variables-and-evaluation)                 | watch expressions, hovers and the debug console run PHP in the frame |
+| Feature                                                                       | Does                                                                 |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| [Breakpoints](#breakpoints)                                                   | on lines, with conditions, hit counts and logpoints                  |
+| [`Development\Debugger::break()`](../reference/Development/Debugger.md#break) | stops at that line when an editor is connected                       |
+| [Exceptions](#exceptions)                                                     | stops where an uncaught (or any) exception is thrown                 |
+| [Stepping](#stepping-and-threads)                                             | continue, step over, into, out, within one request                   |
+| [Threads](#stepping-and-threads)                                              | every request, timer and `Threading\Task::run()` task                |
+| [Variables](#variables-and-evaluation)                                        | every frame, expandable and editable                                 |
+| [Evaluate](#variables-and-evaluation)                                         | watch expressions, hovers and the debug console run PHP in the frame |
 
 ## VS Code and VSCodium
 
@@ -76,20 +76,20 @@ dap.configurations.php = {
 - A line breakpoint may have a condition (`$id === 42`), a hit count (`5`, `>= 5`, `% 3`), or be a logpoint (`user {$user->id} on {$request->path}`).
 - A breakpoint on a line without its own statement moves to the next statement. Examples: a method's head, the middle of a multi-line `return [`.
 - A breakpoint on a function's closing brace stops whenever it returns. The return value is among the variables.
-- `Tenma::debugger()` in the code stops there when an editor is connected. It does nothing otherwise.
+- `Development\Debugger::break()` in the code stops there when an editor is connected. It does nothing otherwise.
 
 ## Exceptions
 
 - An exception the app does not catch stops where it is thrown, with its frames still alive.
 - The filter "All exceptions" also stops at caught ones.
 - A condition on a filter limits it to classes, such as `DomainException, App\NotFound`. Subclasses count too.
-- `Tenma\Cancelled`, `exit()` and a reload that ends waiting requests never stop.
+- `Threading\Cancelled`, `exit()` and a reload that ends waiting requests never stop.
 
 ## Stepping and threads
 
-Continue, step over, step into and step out work as usual. A step stays in its request. Stepping over `Tenma::sleep()` or a query lets other requests run meanwhile, then stops at the next line of the same request.
+Continue, step over, step into and step out work as usual. A step stays in its request. Stepping over `Threading\Task::delay()` or a query lets other requests run meanwhile, then stops at the next line of the same request.
 
-Every request, timer and `Tenma::async()` task is a thread, named after its method and URI. While stopped, the editor lists them and shows where each waiting one waits.
+Every request, timer and `Threading\Task::run()` task is a thread, named after its method and URI. While stopped, the editor lists them and shows where each waiting one waits.
 
 ## Variables and evaluation
 
@@ -103,10 +103,10 @@ Every request, timer and `Tenma::async()` task is a thread, named after its meth
 - The debugger listens on 127.0.0.1 by default, since it can run any code in the app. An address reachable from the network prints a warning.
 - `--inspect` runs one worker and disables opcache. The JIT would skip the statements the debugger stops at.
 - A stopped request stops its worker, with its other requests and timers.
-- Evaluated code cannot wait: `Tenma::sleep()` throws a `FiberError` there.
+- Evaluated code cannot wait: `Threading\Task::delay()` throws a `FiberError` there.
 - A warning or notice during evaluation is its error, such as `Warning: Undefined property: App\User::$total`.
 - Tenma's own standard library is never stepped into.
 - With `--watch`, breakpoints keep applying across reloads. A change saved while stopped reloads after you continue.
 - The editor's `stopOnEntry` overrides `--inspect-wait` and `--inspect-brk`.
 
-See also: [`Tenma::debugger()`](../reference/Tenma.md#debugger), [Language server](language-server.md), [Command line](command-line.md).
+See also: [`Development\Debugger::break()`](../reference/Development/Debugger.md#break), [Language server](language-server.md), [Command line](command-line.md).

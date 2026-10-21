@@ -1,6 +1,6 @@
 <?php
 // For tests/http.rs: port from the environment, one route throws
-Tenma::serve((int) getenv('PORT'), function (Tenma\Http\Request $request) {
+(new \Http\Server((int) getenv('PORT'), function (Http\Request $request) {
     static $count = 0;
     $count++;
     if ($request->path === '/null') {
@@ -13,4 +13,4 @@ Tenma::serve((int) getenv('PORT'), function (Tenma\Http\Request $request) {
         throw new RuntimeException('broken');
     }
     return "Hello {$request->method} {$request->path}\n";
-});
+}))->start();

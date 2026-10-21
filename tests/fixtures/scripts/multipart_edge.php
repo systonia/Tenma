@@ -1,6 +1,6 @@
 <?php
 // For tests/http.rs: edge cases of the multipart parser, without a server
-use Tenma\Http\{Request, Response, UploadedFile};
+use Http\{Request, Response, UploadedFile};
 
 $form = function (string $body, string $boundary = 'B'): Request {
     return new Request(['method' => 'POST', 'uri' => '/', 'headers' => ['content-type' => "multipart/form-data; boundary=$boundary"], 'body' => $body,

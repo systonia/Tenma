@@ -7,8 +7,8 @@ final class Waiting
 {
     /** @var array<int, \Fiber> */
     public static array $ops = [];
-    /** @var array<int, \Tenma\Timer> */
+    /** @var array<int, \Threading\Timer> */
     public static array $timers = [];
-    /** @var array<int, \Tenma\Subscription> */
+    /** @var array<int, \Messaging\Subscription> */
     public static array $subscriptions = [];
 }

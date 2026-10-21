@@ -700,7 +700,7 @@ static void tenma_ini_defaults(HashTable *configuration_hash) {
     if (watch_mode) {
         // Opcache checks timestamps only every 2 s by default and would load the old code right after saving
         INI_DEFAULT("opcache.revalidate_freq", "0");
-        // Not a PHP setting: get_cfg_var('tenma.watch') tells the stdlib (Tenma::diagnostics) that it runs under --watch
+        // Not a PHP setting: get_cfg_var('tenma.watch') tells the stdlib (Problems::report) that it runs under --watch
         INI_DEFAULT("tenma.watch", "1");
     }
     if (inspect_mode) {
@@ -785,7 +785,7 @@ void tenma_thread_stop(void) {
     memset(&classic_output, 0, sizeof(classic_output));
     ini_snapshot = NULL;
     outer_shutdown_functions = NULL;
-    // The handlers may own the app (Tenma::serve(8080, new App())): its destructor is user code, and a
+    // The handlers may own the app (new Http\Server(8080, new App())): its destructor is user code, and a
     // bailout there without zend_try would exit the whole process instead of ending this interpreter
     zend_try {
         for (uint32_t i = 0; i < handler_count; i++) {
@@ -918,7 +918,7 @@ uint32_t tenma_inspect_depth(void) {
 
 /**
  * The threads as "id\0name\0" each, the stopped one first: the tasks of Tenma's scheduler (requests,
- * timers, Tenma::async()) under their label, waiting ones marked. Rust frees it with free().
+ * timers, Task::run()) under their label, waiting ones marked. Rust frees it with free().
  */
 char *tenma_inspect_threads(size_t *len) {
     smart_str out = {0};
@@ -1243,7 +1243,7 @@ static void enter_frame(struct in_frame *run, zend_execute_data *target) {
     EG(exception) = NULL;
     EG(current_execute_data) = target;
     evaluating = 1;
-    // A fiber switch (Tenma::sleep() in the code) would leave the stopped statement mid-way
+    // A fiber switch (Task::delay() in the code) would leave the stopped statement mid-way
     zend_fiber_switch_block();
 }
 
@@ -1455,7 +1455,7 @@ char *tenma_inspect_set_child(uint32_t reference, const char *name, size_t name_
     return malloc_copy(&out, len);
 }
 
-/** Tenma::debugger(): stops here if a debugger is connected. */
+/** Debugger::break(): stops here if a debugger is connected. */
 extern void tenma_rs_debugger(uintptr_t fiber);
 
 PHP_FUNCTION(tenma_reloaded_by) {
@@ -1539,8 +1539,8 @@ static void inspect_throw(zend_object *exception) {
     if (previous_throw_hook) {
         previous_throw_hook(exception);
     }
-    // Tenma\Cancelled ends a task, as Tenma intends; exit() and the end of a fiber (a reload ends waiting requests) are no exceptions
-    if (!inspecting || evaluating || zend_string_equals_literal_ci(exception->ce->name, "Tenma\\Cancelled")
+    // Threading\Cancelled ends a task, as Tenma intends; exit() and the end of a fiber (a reload ends waiting requests) are no exceptions
+    if (!inspecting || evaluating || zend_string_equals_literal_ci(exception->ce->name, "Threading\\Cancelled")
         || zend_is_unwind_exit(exception) || zend_is_graceful_exit(exception)) {
         return;
     }
@@ -2301,7 +2301,7 @@ static int finish_classic(uint64_t rid, enum outcome handled) {
     zval argument;
     ZVAL_BOOL(&argument, fatal);
     responded_rid = 0;
-    enum outcome finished = call_stdlib("Tenma\\Http\\finishClassic", 1, &argument);
+    enum outcome finished = call_stdlib("Http\\finishClassic", 1, &argument);
     int answered = responded_rid == rid;
     classic_open = 0;
     smart_str_free(&classic_output);

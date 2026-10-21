@@ -1,18 +1,18 @@
 ---
 title: Diagnostics
-description: Report problems from the running app to the editor with Tenma::diagnostics().
+description: Report problems from the running app to the editor with Development\Problems::report().
 order: 340
 ---
 
-Some problems only show up when the code runs: a template that fails to compile, a route that points to a missing method, an error after a click. [`Tenma::diagnostics()`](../reference/Tenma.md#diagnostics) reports them to the editor. The editor shows them at their line like any other error, also in files that are not open.
+Some problems only show up when the code runs: a template that fails to compile, a route that points to a missing method, an error after a click. [`Development\Problems::report()`](../reference/Development/Problems.md#report) reports them to the editor. The editor shows them at their line like any other error, also in files that are not open.
 
 ```bash
 tenma --watch app.php
 ```
 
-| Function                                          | Does                                                                 |
-| ------------------------------------------------- | -------------------------------------------------------------------- |
-| `Tenma::diagnostics(string $source, array $list)` | replaces what `$source` reported before with `$list`; `[]` clears it |
+| Method                                                      | Does                                                                 |
+| ----------------------------------------------------------- | -------------------------------------------------------------------- |
+| `Development\Problems::report(string $source, array $list)` | replaces what `$source` reported before with `$list`; `[]` clears it |
 
 Diagnostics need [`--watch`](watch.md) and the [language server](language-server.md) in the editor.
 
@@ -35,6 +35,8 @@ This script checks its views at startup and flags every empty `{{ }}`:
 ```php
 <?php
 
+use Development\Problems;
+
 function checkViews(string $dir): array
 {
     $problems = [];
@@ -55,9 +57,9 @@ function checkViews(string $dir): array
     return $problems;
 }
 
-Tenma::diagnostics('views', checkViews(__DIR__ . '/views'));
+Problems::report('views', checkViews(__DIR__ . '/views'));
 
-Tenma::serve(8080, fn () => "ok\n");
+new Http\Server(8080, fn () => "ok\n")->start();
 ```
 
 ## Reporting runtime errors
@@ -67,7 +69,8 @@ Errors of real requests can be reported too, so the editor shows where the last 
 ```php
 <?php
 
-use Tenma\Http\{Request, Response};
+use Development\Problems;
+use Http\{Request, Response};
 
 function handle(Request $request): Response
 {
@@ -80,17 +83,17 @@ function report(Request $request, Throwable $e): void
 {
     $message = $e::class . ': ' . $e->getMessage();
 
-    Tenma::diagnostics('requests', [[
+    Problems::report('requests', [[
         'file' => $e->getFile(),
         'line' => $e->getLine(),
         'message' => "$message ({$request->method} {$request->path})",
     ]]);
 }
 
-Tenma::serve(8080, function (Request $request) {
+new Http\Server(8080, function (Request $request) {
     try {
         $response = handle($request);
-        Tenma::diagnostics('requests', []);
+        Problems::report('requests', []);
 
         return $response;
     } catch (Throwable $e) {
@@ -98,7 +101,7 @@ Tenma::serve(8080, function (Request $request) {
 
         throw $e;
     }
-});
+})->start();
 ```
 
 ## Behaviour
@@ -110,4 +113,4 @@ Tenma::serve(8080, function (Request $request) {
 - New entries also go to stderr as `path:line:column: severity: message`. Problem matchers and Vim's quickfix read this format.
 - When `--watch` runs the script again, what the script reported is cleared. What the hooks of `tenma.dev.php` reported is cleared when they reload. A fixed problem therefore disappears without its reporter taking it back.
 
-See also: [`Tenma::diagnostics()`](../reference/Tenma.md#diagnostics), [Language server](language-server.md), [Watch mode](watch.md).
+See also: [`Development\Problems::report()`](../reference/Development/Problems.md#report), [Language server](language-server.md), [Watch mode](watch.md).

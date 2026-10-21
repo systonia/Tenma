@@ -21,15 +21,15 @@ PHP's own signal handlers are disabled, and `pcntl` is not built in. Signals bel
 
 ## Limits
 
-| Limit                                    | Default | Set with                | Above it                                       |
-| ---------------------------------------- | ------- | ----------------------- | ---------------------------------------------- |
-| request body and WebSocket message       | 10 MB   | `--max-body`            | 413                                            |
-| headers and body arriving                | 30 s    | `--request-timeout`     | 408 or disconnect                              |
-| a client that stops reading              | 30 s    | `--request-timeout`     | disconnect; the writer gets `ConnectionClosed` |
-| open connections per worker              | 1024    | `--max-connections`     | 503 at once                                    |
-| `Tenma::fetch()` response                | 30 s    | its `timeout` parameter | the call fails                                 |
-| connecting to Postgres, Redis, `fetch()` | 10 s    | fixed                   | the call fails                                 |
-| draining on shutdown                     | 10 s    | fixed                   | running requests are cut off                   |
+| Limit                                        | Default | Set with                | Above it                                       |
+| -------------------------------------------- | ------- | ----------------------- | ---------------------------------------------- |
+| request body and WebSocket message           | 10 MB   | `--max-body`            | 413                                            |
+| headers and body arriving                    | 30 s    | `--request-timeout`     | 408 or disconnect                              |
+| a client that stops reading                  | 30 s    | `--request-timeout`     | disconnect; the writer gets `ConnectionClosed` |
+| open connections per worker                  | 1024    | `--max-connections`     | 503 at once                                    |
+| `Http\Client` response                       | 30 s    | its `timeout` parameter | the call fails                                 |
+| connecting to Postgres, Redis, `Http\Client` | 10 s    | fixed                   | the call fails                                 |
+| draining on shutdown                         | 10 s    | fixed                   | running requests are cut off                   |
 
 The request timeout protects against slowloris clients. A streaming writer or `WebSocket::send()` that waits for a client which stopped reading gets `ConnectionClosed`.
 
@@ -57,10 +57,12 @@ With `--tls-port`, only the ports named speak HTTPS; the others stay plain HTTP.
 ```php
 <?php
 
-use Tenma\Http\{Request, Response};
+use Http\{Request, Response};
 
-Tenma::serve(80, fn (Request $request) => Response::redirect('https://' . $request->host() . $request->uri, 301));
-Tenma::serve(443, fn () => "Served over HTTPS\n");
+new Http\Server(80, function (Request $request) {
+    return Response::redirect('https://' . $request->host() . $request->uri, 301);
+})->start();
+new Http\Server(443, fn () => "Served over HTTPS\n")->start();
 ```
 
 ```bash

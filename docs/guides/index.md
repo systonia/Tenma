@@ -13,22 +13,20 @@ module each, with examples you can save and run with `tenma <file>.php`. The
 - [Process and workers](process.md): the main thread, worker threads, restarts, scripts without a
   server
 - [Event loop and fibers](event-loop.md): what waits without blocking, and what blocks a worker
-- [Lifetime of a request](request-lifetime.md): what a request owns, cancellation, `Tenma::detach()`,
+- [Lifetime of a request](request-lifetime.md): what a request owns, cancellation, `Threading\Task::detach()`,
   `exit()`
 - [State in memory](state.md): what lives as long as the worker, per-request values, shared state
-- [Fiber mode and classic mode](classic-mode.md): `Tenma::serve()` and `Tenma::serveClassic()`
+- [Fiber mode and classic mode](classic-mode.md): `Http\Server` and `Http\ClassicServer`
 
 ## APIs
 
-- [HTTP server](http.md): `Tenma::serve()`, `Request`, `Response`, cookies, uploads, static files
-- [HTTP client](fetch.md): `Tenma::fetch()`
-- [Tasks, timers and AsyncLocal](async.md): `Tenma::async()`, `Tenma::all()`, `Tenma::sleep()`,
-  timers, `AsyncLocal`
+- [HTTP server](http.md): `Http\Server`, `Request`, `Response`, cookies, uploads, static files
+- [HTTP client](fetch.md): `Http\Client`
+- [Tasks, timers and AsyncLocal](async.md): `Threading\Task`, `Threading\Timer`, `AsyncLocal`
 - [Streams and server-sent events](streams.md): `Response::stream()`, `Response::events()`
 - [WebSockets](websockets.md): `Response::websocket()`
-- [File system](files.md): `Tenma\Fs`
-- [Postgres, Redis and pub/sub](database.md): `Tenma\Db\Postgres`, `Tenma\Db\Redis`,
-  `Tenma::publish()`, `Tenma::subscribe()`
+- [File system](files.md): `FileSystem\FileInfo`, `FileSystem\DirectoryInfo`
+- [Postgres, Redis and pub/sub](database.md): `Data\Postgres`, `Data\Redis`, `Messaging\Channel`
 
 ## Tooling
 

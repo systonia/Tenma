@@ -2,7 +2,7 @@
 
 namespace Fixture;
 
-use Tenma\Lsp\{Elements, Imports, Provider, Tokens, Variables};
+use Lsp\{Elements, Imports, Provider, Tokens, Variables};
 
 /**
  * Binds $this in page.tpl.php to Page, completes "data-on-" values, reports "TODO" lines, colours "@words", and gives

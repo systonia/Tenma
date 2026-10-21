@@ -1,4 +1,4 @@
-//! Async file system for PHP (Tenma\Fs). The work runs on tokio's background threads, the fiber
+//! Async file system for PHP (FileSystem\FileInfo and DirectoryInfo). The work runs on tokio's background threads, the fiber
 //! waits without blocking the worker. Paths stay bytes as in PHP (including invalid UTF-8); the
 //! C layer has already resolved them against PHP's working directory and checked open_basedir.
 //!
@@ -64,12 +64,23 @@ fn run(
                 json!({ "size": meta.len(), "modified": modified, "isFile": meta.is_file(), "isDir": meta.is_dir() }),
             ))
         }
-        // Names as bytes, separated by null bytes: file names need not be valid UTF-8
+        // Kind (f, d, o) and name as bytes, separated by null bytes: file names need not be valid
+        // UTF-8. A link counts as what it points to; a dangling one is "other"
         "readDir" => {
             let mut names: Vec<Vec<u8>> = std::fs::read_dir(&target)?
-                .map(|entry| entry.map(|entry| entry.file_name().as_bytes().to_vec()))
+                .map(|entry| {
+                    let entry = entry?;
+                    let kind = match std::fs::metadata(entry.path()) {
+                        Ok(meta) if meta.is_file() => b'f',
+                        Ok(meta) if meta.is_dir() => b'd',
+                        _ => b'o',
+                    };
+                    let mut name = entry.file_name().as_bytes().to_vec();
+                    name.insert(0, kind);
+                    Ok(name)
+                })
                 .collect::<io::Result<_>>()?;
-            names.sort();
+            names.sort_by(|a, b| a[1..].cmp(&b[1..]));
             Ok(OpResult::Text(names.join(&0)))
         }
         "mkdir" => if flag {

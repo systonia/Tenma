@@ -6,7 +6,7 @@ PHP 8.5 as a long-running process. tenma runs your script once and keeps it in m
 runs in its own fiber, so waiting for a database or an HTTP call never blocks the others.
 
 ```php
-Tenma::serve(8080, fn (Tenma\Http\Request $request) => "Sonnenkorn is open\n");
+new Http\Server(8080, fn (Http\Request $request) => "Sonnenkorn is open\n")->start();
 ```
 
 ```
@@ -59,23 +59,23 @@ tenma --version
 
 Everything after the script goes to the script's `$argv`.
 
-| Option                      | Default            |                                                         |
-| --------------------------- | ------------------ | ------------------------------------------------------- |
-| `--workers N`, `-w N`       | 1                  | worker threads; `auto` = one per CPU core               |
-| `--max-body SIZE`           | `10m`              | largest request body and WebSocket message              |
-| `--max-requests N`          | none               | a worker restarts its interpreter after N requests      |
-| `--max-connections N`       | 1024               | open connections per worker; more get a 503             |
-| `--request-timeout SECONDS` | 30                 | time for headers and body, and for a stalled write      |
-| `--db-pool N`               | 20 / workers, 2–10 | Postgres connections per worker and URL                 |
-| `--pubsub redis://HOST`     | none               | `Tenma::publish()` through Redis, to every process      |
-| `--tls-cert FILE`           | none               | HTTPS with this certificate chain (PEM)                 |
-| `--tls-key FILE`            | none               | the private key for `--tls-cert` (PEM)                  |
-| `--tls-port N`              | every port         | HTTPS only on this port; any number of times            |
-| `--server-name NAME`        | `localhost`        | `$_SERVER['SERVER_NAME']` in classic mode               |
-| `-d name=value`             |                    | a PHP setting, as with `php -d`                         |
-| `-c FILE\|DIR`              |                    | a `php.ini`, as with `php -c`                           |
-| `--watch`                   |                    | reload on changes, run the hooks of `tenma.dev.php`     |
-| `--inspect[=[HOST:]PORT]`   | `127.0.0.1:9229`   | the debugger; also `--inspect-wait` and `--inspect-brk` |
+| Option                      | Default            |                                                                |
+| --------------------------- | ------------------ | -------------------------------------------------------------- |
+| `--workers N`, `-w N`       | 1                  | worker threads; `auto` = one per CPU core                      |
+| `--max-body SIZE`           | `10m`              | largest request body and WebSocket message                     |
+| `--max-requests N`          | none               | a worker restarts its interpreter after N requests             |
+| `--max-connections N`       | 1024               | open connections per worker; more get a 503                    |
+| `--request-timeout SECONDS` | 30                 | time for headers and body, and for a stalled write             |
+| `--db-pool N`               | 20 / workers, 2–10 | Postgres connections per worker and URL                        |
+| `--pubsub redis://HOST`     | none               | `Messaging\Channel::publish()` through Redis, to every process |
+| `--tls-cert FILE`           | none               | HTTPS with this certificate chain (PEM)                        |
+| `--tls-key FILE`            | none               | the private key for `--tls-cert` (PEM)                         |
+| `--tls-port N`              | every port         | HTTPS only on this port; any number of times                   |
+| `--server-name NAME`        | `localhost`        | `$_SERVER['SERVER_NAME']` in classic mode                      |
+| `-d name=value`             |                    | a PHP setting, as with `php -d`                                |
+| `-c FILE\|DIR`              |                    | a `php.ini`, as with `php -c`                                  |
+| `--watch`                   |                    | reload on changes, run the hooks of `tenma.dev.php`            |
+| `--inspect[=[HOST:]PORT]`   | `127.0.0.1:9229`   | the debugger; also `--inspect-wait` and `--inspect-brk`        |
 
 More in [Command line and deployment](docs/guides/deployment.md).
 

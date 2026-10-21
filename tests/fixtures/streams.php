@@ -1,6 +1,6 @@
 <?php
 // For tests/http.rs: streaming, server-sent events and WebSockets
-use Tenma\Http\{EventStream, Request, Response, Stream, WebSocket};
+use Http\{EventStream, Request, Response, Stream, WebSocket};
 
 
 $closed = false;
@@ -8,13 +8,13 @@ $quiet = false;
 $ticks = 0;
 $flooded = false;
 $slept = '';
-Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$quiet, &$ticks, &$flooded, &$slept) {
+(new \Http\Server((int) getenv('PORT'), function (Request $request) use (&$closed, &$quiet, &$ticks, &$flooded, &$slept) {
     switch ($request->path) {
         case '/stream':
             return Response::stream(function (Stream $out) {
                 foreach (['one', 'two', 'three'] as $word) {
                     $out->write("$word\n");
-                    Tenma::sleep(0.2);
+                    \Threading\Task::delay(0.2);
                 }
             }, headers: ['content-type' => 'text/plain']);
         case '/events':
@@ -27,7 +27,7 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
                 try {
                     while (true) {
                         $out->write(str_repeat('x', 1024 * (int) ($request->query['kb'] ?? 1)));
-                        Tenma::sleep(0.01);
+                        \Threading\Task::delay(0.01);
                     }
                 } finally {
                     $closed = true;
@@ -43,14 +43,14 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
             // Cut off midway: the client must be able to tell, not get a complete-looking response
             return Response::stream(function (Stream $out) use ($request) {
                 $out->write("first part\n");
-                Tenma::sleep(0.01);
+                \Threading\Task::delay(0.01);
                 $request->path === '/fatal-stream' ? str_repeat('x', 512 * 1024 * 1024) : throw new RuntimeException('export failed');
             });
         case '/ws-throw':
         case '/ws-fatal':
             return Response::websocket(function (WebSocket $socket) use ($request) {
                 $socket->send('hi');
-                Tenma::sleep(0.01);
+                \Threading\Task::delay(0.01);
                 $request->path === '/ws-fatal' ? str_repeat('x', 512 * 1024 * 1024) : throw new RuntimeException('handler failed');
             });
         case '/quiet':
@@ -58,7 +58,7 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
             return Response::events(function (EventStream $events) use (&$quiet) {
                 $events->comment('waiting');
                 try {
-                    Tenma::sleep(10);
+                    \Threading\Task::delay(10);
                 } finally {
                     $quiet = true;
                 }
@@ -69,14 +69,14 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
             return $closed ? 'closed' : 'open';
         case '/ws-ignore':
             // Never reads: a client that floods anyway is disconnected instead of filling memory
-            return Response::websocket(fn (WebSocket $socket) => Tenma::sleep(3));
+            return Response::websocket(fn (WebSocket $socket) => \Threading\Task::delay(3));
         case '/ws-ticker':
             // The interval belongs to the connection: it stops when the client leaves
             return Response::websocket(function (WebSocket $socket) use (&$ticks) {
-                Tenma::setInterval(function () use ($socket, &$ticks) {
+                \Threading\Timer::every(0.02, function () use ($socket, &$ticks) {
                     $ticks++;
                     $socket->send('tick');
-                }, 0.02);
+                });
                 while ($socket->receive() !== null) {
                 }
             });
@@ -106,9 +106,9 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
                 $slept = 'open';
                 $socket->send('ready');
                 try {
-                    Tenma::sleep(10);
+                    \Threading\Task::delay(10);
                     $slept = 'woke';
-                } catch (Tenma\Cancelled) {
+                } catch (Threading\Cancelled) {
                     $slept = 'cancelled';
                 }
             });
@@ -125,4 +125,4 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use (&$closed, &$
         default:
             return 'ok';
     }
-});
+}))->start();

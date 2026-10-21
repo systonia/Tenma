@@ -15,14 +15,14 @@ final class Scheduler
     public static array $ready = [];
     public static int $head = 0;
     public static int $tokens = 0;
-    /** @var array<int, \Tenma\Task> running tasks by task ID */
+    /** @var array<int, \Threading\Task> running tasks by task ID */
     public static array $tasks = [];
-    /** @var array<int, \Tenma\Task> Fiber ID → task */
+    /** @var array<int, \Threading\Task> Fiber ID → task */
     public static array $taskOfFiber = [];
-    /** @var array<int, array<int, \Tenma\Task|\Tenma\Timer|\Tenma\Subscription>> Request → running tasks, timers and subscriptions, by object ID */
+    /** @var array<int, array<int, \Threading\Task|\Threading\Timer|\Messaging\Subscription>> Request → running tasks, timers and subscriptions, by object ID */
     public static array $ofRequest = [];
     /** @var array<int, \Throwable> Request → the error its work ended with, while some of that work still runs */
     public static array $ended = [];
-    /** @var array<int, mixed> Values of Tenma\AsyncLocal outside any task (script, start of a request) */
+    /** @var array<int, mixed> Values of Threading\AsyncLocal outside any task (script, start of a request) */
     public static array $rootContext = [];
 }

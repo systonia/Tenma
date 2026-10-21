@@ -988,7 +988,7 @@ fn serve(
                 // next connection waiting too. That one belongs to the fresh interpreter: here it would
                 // land in the old one, broken after a fatal error, and the drain would reset it unread
                 biased;
-                // Tenma::reloadedBy() tells the next run why it runs: not for a change here
+                // Watch::reloadedBy() tells the next run why it runs: not for a change here
                 () = restart.notified() => {
                     watch::rerun(false);
                     break Stop::Restart;

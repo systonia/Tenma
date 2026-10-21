@@ -7,7 +7,7 @@
 //! variables) itself, the server passes those requests on. A stopped worker stops everything it
 //! runs, other requests and timers included.
 //!
-//! DAP threads are fibers: every request, timer and `Tenma::async()` task is one, with the stack
+//! DAP threads are fibers: every request, timer and `Task::run()` task is one, with the stack
 //! it waits in.
 
 use std::cell::Cell;
@@ -627,14 +627,14 @@ fn stop_here(body: Value, fiber: usize) {
     STEPPING.set(step.map(|step| (step, fiber, unsafe { tenma_inspect_depth() })));
 }
 
-/// `Tenma::debugger()`: stops if an editor is connected.
+/// `Debugger::break()`: stops if an editor is connected.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_debugger(fiber: usize) {
     if ENDING.load(Ordering::Relaxed) || CLIENT.lock().unwrap().is_none() {
         return;
     }
     stop_here(
-        json!({"reason": "breakpoint", "description": "Tenma::debugger()"}),
+        json!({"reason": "breakpoint", "description": "Debugger::break()"}),
         fiber,
     );
 }

@@ -2,7 +2,7 @@
 
 namespace Tenma\Internal;
 
-/** Tenma::diagnostics(): who publishes, and the project's directory for `tenma lsp`. */
+/** Problems::report(): who publishes, and the project's directory for `tenma lsp`. */
 final class Diagnostics
 {
     /** The script's workers ('app') or the hooks of tenma.dev.php ('dev'): --watch clears each on its reload */

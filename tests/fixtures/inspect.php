@@ -9,9 +9,9 @@ final class Point {
     public function __construct(public int $x, private array $tags = ['a' => 1]) {}
 }
 
-Tenma::serve((int) getenv('PORT'), function ($request) {
+(new \Http\Server((int) getenv('PORT'), function ($request) {
     if ($request->path === '/wait') {
-        Tenma::sleep(5);
+        \Threading\Task::delay(5);
         return 'woke';
     }
     if ($request->path === '/throw') {
@@ -27,10 +27,10 @@ Tenma::serve((int) getenv('PORT'), function ($request) {
     $id = 42;
     $point = new Point(7);
     $message = greet('world');
-    Tenma::sleep(0.01);
+    \Threading\Task::delay(0.01);
     $after = 'slept';
     return "$message $after";
-});
+}))->start();
 
 function info(): array {
     return [

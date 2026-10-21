@@ -164,7 +164,7 @@ fn fibers_wait_without_blocking_the_server() {
 
     assert!(get(port, "/proxy").ends_with("proxy: hello\n"));
 
-    // Tenma::all: three waits run at the same time, not one after another
+    // Task::all: three waits run at the same time, not one after another
     let started = Instant::now();
     assert!(get(port, "/all").ends_with("{\"a\":\"one\",\"b\":\"two\",\"c\":\"three\"}\n"));
     assert!(
@@ -1486,7 +1486,7 @@ fn file_system_async() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "[true,21,[\"a.txt\",\"sub\"],[\"c.txt\",\"dir\"],[21,true,false,true],true,false]\n\
+        "[true,true,[\"a.txt\"],[\"sub\"],[\"c.txt\"],[21,true,true],true,false,false]\n\
          2 with path\n17 with path\n22 with path 21\nbytes kept\nchdir applies\ncleaned up\n"
     );
     let allowed = format!("open_basedir={}/tests", env!("CARGO_MANIFEST_DIR"));
@@ -1920,14 +1920,13 @@ fn stubs_describe_the_public_api_only() {
     let stubs = String::from_utf8_lossy(&output.stdout);
     assert!(stubs.starts_with("<?php\n"), "{stubs}");
     for expected in [
-        "final class Tenma",
-        "public static function serve(int $port, callable $handler",
-        "public static function async(callable $work): \\Tenma\\Task {}",
-        "namespace Tenma\\Http {",
+        "namespace Http {",
+        "final class Server",
+        "public static function run(callable $work): \\Threading\\Task {}",
         "final class Request",
         "final class AsyncLocal",
-        "public static function readFile(string $path): string {}",
-        "namespace Tenma\\Lsp {",
+        "public function read(): string {}",
+        "namespace Lsp {",
         "interface Provider",
         "public function thisClass(string $file): ?string;",
     ] {
@@ -1996,7 +1995,7 @@ fn watch_reloads_on_changes() {
     let lazy = directory.join("lazy.php");
     let script = |version: &str| {
         format!(
-            "<?php\nTenma::serve({port}, function ($request) {{\n    if ($request->path === '/lazy') {{ require_once __DIR__ . '/lazy.php'; return lazy(); }}\n    return \"{version}\\n\";\n}});\n"
+            "<?php\n(new \\Http\\Server({port}, function ($request) {{\n    if ($request->path === '/lazy') {{ require_once __DIR__ . '/lazy.php'; return lazy(); }}\n    return \"{version}\\n\";\n}}))->start();\n"
         )
     };
     std::fs::write(&app, script("one")).unwrap();
@@ -2034,7 +2033,11 @@ fn watch_reloads_on_changes() {
 
     // No server for a while, but an interval keeps the script running: 503 from every worker, and
     // every worker serves again after the next change
-    std::fs::write(&app, "<?php\nTenma::setInterval(fn () => null, 1);\n").unwrap();
+    std::fs::write(
+        &app,
+        "<?php\n\\Threading\\Timer::every(1, fn () => null);\n",
+    )
+    .unwrap();
     // A worker that has not reloaded yet still answers with "three"
     settled(port, "/", 4, |response| {
         response.starts_with("HTTP/1.1 503") && response.contains("serves no requests")
@@ -2054,7 +2057,7 @@ fn watch_reloads_a_file_saved_while_the_request_that_loaded_it_ran() {
     let lazy = directory.join("lazy.php");
     std::fs::write(
         &app,
-        format!("<?php\nTenma::serve({port}, function ($request) {{\n    if ($request->path === '/slow') {{ require_once __DIR__ . '/lazy.php'; Tenma::sleep(0.5); }}\n    return function_exists('lazy') ? lazy() : \"none\\n\";\n}});\n"),
+        format!("<?php\n(new \\Http\\Server({port}, function ($request) {{\n    if ($request->path === '/slow') {{ require_once __DIR__ . '/lazy.php'; \\Threading\\Task::delay(0.5); }}\n    return function_exists('lazy') ? lazy() : \"none\\n\";\n}}))->start();\n"),
     )
     .unwrap();
     std::fs::write(&lazy, "<?php function lazy() { return \"lazy one\\n\"; }").unwrap();
@@ -2094,7 +2097,7 @@ fn watch_follows_a_directory_that_was_replaced() {
     };
     std::fs::write(
         &app,
-        format!("<?php\nrequire __DIR__ . '/lib/a.php';\nTenma::serve({port}, fn () => a());\n"),
+        format!("<?php\nrequire __DIR__ . '/lib/a.php';\n(new \\Http\\Server({port}, fn () => a()))->start();\n"),
     )
     .unwrap();
     std::fs::create_dir(&lib).unwrap();
@@ -2142,7 +2145,7 @@ fn watch_reruns_scripts_without_servers() {
     // Still running with a pending timer: a change stops it and runs the script again
     std::fs::write(
         &script,
-        "<?php echo \"run two\\n\"; Tenma::setTimeout(fn() => null, 60_000);",
+        "<?php echo \"run two\\n\"; \\Threading\\Timer::after(60_000, fn() => null);",
     )
     .unwrap();
     assert_eq!(lines.next().unwrap().unwrap(), "run two");
@@ -2173,7 +2176,7 @@ fn watch_reruns_scripts_without_servers() {
     std::thread::sleep(Duration::from_millis(300));
     std::fs::write(
         directory.join("next.php"),
-        format!("<?php Tenma::serve({port}, fn () => \"served\\n\");"),
+        format!("<?php (new \\Http\\Server({port}, fn () => \"served\\n\"))->start();"),
     )
     .unwrap();
     std::fs::rename(directory.join("next.php"), &script).unwrap();
@@ -2198,9 +2201,9 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
     std::fs::create_dir(directory.join("bin")).unwrap();
     let script = directory.join("bin/script.php");
     let list = directory.join(".tenma/diagnostics/app.checks.json");
-    let publish = "<?php\nTenma::diagnostics('checks', [['file' => __FILE__, 'line' => 2, 'message' => 'run one', 'severity' => 'warning'], ['file' => 'page.tpl.php', 'line' => 1, 'message' => 'relative']]);\necho 'run one' . (Tenma::reloadedBy() === null ? '' : ' again') . \"\\n\";";
+    let publish = "<?php\n\\Development\\Problems::report('checks', [['file' => __FILE__, 'line' => 2, 'message' => 'run one', 'severity' => 'warning'], ['file' => 'page.tpl.php', 'line' => 1, 'message' => 'relative']]);\necho 'run one' . (\\Development\\Watch::reloadedBy() === null ? '' : ' again') . \"\\n\";";
     std::fs::write(&script, publish).unwrap();
-    std::fs::write(directory.join("bin/tenma.dev.php"), "<?php\nreturn [new Tenma\\Hook(name: 'check', inputs: [], run: fn () => Tenma::diagnostics('hooks', [['file' => __FILE__, 'line' => 1, 'message' => 'from a hook']]))];\n").unwrap();
+    std::fs::write(directory.join("bin/tenma.dev.php"), "<?php\nreturn [new Development\\Hook(name: 'check', inputs: [], run: fn () => \\Development\\Problems::report('hooks', [['file' => __FILE__, 'line' => 1, 'message' => 'from a hook']]))];\n").unwrap();
 
     // Without --watch nobody shows it: nothing is written
     let plain = Command::new(env!("CARGO_BIN_EXE_tenma"))
@@ -2268,7 +2271,7 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
     // and the script learns what changed
     std::fs::write(
         &script,
-        "<?php echo 'run two by ' . basename(Tenma::reloadedBy()) . \"\\n\";",
+        "<?php echo 'run two by ' . basename(\\Development\\Watch::reloadedBy()) . \"\\n\";",
     )
     .unwrap();
     assert_eq!(
@@ -2289,7 +2292,7 @@ fn reloaded_by_is_the_change_only_for_the_run_it_caused() {
     let app = directory.join("app.php");
     let script = |version: &str| {
         format!(
-            "<?php\n$by = Tenma::reloadedBy();\nTenma::serve({port}, fn () => '{version} ' . ($by === null ? 'none' : basename($by)) . \"\\n\");\n"
+            "<?php\n$by = \\Development\\Watch::reloadedBy();\n(new \\Http\\Server({port}, fn () => '{version} ' . ($by === null ? 'none' : basename($by)) . \"\\n\"))->start();\n"
         )
     };
     std::fs::write(&app, script("one")).unwrap();
@@ -2343,7 +2346,7 @@ fn hook_project(name: &str) -> std::path::PathBuf {
 
 fn minify_hooks(suffix: &str) -> String {
     format!(
-        "<?php\nreturn [\n    new Tenma\\Hook(inputs: ['public/app.css'], outputs: ['public/app.min.css'], name: 'minify', run: function (array $changed) {{\n        require_once __DIR__ . '/transform.php';\n        file_put_contents(__DIR__ . '/runs.log', 'minify ' . implode(',', array_map('basename', $changed)) . \"\\n\", FILE_APPEND);\n        file_put_contents(__DIR__ . '/public/app.min.css', transform(str_replace(' ', '', file_get_contents(__DIR__ . '/public/app.css'))) . '{suffix}');\n    }}),\n    new Tenma\\Hook(inputs: ['assets/**/*.css'], outputs: ['public/app.css'], run: ['./copy.sh', 'assets/app.css', 'public/app.css'], name: 'css'),\n];\n"
+        "<?php\nreturn [\n    new Development\\Hook(inputs: ['public/app.css'], outputs: ['public/app.min.css'], name: 'minify', run: function (array $changed) {{\n        require_once __DIR__ . '/transform.php';\n        file_put_contents(__DIR__ . '/runs.log', 'minify ' . implode(',', array_map('basename', $changed)) . \"\\n\", FILE_APPEND);\n        file_put_contents(__DIR__ . '/public/app.min.css', transform(str_replace(' ', '', file_get_contents(__DIR__ . '/public/app.css'))) . '{suffix}');\n    }}),\n    new Development\\Hook(inputs: ['assets/**/*.css'], outputs: ['public/app.css'], run: ['./copy.sh', 'assets/app.css', 'public/app.css'], name: 'css'),\n];\n"
     )
 }
 
@@ -2369,7 +2372,7 @@ fn build_runs_hooks_in_order_and_fails_on_cycles() {
         "minify app.css\n"
     );
 
-    std::fs::write(directory.join("cycle.php"), "<?php return [\n    new Tenma\\Hook(inputs: ['b'], outputs: ['a'], run: fn () => null, name: 'a'),\n    new Tenma\\Hook(inputs: ['a'], outputs: ['b'], run: fn () => null, name: 'b'),\n];").unwrap();
+    std::fs::write(directory.join("cycle.php"), "<?php return [\n    new Development\\Hook(inputs: ['b'], outputs: ['a'], run: fn () => null, name: 'a'),\n    new Development\\Hook(inputs: ['a'], outputs: ['b'], run: fn () => null, name: 'b'),\n];").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
         .args(["build", "cycle.php"])
         .current_dir(&directory)
@@ -2383,7 +2386,7 @@ fn build_runs_hooks_in_order_and_fails_on_cycles() {
 
     std::fs::write(
         directory.join("fails.php"),
-        "<?php return [new Tenma\\Hook(inputs: [], run: ['false'])];",
+        "<?php return [new Development\\Hook(inputs: [], run: ['false'])];",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
@@ -2399,7 +2402,7 @@ fn build_runs_hooks_in_order_and_fails_on_cycles() {
     );
 
     // Output that is no UTF-8 is printed as well as it goes, and the hook runs on
-    std::fs::write(directory.join("latin1.php"), "<?php return [new Tenma\\Hook(inputs: [], run: ['sh', '-c', 'printf \"caf\\\\351\\\\n\"; sleep 0.3; echo after'], name: 'latin1')];").unwrap();
+    std::fs::write(directory.join("latin1.php"), "<?php return [new Development\\Hook(inputs: [], run: ['sh', '-c', 'printf \"caf\\\\351\\\\n\"; sleep 0.3; echo after'], name: 'latin1')];").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
         .args(["build", "latin1.php"])
         .current_dir(&directory)
@@ -2417,7 +2420,7 @@ fn build_runs_hooks_in_order_and_fails_on_cycles() {
 fn watch_runs_hooks_on_changes() {
     let port = 18_121;
     let directory = hook_project("hooks");
-    std::fs::write(directory.join("app.php"), format!("<?php Tenma::serve({port}, fn () => file_get_contents(__DIR__ . '/public/app.min.css'));")).unwrap();
+    std::fs::write(directory.join("app.php"), format!("<?php (new \\Http\\Server({port}, fn () => file_get_contents(__DIR__ . '/public/app.min.css')))->start();")).unwrap();
     let _server = Server(
         Command::new(env!("CARGO_BIN_EXE_tenma"))
             .args(["--watch", "app.php"])
@@ -2461,7 +2464,7 @@ fn watch_stops_hooks_that_trigger_themselves() {
     std::fs::create_dir_all(directory.join("src")).unwrap();
     std::fs::write(directory.join("app.php"), "<?php").unwrap();
     // Writes into its own inputs without declaring it
-    std::fs::write(directory.join("tenma.dev.php"), "<?php return [new Tenma\\Hook(inputs: ['src/*.txt'], name: 'loop', run: fn () => file_put_contents(__DIR__ . '/src/self.txt', microtime()))];").unwrap();
+    std::fs::write(directory.join("tenma.dev.php"), "<?php return [new Development\\Hook(inputs: ['src/*.txt'], name: 'loop', run: fn () => file_put_contents(__DIR__ . '/src/self.txt', microtime()))];").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_tenma"))
         .args(["--watch", "app.php"])
         .current_dir(&directory)
@@ -2494,7 +2497,7 @@ fn watch_keeps_hook_roots_recursive_when_the_app_loads_from_them() {
         "<?php require __DIR__ . '/src/a.php'; echo \"loaded\\n\";",
     )
     .unwrap();
-    std::fs::write(directory.join("tenma.dev.php"), "<?php return [new Tenma\\Hook(inputs: ['src/**/*.txt'], name: 'txt', run: fn (array $changed) => print('changed ' . implode(',', array_map('basename', $changed)) . \"\\n\"))];").unwrap();
+    std::fs::write(directory.join("tenma.dev.php"), "<?php return [new Development\\Hook(inputs: ['src/**/*.txt'], name: 'txt', run: fn (array $changed) => print('changed ' . implode(',', array_map('basename', $changed)) . \"\\n\"))];").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_tenma"))
         .args(["--watch", "app.php"])
         .current_dir(&directory)
@@ -2813,7 +2816,7 @@ fn inspect_stops_at_breakpoints_and_steps() {
             &serde_json::json!("breakpoint")
         )
     );
-    assert_eq!(stop.local("$request").unwrap().0, "Tenma\\Http\\Request");
+    assert_eq!(stop.local("$request").unwrap().0, "Http\\Request");
     assert_eq!(stop.local("$id"), None, "not assigned yet");
 
     dap.command("next");
@@ -2897,7 +2900,7 @@ fn inspect_shows_requests_as_threads_and_stops_at_exceptions() {
     dap.break_at("tests/fixtures/inspect.php".as_ref(), &[27]);
     dap.request("configurationDone", serde_json::json!({}));
 
-    // One request waits in Tenma::sleep(), the other stops: both are threads, each with its stack
+    // One request waits in \\Threading\\Task::delay(), the other stops: both are threads, each with its stack
     let _waiting = std::thread::spawn(move || get(port, "/wait"));
     std::thread::sleep(Duration::from_millis(200));
     let response = std::thread::spawn(move || get(port, "/"));
@@ -3029,7 +3032,7 @@ fn inspect_wait_waits_for_the_breakpoints_and_stops_at_the_first_statement_only_
     let app = scratch("inspect-wait").join("app.php");
     std::fs::write(
         &app,
-        format!("<?php\n$started = true;\nTenma::serve({port}, fn($request) => 'ok');\n"),
+        format!("<?php\n$started = true;\n(new \\Http\\Server({port}, fn($request) => 'ok'))->start();\n"),
     )
     .unwrap();
     let _server = Server(
@@ -3078,7 +3081,7 @@ fn inspect_keeps_the_session_and_breakpoints_across_watch_reloads() {
     let app = directory.join("app.php");
     let script = |version: &str| {
         format!(
-            "<?php\nTenma::serve({port}, function ($request) {{\n    $version = '{version}';\n    return \"$version\\n\";\n}});\n"
+            "<?php\n(new \\Http\\Server({port}, function ($request) {{\n    $version = '{version}';\n    return \"$version\\n\";\n}}))->start();\n"
         )
     };
     std::fs::write(&app, script("one")).unwrap();
@@ -3121,7 +3124,7 @@ fn inspect_does_not_stop_when_a_reload_ends_waiting_requests() {
     let app = directory.join("app.php");
     let script = |version: &str| {
         format!(
-            "<?php\nTenma::serve({port}, function ($request) {{\n    if ($request->path === '/wait') {{\n        Tenma::sleep(30);\n    }}\n    throw new RuntimeException('{version}');\n}});\n"
+            "<?php\n(new \\Http\\Server({port}, function ($request) {{\n    if ($request->path === '/wait') {{\n        \\Threading\\Task::delay(30);\n    }}\n    throw new RuntimeException('{version}');\n}}))->start();\n"
         )
     };
     std::fs::write(&app, script("one")).unwrap();
@@ -3226,7 +3229,7 @@ fn inspect_evaluates_logs_and_changes_variables() {
             .starts_with("LogicException: no")
     );
     assert!(
-        evaluate(&mut dap, "Tenma::sleep(0.01)", "watch")["message"]
+        evaluate(&mut dap, "\\Threading\\Task::delay(0.01)", "watch")["message"]
             .as_str()
             .unwrap()
             .starts_with("FiberError")
@@ -3377,12 +3380,12 @@ fn inspect_hit_counts_exception_classes_debugger_and_setting_children() {
     dap.command("continue");
     assert!(response.join().unwrap().starts_with("HTTP/1.1 500"));
 
-    // Tenma::debugger() stops in the caller's line; elements and properties can be changed
+    // Debugger::break() stops in the caller's line; elements and properties can be changed
     let response = std::thread::spawn(move || get(port, "/"));
     let stop = dap.stopped();
     assert_eq!(
         (stop.line, &stop.event["description"]),
-        (27, &serde_json::json!("Tenma::debugger()"))
+        (27, &serde_json::json!("Debugger::break()"))
     );
     let list = dap.variables(stop.local("$list").unwrap().1);
     let set = |dap: &mut Dap, reference: u64, name: &str, value: &str| {
@@ -3419,7 +3422,7 @@ fn inspect_hit_counts_exception_classes_debugger_and_setting_children() {
         "{body}"
     );
 
-    // Without an editor Tenma::debugger() does nothing
+    // Without an editor \\Development\\Debugger::break() does nothing
     dap.request("disconnect", serde_json::json!({}));
     assert!(get(port, "/").ends_with(r#"[{"x":{"y":1}},{"x":{"y":1}},1,{"a":1}]"#));
 }
@@ -3481,7 +3484,7 @@ fn review_fixes() {
         body(get(classic, "/")),
         r#"{"post":[],"filter":null,"gc":false}"#
     );
-    assert_eq!(body(get(port, "/all-cancelled")), "Tenma\\Cancelled");
+    assert_eq!(body(get(port, "/all-cancelled")), "Threading\\Cancelled");
 
     // exit() does not leave the cycle collector switched off
     get(classic, "/?exit=1");
@@ -3661,7 +3664,7 @@ fn serves_https_with_tls_cert_and_key() {
     let app = directory.join("app.php");
     std::fs::write(
         &app,
-        format!("<?php\nTenma::serve({port}, fn ($request) => $request->https ? \"https\\n\" : \"http\\n\");\n"),
+        format!("<?php\n(new \\Http\\Server({port}, fn ($request) => $request->https ? \"https\\n\" : \"http\\n\"))->start();\n"),
     )
     .unwrap();
     let _server = Server(
@@ -3709,7 +3712,7 @@ fn classic_mode_sets_https_over_tls() {
     let app = directory.join("app.php");
     std::fs::write(
         &app,
-        format!("<?php\nTenma::serveClassic({port}, function () {{\n    echo ($_SERVER['HTTPS'] ?? 'off') . ' ' . $_SERVER['REQUEST_SCHEME'] . \"\\n\";\n}});\n"),
+        format!("<?php\n(new \\Http\\ClassicServer({port}, function () {{\n    echo ($_SERVER['HTTPS'] ?? 'off') . ' ' . $_SERVER['REQUEST_SCHEME'] . \"\\n\";\n}}))->start();\n"),
     )
     .unwrap();
     let _server = Server(
@@ -3788,19 +3791,19 @@ fn fetch_errors_name_their_cause() {
         &app,
         format!(
             r#"<?php
-Tenma::serve({port}, function ($request) {{
+(new \Http\Server({port}, function ($request) {{
     if ($request->path === '/slow') {{
-        Tenma::sleep(2);
+        \Threading\Task::delay(2);
         return "late\n";
     }}
     $url = $request->path === '/timeout' ? 'http://127.0.0.1:{port}/slow' : 'http://127.0.0.1:1/';
     try {{
-        Tenma::fetch($url, timeout: 0.2);
+        (new \Http\Client(0.2))->get($url);
         return "no error\n";
     }} catch (RuntimeException $error) {{
         return $error->getMessage() . "\n";
     }}
-}});
+}}))->start();
 "#
         ),
     )
@@ -3834,7 +3837,7 @@ fn tls_port_mixes_http_and_https() {
         "fn ($request) => ($request->https ? 'https ' : 'http ') . $request->serverPort . \"\\n\"";
     std::fs::write(
         &app,
-        format!("<?php\nTenma::serve({plain}, {handler});\nTenma::serve({secure}, {handler});\n"),
+        format!("<?php\n(new \\Http\\Server({plain}, {handler}))->start();\n(new \\Http\\Server({secure}, {handler}))->start();\n"),
     )
     .unwrap();
     let _server = Server(
@@ -3875,7 +3878,7 @@ fn sighup_reloads_the_certificate() {
     let app = directory.join("app.php");
     std::fs::write(
         &app,
-        format!("<?php\nTenma::serve({port}, fn () => \"ok\\n\");\n"),
+        format!("<?php\n(new \\Http\\Server({port}, fn () => \"ok\\n\"))->start();\n"),
     )
     .unwrap();
     let log = directory.join("stderr.log");
@@ -3940,7 +3943,7 @@ fn https_speaks_http2_when_the_client_offers_it() {
     std::fs::write(
         &app,
         format!(
-            "<?php\nTenma::serve({port}, function ($request) {{\n    Tenma::sleep(0.3);\n    return $request->protocol . ' ' . $request->host() . ' ' . $request->uri . \"\\n\";\n}});\n"
+            "<?php\n(new \\Http\\Server({port}, function ($request) {{\n    \\Threading\\Task::delay(0.3);\n    return $request->protocol . ' ' . $request->host() . ' ' . $request->uri . \"\\n\";\n}}))->start();\n"
         ),
     )
     .unwrap();

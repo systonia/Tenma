@@ -1,23 +1,29 @@
 ---
 title: HTTP client
-description: Send HTTP requests with Tenma::fetch() without blocking the server, and read the FetchResponse.
+description: Send HTTP requests with Http\Client without blocking the server, and read the ClientResponse.
 order: 210
 ---
 
-`Tenma::fetch()` sends an HTTP request and returns a `FetchResponse`. While it waits, only the calling fiber is suspended. Other requests keep running.
+`Http\Client` sends HTTP requests and returns a `ClientResponse` for each. While it waits, only the calling fiber is suspended. Other requests keep running.
 
-| Function or class                                                                       | Does                                                   |
-| --------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| [`Tenma::fetch($url, method:, headers:, body:, timeout:)`](../reference/Tenma.md#fetch) | sends a request and waits for the complete response    |
-| [`FetchResponse`](../reference/Tenma/Http/FetchResponse.md)                             | `status`, `headers`, `body`, `header($name)`, `json()` |
+| Class or method                                                            | Does                                                   |
+| -------------------------------------------------------------------------- | ------------------------------------------------------ |
+| [`new Http\Client(timeout: 30.0)`](../reference/Http/Client.md)            | a client; `timeout` is seconds for the whole request   |
+| [`get($url, $headers)`](../reference/Http/Client.md#get)                   | sends a GET and waits for the complete response        |
+| [`post($url, $body, $headers)`](../reference/Http/Client.md#post)          | sends a POST with a raw body                           |
+| [`send($method, $url, $headers, $body)`](../reference/Http/Client.md#send) | any method                                             |
+| [`ClientResponse`](../reference/Http/ClientResponse.md)                    | `status`, `headers`, `body`, `header($name)`, `json()` |
 
 ## Sending a request
 
 ```php
 <?php
 
-Tenma::async(function () {
-    $response = Tenma::fetch('https://httpbin.org/get', headers: [
+use Http\Client;
+use Threading\Task;
+
+Task::run(function () {
+    $response = new Client()->get('https://httpbin.org/get', [
         'accept' => 'application/json',
     ]);
 
@@ -27,17 +33,17 @@ Tenma::async(function () {
 });
 ```
 
-This prints `200`, `application/json` and the URL. At the top level of a script, `fetch()` needs `Tenma::async()` around it. In a handler, a task or a timer it works directly.
+This prints `200`, `application/json` and the URL. At the top level of a script, a request needs `Task::run()` around it. In a handler, a task or a timer it works directly.
 
-Parameters, all but `$url` optional and best passed by name:
+| Parameter  | Default | Meaning                                                                  |
+| ---------- | ------- | ------------------------------------------------------------------------ |
+| `timeout`  | `30.0`  | seconds for the whole request, response body included; set on the client |
+| `$url`     |         | an `http://` or `https://` URL                                           |
+| `$headers` | `[]`    | `['name' => 'value']`                                                    |
+| `$body`    | `''`    | the raw request body                                                     |
+| `$method`  |         | any HTTP method, for `send()`                                            |
 
-| Parameter | Default | Meaning                                               |
-| --------- | ------- | ----------------------------------------------------- |
-| `$url`    |         | an `http://` or `https://` URL                        |
-| `method`  | `'GET'` | any HTTP method                                       |
-| `headers` | `[]`    | `['name' => 'value']`                                 |
-| `body`    | `''`    | the raw request body                                  |
-| `timeout` | `30.0`  | seconds for the whole request, response body included |
+A client holds only its timeout, so one `new Client()` can serve a whole script.
 
 ## Reading the response
 
@@ -54,14 +60,15 @@ Parameters, all but `$url` optional and best passed by name:
 ```php
 <?php
 
-Tenma::async(function () {
+use Http\Client;
+use Threading\Task;
+
+Task::run(function () {
     $payload = json_encode(['name' => 'Ada', 'role' => 'admin']);
 
-    $response = Tenma::fetch('https://httpbin.org/post',
-        method: 'POST',
-        headers: ['content-type' => 'application/json'],
-        body: $payload,
-    );
+    $response = new Client()->post('https://httpbin.org/post', $payload, [
+        'content-type' => 'application/json',
+    ]);
 
     echo $response->json()['json']['name'], "\n";   // Ada
 });
@@ -74,11 +81,11 @@ HTTP error statuses are no exceptions: a 404 or a 500 comes back as a response w
 ```php
 <?php
 
-use Tenma\Http\Response;
+use Http\{Client, Response, Server};
 
-Tenma::serve(8080, function () {
+new Server(8080, function () {
     try {
-        $response = Tenma::fetch('https://httpbin.org/delay/5', timeout: 1.0);
+        $response = new Client(timeout: 1.0)->get('https://httpbin.org/delay/5');
     } catch (RuntimeException $e) {
         return new Response("upstream failed: {$e->getMessage()}\n", 502);
     }
@@ -88,35 +95,38 @@ Tenma::serve(8080, function () {
     }
 
     return $response->body;
-});
+})->start();
 ```
 
 ## Several requests at once
 
-Independent requests belong in [`Tenma::all()`](async.md#several-things-at-once). The total time is that of the slowest, not the sum.
+Independent requests belong in [`Task::all()`](async.md#several-things-at-once). The total time is that of the slowest, not the sum.
 
 ```php
 <?php
 
-use Tenma\Http\Response;
+use Http\{Client, Response, Server};
+use Threading\Task;
 
-Tenma::serve(8080, function () {
-    $answers = Tenma::all(
-        uuid: fn () => Tenma::fetch('https://httpbin.org/uuid', timeout: 5),
-        ip: fn () => Tenma::fetch('https://httpbin.org/ip', timeout: 5),
+$client = new Client(timeout: 5.0);
+
+new Server(8080, function () use ($client) {
+    $answers = Task::all(
+        uuid: fn () => $client->get('https://httpbin.org/uuid'),
+        ip: fn () => $client->get('https://httpbin.org/ip'),
     );
 
     $statuses = array_map(fn ($answer) => $answer->status, $answers);
 
     return Response::json($statuses);   // {"uuid": 200, "ip": 200}
-});
+})->start();
 ```
 
 To avoid a request per page view, keep the last answer in memory and refresh it with a timer: see [background work](async.md#background-work).
 
 ## Behaviour
 
-- `fetch()` waits until the whole response body is there. Only the calling fiber waits.
+- `get()`, `post()` and `send()` wait until the whole response body is there. Only the calling fiber waits.
 - HTTP statuses never throw. Check `status`.
 - A `RuntimeException` is thrown for DNS errors, refused connections and TLS errors.
 - It is also thrown when the connection is not established within 10 seconds, or the response is not complete within `timeout`.
@@ -124,7 +134,7 @@ To avoid a request per page view, keep the last answer in memory and refresh it 
 - `json()` throws a `JsonException` on invalid JSON.
 - An invalid header name or value (a line break, a control character) throws a `ValueError`.
 - Redirects are followed.
-- `fetch()` works only in asynchronous code: handlers, tasks, timers. At the top level of a script and in [classic mode](classic-mode.md) it throws a `LogicException`. Use curl there.
-- A fetch belongs to the request that started it. If the client disconnects, the fetch is cancelled: see [Lifetime of a request](request-lifetime.md).
+- `Http\Client` works only in asynchronous code: handlers, tasks, timers. At the top level of a script and in [classic mode](classic-mode.md) it throws a `LogicException`. Use curl there.
+- An outgoing request belongs to the handler request that started it. If the client disconnects, it is cancelled: see [Lifetime of a request](request-lifetime.md).
 
-See also: [`Tenma::fetch()`](../reference/Tenma.md#fetch), [`FetchResponse`](../reference/Tenma/Http/FetchResponse.md).
+See also: [`Http\Client`](../reference/Http/Client.md), [`ClientResponse`](../reference/Http/ClientResponse.md).

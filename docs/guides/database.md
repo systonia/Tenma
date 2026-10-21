@@ -4,36 +4,38 @@ description: Query Postgres and Redis without blocking, use transactions and the
 order: 260
 ---
 
-Tenma has asynchronous clients for Postgres and Redis built in. While a query runs, only the fiber that sent it waits, and the worker serves other requests. `Tenma::publish()` and `Tenma::subscribe()` send messages between workers, and with `--pubsub` between processes.
+Tenma has asynchronous clients for Postgres and Redis built in. While a query runs, only the fiber that sent it waits, and the worker serves other requests. `Messaging\Channel` sends messages between workers, and with `--pubsub` between processes.
 
-| Method                                                                       | Does                                                                                  |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| [`Postgres::connect($url)`](../reference/Tenma/Db/Postgres.md#connect)       | Returns a client for `postgres://user:password@host:5432/database`.                   |
-| [`$db->query($sql, $params)`](../reference/Tenma/Db/Postgres.md#query)       | Returns all rows as a list of associative arrays.                                     |
-| [`$db->first($sql, $params)`](../reference/Tenma/Db/Postgres.md#first)       | Returns the first row, or `null`.                                                     |
-| [`$db->execute($sql, $params)`](../reference/Tenma/Db/Postgres.md#execute)   | Runs a statement without a result and returns the number of affected rows.            |
-| [`$db->script($sql)`](../reference/Tenma/Db/Postgres.md#script)              | Runs several statements without parameters as one.                                    |
-| [`$db->transaction($work)`](../reference/Tenma/Db/Postgres.md#transaction)   | Runs `$work($tx)` in a transaction and returns its result.                            |
-| [`Redis::connect($url)`](../reference/Tenma/Db/Redis.md#connect)             | Returns a client for `redis://host:6379/0` (the default is `redis://127.0.0.1:6379`). |
-| [`$redis->get($key)`](../reference/Tenma/Db/Redis.md#get)                    | Returns the value, or `null`.                                                         |
-| [`$redis->set($key, $value, $seconds)`](../reference/Tenma/Db/Redis.md#set)  | Sets the value, with an expiry in seconds if given.                                   |
-| [`$redis->command($name, ...$args)`](../reference/Tenma/Db/Redis.md#command) | Runs any other Redis command and returns its reply.                                   |
-| [`Tenma::publish($channel, $message)`](../reference/Tenma.md#publish)        | Sends a string to every subscription of the channel.                                  |
-| [`Tenma::subscribe($channel, $callback)`](../reference/Tenma.md#subscribe)   | Calls the callback with every message and returns a `Subscription`.                   |
-| [`$subscription->cancel()`](../reference/Tenma/Subscription.md)              | Stops the subscription.                                                               |
+| Method                                                                          | Does                                                                                  |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| [`Postgres::connect($url)`](../reference/Data/Postgres.md#connect)              | Returns a client for `postgres://user:password@host:5432/database`.                   |
+| [`$db->query($sql, $params)`](../reference/Data/Postgres.md#query)              | Returns all rows as a list of associative arrays.                                     |
+| [`$db->first($sql, $params)`](../reference/Data/Postgres.md#first)              | Returns the first row, or `null`.                                                     |
+| [`$db->execute($sql, $params)`](../reference/Data/Postgres.md#execute)          | Runs a statement without a result and returns the number of affected rows.            |
+| [`$db->script($sql)`](../reference/Data/Postgres.md#script)                     | Runs several statements without parameters as one.                                    |
+| [`$db->transaction($work)`](../reference/Data/Postgres.md#transaction)          | Runs `$work($tx)` in a transaction and returns its result.                            |
+| [`Redis::connect($url)`](../reference/Data/Redis.md#connect)                    | Returns a client for `redis://host:6379/0` (the default is `redis://127.0.0.1:6379`). |
+| [`$redis->get($key)`](../reference/Data/Redis.md#get)                           | Returns the value, or `null`.                                                         |
+| [`$redis->set($key, $value, $seconds)`](../reference/Data/Redis.md#set)         | Sets the value, with an expiry in seconds if given.                                   |
+| [`$redis->command($name, ...$args)`](../reference/Data/Redis.md#command)        | Runs any other Redis command and returns its reply.                                   |
+| [`new Channel($name)`](../reference/Messaging/Channel.md)                       | Names a channel for messages between workers.                                         |
+| [`$channel->publish($message)`](../reference/Messaging/Channel.md#publish)      | Sends a string to every subscription of the channel.                                  |
+| [`$channel->subscribe($callback)`](../reference/Messaging/Channel.md#subscribe) | Calls the callback with every message and returns a `Subscription`.                   |
+| [`$subscription->cancel()`](../reference/Messaging/Subscription.md#cancel)      | Stops the subscription.                                                               |
 
 ## Postgres
 
 ```php
 <?php
 
-use Tenma\Db\Postgres;
-use Tenma\Http\{Request, Response};
+use Data\Postgres;
+use Http\{Request, Response};
+use Threading\Task;
 
 $db = Postgres::connect(getenv('DATABASE_URL') ?: 'postgres://localhost/example');
 
 // Queries wait, so startup work runs in a task
-Tenma::async(fn () => $db->script(<<<'SQL'
+Task::run(fn () => $db->script(<<<'SQL'
     CREATE TABLE IF NOT EXISTS users (
         id serial PRIMARY KEY,
         name text NOT NULL,
@@ -41,7 +43,7 @@ Tenma::async(fn () => $db->script(<<<'SQL'
     );
     SQL));
 
-Tenma::serve(8080, function (Request $request) use ($db) {
+new Http\Server(8080, function (Request $request) use ($db) {
     if ($request->method === 'POST') {
         $user = $db->first(
             'INSERT INTO users (name) VALUES ($1) RETURNING *',
@@ -56,7 +58,7 @@ Tenma::serve(8080, function (Request $request) use ($db) {
     }
 
     return Response::json($db->query('SELECT id, name FROM users ORDER BY id'));
-});
+})->start();
 ```
 
 `curl -d name=Ada localhost:8080/users` adds a user. `curl localhost:8080/users/1` reads it back, with `settings` as an array: `jsonb` arrives decoded.
@@ -83,11 +85,12 @@ Results come back with JSON types:
 ```php
 <?php
 
-use Tenma\Db\Postgres;
+use Data\Postgres;
+use Threading\Task;
 
 $db = Postgres::connect(getenv('DATABASE_URL') ?: 'postgres://localhost/example');
 
-Tenma::async(function () use ($db) {
+Task::run(function () use ($db) {
     $db->script(<<<'SQL'
         CREATE TABLE IF NOT EXISTS accounts (
             id int PRIMARY KEY,
@@ -138,18 +141,19 @@ After every query, Tenma cleans the connection before it goes back to the pool. 
 
 ## Migrations
 
-`script()` runs a migration file as one batch. The script below applies the files of `migrations/` in name order, each one once. All pending files run in one transaction, so a failing file leaves the database as it was. The advisory lock makes a second start wait for the first.
+`script()` runs a migration file as one batch. The script below applies the `.sql` files of `migrations/` in name order, each one once. All pending files run in one transaction, so a failing file leaves the database as it was. The advisory lock makes a second start wait for the first.
 
 ```php
 <?php
 
-use Tenma\Db\Postgres;
-use Tenma\Fs;
+use Data\Postgres;
+use FileSystem\DirectoryInfo;
+use Threading\Task;
 
 $db = Postgres::connect(getenv('DATABASE_URL') ?: 'postgres://localhost/example');
-$dir = __DIR__ . '/migrations';
+$dir = new DirectoryInfo(__DIR__ . '/migrations');
 
-Tenma::async(function () use ($db, $dir) {
+Task::run(function () use ($db, $dir) {
     $ran = $db->transaction(function (Postgres $tx) use ($dir) {
         // A second start waits here until the first one commits
         $tx->execute('SELECT pg_advisory_xact_lock(1)');
@@ -158,11 +162,12 @@ Tenma::async(function () use ($db, $dir) {
         $applied = array_column($tx->query('SELECT name FROM schema_migrations'), 'name');
 
         $ran = [];
-        foreach (Fs::readDir($dir) as $name) {
+        foreach ($dir->files('*.sql') as $file) {
+            $name = $file->name();
             if (in_array($name, $applied, true)) {
                 continue;
             }
-            $tx->script(Fs::readFile("$dir/$name"));
+            $tx->script($file->read());
             $tx->execute('INSERT INTO schema_migrations (name) VALUES ($1)', [$name]);
             $ran[] = $name;
         }
@@ -183,12 +188,12 @@ A migration file must not contain `COMMIT` or `ROLLBACK`. Statements that refuse
 ```php
 <?php
 
-use Tenma\Db\Redis;
-use Tenma\Http\{Request, Response};
+use Data\Redis;
+use Http\{Request, Response};
 
 $redis = Redis::connect(getenv('REDIS_URL') ?: 'redis://127.0.0.1:6379');
 
-Tenma::serve(8080, function (Request $request) use ($redis) {
+new Http\Server(8080, function (Request $request) use ($redis) {
     $views = $redis->command('INCR', 'views:' . $request->path);
     $redis->set('last-path', $request->path, seconds: 60);
 
@@ -197,7 +202,7 @@ Tenma::serve(8080, function (Request $request) use ($redis) {
         'last' => $redis->get('last-path'),
         'ttl' => $redis->command('TTL', 'last-path'),
     ]);
-});
+})->start();
 ```
 
 Replies come back as strings, ints, arrays or `null`. The database number goes in the URL (`redis://host:6379/2`).
@@ -209,11 +214,12 @@ Each worker has one Redis connection per URL, shared by all its fibers. `MULTI` 
 ```php
 <?php
 
-use Tenma\Db\Redis;
+use Data\Redis;
+use Threading\Task;
 
 $redis = Redis::connect('redis://127.0.0.1:6379');
 
-Tenma::async(function () use ($redis) {
+Task::run(function () use ($redis) {
     $redis->set('stock', '1');
 
     // Take one if any are left, in one atomic step
@@ -231,31 +237,33 @@ Tenma::async(function () use ($redis) {
 
 ## Messages between workers
 
-`Tenma::publish($channel, $message)` hands a string to every subscription of the channel. That includes every worker of the process, the publishing one too. `Tenma::subscribe($channel, $callback)` calls the callback with each message, in its own fiber.
+A [`Messaging\Channel`](../reference/Messaging/Channel.md) has a name: `new Channel('settings')`. `publish($message)` hands a string to every subscription of the channel. That includes every worker of the process, the publishing one too. `subscribe($callback)` calls the callback with each message, in its own fiber.
 
 Workers share no PHP objects, so a message is a string. Send what changed (an ID, some JSON) and let each worker update its own state. A typical use keeps in-memory caches in sync:
 
 ```php
 <?php
 
-use Tenma\Http\{Request, Response};
+use Http\{Request, Response};
+use Messaging\Channel;
 
 $settings = ['theme' => 'light'];
+$channel = new Channel('settings');
 
 // Made at startup: lasts as long as the worker
-Tenma::subscribe('settings', function (string $message) use (&$settings) {
+$channel->subscribe(function (string $message) use (&$settings) {
     $settings = json_decode($message, true);
 });
 
-Tenma::serve(8080, function (Request $request) use (&$settings) {
+new Http\Server(8080, function (Request $request) use ($channel, &$settings) {
     if ($request->method === 'POST') {
         // Every worker updates its own copy
-        Tenma::publish('settings', json_encode([...$settings, ...$request->form()]));
+        $channel->publish(json_encode([...$settings, ...$request->form()]));
         return new Response("published\n", 202);
     }
 
     return Response::json($settings);
-});
+})->start();
 ```
 
 Run it with `tenma --workers 4 app.php` and send `curl -d theme=dark localhost:8080`. Every worker then answers with the new theme.
@@ -265,9 +273,12 @@ A subscription ends with `cancel()`:
 ```php
 <?php
 
+use Messaging\Channel;
+
+$jobs = new Channel('jobs');
 $received = 0;
 
-$subscription = Tenma::subscribe('jobs', function (string $message) use (&$received, &$subscription) {
+$subscription = $jobs->subscribe(function (string $message) use (&$received, &$subscription) {
     echo "got $message\n";
 
     if (++$received === 2) {
@@ -275,8 +286,8 @@ $subscription = Tenma::subscribe('jobs', function (string $message) use (&$recei
     }
 });
 
-Tenma::publish('jobs', 'first');
-Tenma::publish('jobs', 'second');
+$jobs->publish('first');
+$jobs->publish('second');
 ```
 
 ### Across processes
@@ -291,13 +302,13 @@ Messages then go through Redis `PUBLISH` and `SUBSCRIBE`, on channels of the sam
 
 ## PDO, mysqli and sqlite3
 
-PDO (MySQL, Postgres, SQLite), mysqli and sqlite3 are built in and work as usual. They block: while a PDO query runs, no other request of that worker runs. They fit scripts, [classic mode](classic-mode.md) and SQLite with short queries. For request handlers under load, use `Tenma\Db\Postgres`. An asynchronous MySQL client is not available yet.
+PDO (MySQL, Postgres, SQLite), mysqli and sqlite3 are built in and work as usual. They block: while a PDO query runs, no other request of that worker runs. They fit scripts, [classic mode](classic-mode.md) and SQLite with short queries. For request handlers under load, use `Data\Postgres`. An asynchronous MySQL client is not available yet.
 
 ## Behaviour
 
 Postgres:
 
-- Every method needs a fiber: a handler, a task or a timer. At script startup, wrap queries in `Tenma::async()`.
+- Every method needs a fiber: a handler, a task or a timer. At script startup, wrap queries in `Task::run()`.
 - `connect()` does not wait. The first query opens the connection, which must be established within 10 seconds.
 - Database errors throw a `RuntimeException` with the server's message.
 - A query that finds every connection of the pool busy waits up to 10 seconds, then throws.
@@ -309,7 +320,7 @@ Postgres:
 Redis:
 
 - `command()` throws a `LogicException` for commands that would change the shared connection for every fiber or hold it: `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `SELECT`, `SWAPDB`, `AUTH`, `HELLO`, `SUBSCRIBE` and its variants, `MONITOR`, `WAIT`, `CLIENT REPLY`, and blocking commands such as `BLPOP`, `BRPOP` or `XREAD … BLOCK`.
-- Put the database in the URL instead of `SELECT`. Use `Tenma::subscribe()` with `--pubsub` instead of `SUBSCRIBE`.
+- Put the database in the URL instead of `SELECT`. Use `Channel::subscribe()` with `--pubsub` instead of `SUBSCRIBE`.
 - Connecting times out after 10 seconds, a reply after 30 seconds.
 - After a connection error, the next command connects again.
 

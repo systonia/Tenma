@@ -6,7 +6,7 @@ final class Item {
 }
 class NotFound extends RuntimeException {}
 
-Tenma::serve((int) getenv('PORT'), function ($request) {
+(new \Http\Server((int) getenv('PORT'), function ($request) {
     if ($request->path === '/loop') {
         $total = 0;
         for ($i = 1; $i <= 10; $i++) {
@@ -24,6 +24,6 @@ Tenma::serve((int) getenv('PORT'), function ($request) {
     $list = ['x' => ['y' => 1]];
     $shared = $list;
     $item = new Item();
-    Tenma::debugger();
+    \Development\Debugger::break();
     return json_encode([$list, $shared, $item->count, $item->tags()]);
-});
+}))->start();

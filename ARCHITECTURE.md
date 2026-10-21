@@ -8,8 +8,8 @@ commands, the [documentation](docs/index.md) the features.
 - **Rust** (`src/`) runs the process: threads, event loops, HTTP, and every operation that waits.
 - **C** (`shim/tenma.c`) embeds PHP. It calls the PHP handlers, converts values between PHP and C, and
   catches fatal errors. Rust never sees a PHP value directly.
-- **PHP** (`stdlib/`) is the API the scripts use: `Tenma`, `Request`, `Response`, `Tenma\Db`,
-  `Tenma\Fs`. It is embedded in the binary.
+- **PHP** (`stdlib/`) is the API the scripts use: `Http\Server`, `Request`, `Response`, `Threading\Task`,
+  `Data\Postgres`, `FileSystem\FileInfo`. It is embedded in the binary.
 
 ## Files
 
@@ -22,8 +22,8 @@ Rust:
 | `src/stdlib.rs`  | loads the embedded PHP files of `stdlib/`                                                                                   |
 | `src/ops.rs`     | ops PHP waits for: `sleep`, `fetch`                                                                                         |
 | `src/db.rs`      | Postgres (a pool per worker) and Redis (one connection per URL)                                                             |
-| `src/fs.rs`      | file operations for `Tenma\Fs`, on background threads                                                                       |
-| `src/pubsub.rs`  | `Tenma::publish()` and `subscribe()`, through Redis with `--pubsub`                                                         |
+| `src/fs.rs`      | file operations for `FileSystem\FileInfo` and `DirectoryInfo`, on background threads                                        |
+| `src/pubsub.rs`  | `Messaging\Channel::publish()` and `subscribe()`, through Redis with `--pubsub`                                             |
 | `src/files.rs`   | static files: prefixes, ETag and 304, ranges                                                                                |
 | `src/tls.rs`     | `--tls-cert`, `--tls-key` and `--tls-port`: the TLS handshake and ALPN (HTTP/2 or HTTP/1.1), SIGHUP reloads the certificate |
 | `src/streams.rs` | streamed responses and WebSockets                                                                                           |
@@ -34,14 +34,15 @@ Rust:
 PHP, in `stdlib/`: one file per class, folders by namespace, the functions of a namespace in its
 `functions.php`. `build.rs` embeds every file; `src/stdlib.rs` loads them.
 
-| Path                          | Does                                                    |
-| ----------------------------- | ------------------------------------------------------- |
-| `stdlib/Tenma.php`            | the class `Tenma`: `Tenma::serve()` and the other calls |
-| `stdlib/Tenma/`               | the public API: `Task`, `Fs`, `Http\`, `Db\`, `Lsp\`    |
-| `stdlib/Tenma/Internal/`      | the scheduler, the dev hooks, diagnostics               |
-| `stdlib/Tenma/Internal/Lsp`   | `tenma lsp`, loaded only for that command               |
-| `stdlib/Tenma/Internal/Docs`  | `tenma docs`, loaded only for that command              |
-| `stdlib/Tenma/Internal/Stubs` | `tenma --stubs`, loaded only for that command           |
+| Path                          | Does                                              |
+| ----------------------------- | ------------------------------------------------- |
+| `stdlib/Http/` and so on      | the public API, one folder per namespace: `Http`, |
+|                               | `Threading`, `FileSystem`, `Messaging`, `Data`,   |
+|                               | `Development`, `Lsp`                              |
+| `stdlib/Tenma/Internal/`      | the scheduler, the dev hooks, diagnostics         |
+| `stdlib/Tenma/Internal/Lsp`   | `tenma lsp`, loaded only for that command         |
+| `stdlib/Tenma/Internal/Docs`  | `tenma docs`, loaded only for that command        |
+| `stdlib/Tenma/Internal/Stubs` | `tenma --stubs`, loaded only for that command     |
 
 Everything else:
 
@@ -61,15 +62,15 @@ and Homebrew, on Linux from the distribution's `-dev` packages. They are linked 
 1. The main thread starts PHP.
 2. The first worker thread gets its own interpreter, loads the standard library and runs the script.
 3. If the script registered no server, it was an ordinary script and tenma ends.
-4. Otherwise the other workers start and run the script too. `Tenma::serve()` only registers the
-   handler.
+4. Otherwise the other workers start and run the script too. `Http\Server::start()` only registers
+   the handler.
 5. The main thread opens the ports, accepts connections and hands them to the workers in turn. A
    connection stays with its worker.
 
 ## A request
 
 1. The worker calls the PHP handler on its event loop thread. The handler runs in a fiber.
-2. When the handler waits, for example with `Tenma::sleep()`, PHP starts an op. Rust starts a task for it
+2. When the handler waits, for example with `Threading\Task::delay()`, PHP starts an op. Rust starts a task for it
    and returns an op ID, and the fiber suspends.
 3. The event loop serves other requests meanwhile.
 4. When the task is done, Rust calls `Tenma\Internal\complete()`, which resumes the fiber with the
@@ -104,26 +105,26 @@ Debian 13. On another distribution, use the image.
 
 Measured on an M-series Mac with `ab`.
 
-| What                                                  | Result                          |
-| ----------------------------------------------------- | ------------------------------- |
-| a simple handler, `ab -k`                             | about 100,000 requests/s        |
-| Waypoint demo `GET /waypoints/1`, `ab -k`, 1 worker   | 55,000 requests/s               |
-| the same with 4 workers                               | 165,000 requests/s              |
-| the same with 10 workers                              | 192,000 requests/s              |
-| the same, 4 × `ab` in parallel                        | 207,000 requests/s at 570 % CPU |
-| without keep-alive, any number of workers             | about 45,000 requests/s         |
-| one Postgres query per request, 200 at once, 10 conns | about 25,000 requests/s         |
-| four Redis commands per request                       | about 42,000 requests/s         |
-| `Tenma::sleep(0.5)` per request, 500 connections      | about 900 requests/s            |
-| `fetch` to the same server per request                | about 37,000 requests/s         |
-| 500 streams of 0.6 s each, 1 worker                   | about 780 streams/s, 58 MB      |
-| WebSocket echo, 1 connection                          | 46,000 round trips/s            |
-| WebSocket echo, 4 connections                         | about 118,000 round trips/s     |
-| 5 million requests against the Waypoint demo          | the process stays at 22.8 MB    |
-| 2.1 million requests with fibers and `fetch`          | 26.8 MB                         |
+| What                                                      | Result                          |
+| --------------------------------------------------------- | ------------------------------- |
+| a simple handler, `ab -k`                                 | about 100,000 requests/s        |
+| Waypoint demo `GET /waypoints/1`, `ab -k`, 1 worker       | 55,000 requests/s               |
+| the same with 4 workers                                   | 165,000 requests/s              |
+| the same with 10 workers                                  | 192,000 requests/s              |
+| the same, 4 × `ab` in parallel                            | 207,000 requests/s at 570 % CPU |
+| without keep-alive, any number of workers                 | about 45,000 requests/s         |
+| one Postgres query per request, 200 at once, 10 conns     | about 25,000 requests/s         |
+| four Redis commands per request                           | about 42,000 requests/s         |
+| `Threading\Task::delay(0.5)` per request, 500 connections | about 900 requests/s            |
+| `fetch` to the same server per request                    | about 37,000 requests/s         |
+| 500 streams of 0.6 s each, 1 worker                       | about 780 streams/s, 58 MB      |
+| WebSocket echo, 1 connection                              | 46,000 round trips/s            |
+| WebSocket echo, 4 connections                             | about 118,000 round trips/s     |
+| 5 million requests against the Waypoint demo              | the process stays at 22.8 MB    |
+| 2.1 million requests with fibers and `fetch`              | 26.8 MB                         |
 
 - Without keep-alive, setting up connections and the single accepting thread are the limit.
-- With `Tenma::sleep(0.5)`, 900 requests per second means all 500 are awake at the same time.
+- With `Threading\Task::delay(0.5)`, 900 requests per second means all 500 are awake at the same time.
 - Opcache is on. It adds about 6 % throughput, because each worker compiles the code only once anyway.
 - PHP builds no JIT with ZTS on Apple Silicon. On Linux it is built in: `-d opcache.jit=tracing`.
 
@@ -132,8 +133,8 @@ Measured on an M-series Mac with `ab`.
 - Asynchronous MySQL, and TLS for Postgres connections.
 - Ops for sockets and DNS. Blocking PHP functions such as PDO or `file_get_contents` hold up their
   worker.
-- Waiting at the top level of a script. `Tenma::sleep()` during startup throws; wrap it in
-  `Tenma::async()`.
+- Waiting at the top level of a script. `Task::delay()` during startup throws; wrap it in
+  `Task::run()`.
 - Streaming large request bodies. Up to `--max-body` they are held in memory.
 - A timeout for handlers that compute instead of wait. An endless loop holds up its worker.
 - Several accepting threads (`SO_REUSEPORT`) for many short connections without keep-alive.

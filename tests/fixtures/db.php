@@ -1,14 +1,14 @@
 <?php
 // For tests/http.rs: Postgres and Redis asynchronously. Needs a running Postgres (DATABASE_URL) and Redis (REDIS_URL).
-use Tenma\Db\{Postgres, Redis};
-use Tenma\Http\{Request, Response};
+use Data\{Postgres, Redis};
+use Http\{Request, Response};
 
 
 $db = Postgres::connect(getenv('DATABASE_URL'));
 $redis = Redis::connect(getenv('REDIS_URL'));
 $table = 'tenma_test_' . getmypid();
 
-Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis, $table): Response {
+(new \Http\Server((int) getenv('PORT'), function (Request $request) use ($db, $redis, $table): Response {
     return Response::json(match ($request->path) {
         '/setup' => $db->execute("CREATE TABLE $table (id serial PRIMARY KEY, name text NOT NULL, amount int, price numeric, created timestamptz DEFAULT now(), data jsonb)"),
         // Numbers as strings and a date as a string: Postgres infers the type, like with PDO
@@ -93,10 +93,10 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
         // all() in a transaction: the error cancels the running query, the rollback succeeds
         '/all-tx' => (function () use ($db) {
             try {
-                $db->transaction(fn (Postgres $tx) => Tenma::all(
+                $db->transaction(fn (Postgres $tx) => \Threading\Task::all(
                     fn () => $tx->execute('SELECT pg_sleep(2)'),
                     function () {
-                        Tenma::sleep(0.05);
+                        \Threading\Task::delay(0.05);
                         throw new DomainException('on purpose');
                     },
                 ));
@@ -119,15 +119,15 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
         })(),
         // Cancellation in the middle of a transaction: the rollback in the catch must still be allowed to run
         '/cancel-tx' => (function () use ($db) {
-            $task = Tenma::async(fn () => $db->transaction(function (Postgres $tx) {
+            $task = \Threading\Task::run(fn () => $db->transaction(function (Postgres $tx) {
                 $tx->execute('SELECT 1');
-                Tenma::sleep(5);
+                \Threading\Task::delay(5);
             }));
-            Tenma::sleep(0.05);
+            \Threading\Task::delay(0.05);
             $task->cancel();
             try {
                 $task->await();
-            } catch (Tenma\Cancelled) {
+            } catch (Threading\Cancelled) {
                 return 'cancelled';
             }
         })(),
@@ -158,4 +158,4 @@ Tenma::serve((int) getenv('PORT'), function (Request $request) use ($db, $redis,
         '/types-drop' => $db->script("DROP TYPE {$table}_mood, {$table}_size"),
         default => 'ok',
     });
-});
+}))->start();

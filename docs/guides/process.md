@@ -14,7 +14,7 @@ A Tenma app is one process. Its main thread accepts connections, and its worker 
 4. Otherwise the other workers start and run the script too.
 5. The main thread opens the ports and accepts connections.
 
-`Tenma::serve()` only registers the handler. The port opens after the script has finished. A server listens on every interface (`0.0.0.0`).
+`Http\Server::start()` only registers the handler. The port opens after the script has finished. A server listens on every interface (`0.0.0.0`).
 
 ## Workers
 
@@ -39,11 +39,11 @@ Workers share no PHP values. A counter, a cache or a connection pool exists once
 $hits = 0;
 $worker = bin2hex(random_bytes(2));
 
-Tenma::serve(8080, function () use (&$hits, $worker) {
+new Http\Server(8080, function () use (&$hits, $worker) {
     $hits++;
 
     return "worker $worker, request $hits\n";
-});
+})->start();
 ```
 
 With `tenma --workers 2 app.php`, four calls of `curl localhost:8080` print `request 1` twice and `request 2` twice, from two different workers. [State in memory](state.md) explains what to keep in memory and what to share.
@@ -69,12 +69,14 @@ PHP's own signal handlers are disabled, and `pcntl` is not built in. Signals bel
 
 ## Scripts without a server
 
-A script that never calls `Tenma::serve()` or `Tenma::serveClassic()` is an ordinary script:
+A script that never starts an `Http\Server` or `Http\ClassicServer` is an ordinary script:
 
 ```php
 <?php
 
-Tenma::setTimeout(fn () => print("done\n"), 0.5);
+use Threading\Timer;
+
+Timer::after(0.5, fn () => print("done\n"));
 
 echo "waiting\n";
 ```

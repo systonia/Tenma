@@ -1,6 +1,6 @@
 <?php
 // For tests/http.rs: php://input, uploads and exit() in classic mode
-Tenma::serveClassic((int) getenv('PORT'), function () {
+(new \Http\ClassicServer((int) getenv('PORT'), function () {
     switch (parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH)) {
         case '/input':
             echo 'input: ' . file_get_contents('php://input');
@@ -37,12 +37,12 @@ Tenma::serveClassic((int) getenv('PORT'), function () {
         case '/async':
             // Rejected in classic mode before the op starts
             try {
-                Tenma::sleep(0.01);
+                \Threading\Task::delay(0.01);
             } catch (LogicException) {
                 echo 'rejected';
             }
             try {
-                Tenma::async(fn () => null);
+                \Threading\Task::run(fn () => null);
             } catch (LogicException) {
                 echo ' async too';
             }
@@ -54,4 +54,4 @@ Tenma::serveClassic((int) getenv('PORT'), function () {
         default:
             echo 'ok';
     }
-});
+}))->start();

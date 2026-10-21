@@ -1,0 +1,37 @@
+<?php
+
+namespace Messaging;
+
+/**
+ * A named channel for messages between the workers of a process, like PUBLISH and SUBSCRIBE in
+ * Redis. Messages are strings: workers share no PHP objects. With `tenma --pubsub redis://host`,
+ * messages go through Redis and reach every process.
+ */
+final class Channel
+{
+    public function __construct(public readonly string $name) {}
+
+    /**
+     * Sends $message to every subscription of the channel, in every worker of this process, this one
+     * included. A worker that has not subscribed yet (still starting, restarting) misses the message.
+     */
+    public function publish(string $message): void
+    {
+        \tenma_pubsub('publish', 0, $this->name, $message);
+    }
+
+    /**
+     * Calls $callback with every message published to the channel, in its own Fiber, until cancel().
+     * Works at script startup and in asynchronous code; made in a request, it ends with the request,
+     * for WebSockets and streams with the connection. Keeps a script without a server alive.
+     *
+     * @param callable(string): mixed $callback
+     */
+    public function subscribe(callable $callback): Subscription
+    {
+        \Tenma\Internal\Loop::$running && \Tenma\Internal\requireFiber();
+        $subscription = new Subscription($this->name, $callback(...));
+        \Tenma\Internal\whenRunning($subscription->arm(...));
+        return $subscription;
+    }
+}

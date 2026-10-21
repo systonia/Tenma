@@ -2,7 +2,7 @@
 
 // `tenma lsp`: a language server for what the editor's own PHP server cannot know, such as the class
 // `$this` is bound to in a template. It runs next to that server (Intelephense, PHP Tools); the editor
-// merges the answers. Packages add their part through a Tenma\Lsp\Provider.
+// merges the answers. Packages add their part through a Lsp\Provider.
 //
 // The server speaks LSP on stdin and stdout and keeps the open documents. Each project (the nearest
 // directory with a composer.json above a file, so a workspace may hold several) gets a worker
@@ -12,12 +12,12 @@
 
 namespace Tenma\Internal\Lsp;
 
-use Tenma\Lsp\Provider;
+use Lsp\Provider;
 
 /** How long the worker may take for one answer before it is ended. */
 const ANSWER_SECONDS = 5;
 
-/** The semantic token types tenma sends, in this order; Tenma\Lsp\Tokens names them. */
+/** The semantic token types tenma sends, in this order; Lsp\Tokens names them. */
 const TOKEN_TYPES = ['keyword', 'comment', 'variable', 'property', 'method', 'function', 'class', 'string', 'number', 'operator'];
 
 function main(string $binary, array $args): void
@@ -41,7 +41,7 @@ function main(string $binary, array $args): void
     $ticked = 0.0;
     try {
         while (true) {
-            // Once a second, also while the editor keeps sending: what the running app published (Tenma::diagnostics)
+            // Once a second, also while the editor keeps sending: what the running app published (Problems::report)
             if (microtime(true) - $ticked >= 1) {
                 $server->tick();
                 $ticked = microtime(true);
@@ -220,7 +220,7 @@ function providers(string $root): array
                 if ($provider instanceof Provider) {
                     $providers[] = $provider;
                 } else {
-                    log(var_export($class, true) . ' is no Tenma\Lsp\Provider');
+                    log(var_export($class, true) . ' is no Lsp\Provider');
                 }
             } catch (\Throwable $e) {
                 log("$class: " . $e->getMessage());

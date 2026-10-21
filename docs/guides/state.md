@@ -15,7 +15,7 @@ Everything the script creates at startup lives until the worker ends or restarts
 - loaded classes, a router, a container, configuration,
 - database clients and their connection pools, caches.
 
-Build them once at startup, before `Tenma::serve()`:
+Build them once at startup, before `Http\Server`:
 
 ```php
 <?php
@@ -23,9 +23,9 @@ Build them once at startup, before `Tenma::serve()`:
 $config = ['greeting' => 'Hello'];   // built once per worker
 $started = date('H:i:s');
 
-Tenma::serve(8080, function () use ($config, $started) {
+new Http\Server(8080, function () use ($config, $started) {
     return "{$config['greeting']}, this worker started at $started\n";
-});
+})->start();
 ```
 
 A request changes such values for every later request. `use (&$counter)` with a reference, a static or a global all keep their value from one request to the next.
@@ -37,37 +37,39 @@ Do not keep per-request values in globals, statics or singletons. One worker run
 ```php
 <?php
 
+use Threading\Task;
+
 $current = null;   // wrong: shared by every request of the worker
 
-Tenma::serve(8080, function () use (&$current) {
+new Http\Server(8080, function () use (&$current) {
     $current = bin2hex(random_bytes(2));
     $mine = $current;
 
-    Tenma::sleep(1);   // other requests run here and set $current
+    Task::delay(1);   // other requests run here and set $current
 
     return $mine === $current ? "still mine\n" : "overwritten\n";
-});
+})->start();
 ```
 
 Two parallel calls of `curl localhost:8080` print `overwritten` for the first one.
 
-Pass per-request values along as arguments instead. For values that deep code needs, such as a request ID in log lines, use [`Tenma\AsyncLocal`](../reference/Tenma/AsyncLocal.md):
+Pass per-request values along as arguments instead. For values that deep code needs, such as a request ID in log lines, use [`Threading\AsyncLocal`](../reference/Threading/AsyncLocal.md):
 
 ```php
 <?php
 
-use Tenma\AsyncLocal;
+use Threading\{AsyncLocal, Task};
 
 $requestId = new AsyncLocal();
 
-Tenma::serve(8080, function () use ($requestId) {
+new Http\Server(8080, function () use ($requestId) {
     $requestId->set(bin2hex(random_bytes(2)));
     $mine = $requestId->get();
 
-    Tenma::sleep(1);   // other requests set their own value
+    Task::delay(1);   // other requests set their own value
 
     return $mine === $requestId->get() ? "still mine\n" : "overwritten\n";
-});
+})->start();
 ```
 
 Every request prints `still mine`. Each request and each task has its own copy of the values. [Fibers and asynchronous work](async.md) documents the API.
@@ -90,6 +92,6 @@ State that all workers and all processes must see belongs outside the process:
 - in Postgres or Redis ([Databases and messages](database.md)),
 - in files ([Files](files.md)).
 
-To tell the other workers that something changed, use `Tenma::publish()` and `Tenma::subscribe()`. A message reaches every worker of the process, and with `--pubsub redis://HOST` every process. Messages are strings: send what changed (an ID, JSON), and let each worker update its own copy. [Databases and messages](database.md) documents the API.
+To tell the other workers that something changed, use a [`Messaging\Channel`](../reference/Messaging/Channel.md): `publish()` sends a message, `subscribe()` receives it. A message reaches every worker of the process, and with `--pubsub redis://HOST` every process. Messages are strings: send what changed (an ID, JSON), and let each worker update its own copy. [Databases and messages](database.md) documents the API.
 
 See also: [Process and workers](process.md), [Lifetime of a request](request-lifetime.md).

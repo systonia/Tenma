@@ -4,7 +4,7 @@ register_shutdown_function(function () {
     echo "REGISTERED-AT-STARTUP\n";
 });
 $count = 0;
-Tenma::serveClassic((int) getenv('PORT'), function () use (&$count) {
+(new \Http\ClassicServer((int) getenv('PORT'), function () use (&$count) {
     $count++;
     $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
     if ($path === '/count') {
@@ -38,4 +38,4 @@ Tenma::serveClassic((int) getenv('PORT'), function () use (&$count) {
         '/big-fatal' => str_repeat('x', 512 * 1024 * 1024),
         default => null,
     };
-});
+}))->start();

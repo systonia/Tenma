@@ -66,12 +66,12 @@ function main(string $binary, array $args): void
     echo count($classes), ' types, ', $functions !== [] ? count($functions) . ' functions, ' : '', count($pages), " pages in $out ($written written, $removed removed)\n";
 }
 
-/** The class Tenma and everything under Tenma\ except Tenma\Internal: what `tenma --stubs` covers. */
+/** The classes of the public namespaces: what `tenma --stubs` covers. */
 function builtIn(): array
 {
     return array_filter(
         [...get_declared_classes(), ...get_declared_interfaces(), ...get_declared_traits()],
-        fn ($name) => $name === 'Tenma' || (str_starts_with($name, 'Tenma\\') && !str_starts_with($name, 'Tenma\\Internal\\')),
+        \Tenma\Internal\isPublic(...),
     );
 }
 

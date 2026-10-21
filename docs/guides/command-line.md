@@ -4,7 +4,7 @@ description: Every tenma subcommand and option with its default, the script's $a
 order: 300
 ---
 
-`tenma` runs a PHP script. The script may start servers with `Tenma::serve()` or simply run and exit. Subcommands build assets, run the language server, write reference pages and print stubs.
+`tenma` runs a PHP script. The script may start servers with `Http\Server` or simply run and exit. Subcommands build assets, run the language server, write reference pages and print stubs.
 
 ```text
 tenma [options] <script.php> [arguments …]
@@ -17,7 +17,7 @@ tenma --version
 
 | Command                            | Does                                                                                                                     |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `tenma script.php`                 | runs the script; it serves if it calls `Tenma::serve()`                                                                  |
+| `tenma script.php`                 | runs the script; it serves if it starts an `Http\Server`                                                                 |
 | `tenma build [tenma.dev.php]`      | runs the [build hooks](watch.md#tenma-build) once, `./tenma.dev.php` by default                                          |
 | `tenma lsp`                        | the [language server](language-server.md), on stdin and stdout                                                           |
 | `tenma docs [paths] [--out <dir>]` | writes [reference pages](reference-docs.md), into `docs/reference` by default                                            |
@@ -38,7 +38,7 @@ Options come before the script. Each takes its value as the next argument.
 | `--max-connections N`          | `1024`             | open connections per worker; more get a 503 at once                                              |
 | `--request-timeout SECONDS`    | `30`               | time for headers and body to arrive (408 or disconnect), and for a stalled write to a client     |
 | `--db-pool N`                  | 20 / workers, 2–10 | Postgres connections per worker and URL                                                          |
-| `--pubsub redis://HOST`        | none               | `Tenma::publish()` goes through Redis and reaches every process                                  |
+| `--pubsub redis://HOST`        | none               | messages of `Messaging\Channel` go through Redis and reach every process                         |
 | `--tls-cert FILE`              | none               | serves HTTPS with this certificate chain (PEM); needs `--tls-key` ([HTTPS](deployment.md#https)) |
 | `--tls-key FILE`               | none               | the private key of the certificate (PEM)                                                         |
 | `--tls-port N`                 | every port         | HTTPS only on this port, plain HTTP on the others; any number of times                           |
@@ -81,14 +81,14 @@ One script can serve and run tasks this way: `tenma index.php db:migrate` runs a
 
 ## The port
 
-A server listens on every interface (`0.0.0.0`) on the port given to `Tenma::serve()`. No option sets it. Read it from the environment so the same script runs everywhere:
+A server listens on every interface (`0.0.0.0`) on the port given to `Http\Server`. No option sets it. Read it from the environment so the same script runs everywhere:
 
 ```php
 <?php
 
 $port = (int) (getenv('PORT') ?: 8080);
 
-Tenma::serve($port, fn () => "ok\n");
+new Http\Server($port, fn () => "ok\n")->start();
 ```
 
 ## Exit codes
@@ -105,7 +105,7 @@ Tenma::serve($port, fn () => "ok\n");
 
 ## Stubs for IDEs and PHPStan
 
-Tenma's classes exist only inside the binary, so an IDE or PHPStan does not know them. `tenma --stubs` prints them as a PHP file with every class, method and docblock. With a directory, it writes one file per class instead, in folders by namespace (`Tenma.php`, `Tenma/Http/Request.php`):
+Tenma's classes exist only inside the binary, so an IDE or PHPStan does not know them. `tenma --stubs` prints them as a PHP file with every class, method and docblock. With a directory, it writes one file per class instead, in folders by namespace (`Http/Request.php`, `Threading/Task.php`):
 
 ```bash
 tenma --stubs > tenma.php
