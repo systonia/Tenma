@@ -68,6 +68,7 @@ Everything after the script goes to the script's `$argv`.
 | `--request-timeout SECONDS` | 30                 | time for headers and body, and for a stalled write             |
 | `--db-pool N`               | 20 / workers, 2–10 | Postgres connections per worker and URL                        |
 | `--pubsub redis://HOST`     | none               | `Messaging\Channel::publish()` through Redis, to every process |
+| `--pdo-pgsql native`        | `tenma`            | PDO keeps libpq for Postgres instead of tenma's driver         |
 | `--tls-cert FILE`           | none               | HTTPS with this certificate chain (PEM)                        |
 | `--tls-key FILE`            | none               | the private key for `--tls-cert` (PEM)                         |
 | `--tls-port N`              | every port         | HTTPS only on this port; any number of times                   |

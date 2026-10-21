@@ -13,6 +13,8 @@ module each, with examples you can save and run with `tenma <file>.php`. The
 - [Process and workers](process.md): the main thread, worker threads, restarts, scripts without a
   server
 - [Event loop and fibers](event-loop.md): what waits without blocking, and what blocks a worker
+- [Plain PHP under tenma](compatibility.md): PHP's own sockets, `http://`, PDO and mysqli wait without
+  blocking; what still blocks; `--pdo-pgsql native`
 - [Lifetime of a request](request-lifetime.md): what a request owns, cancellation, `Threading\Task::detach()`,
   `exit()`
 - [State in memory](state.md): what lives as long as the worker, per-request values, shared state

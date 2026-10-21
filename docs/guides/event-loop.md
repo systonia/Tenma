@@ -34,7 +34,7 @@ new Http\Server(8080, function () {
 
 Code waits when it calls a Tenma method that waits. Other requests of the worker keep running.
 
-Code blocks when it calls one of PHP's own functions that wait, such as `sleep()`, `file_get_contents()`, PDO, mysqli or curl. They work, but no other request of that worker runs until they return.
+PHP's own functions that wait for the network (`fsockopen()`, `file_get_contents()` on a URL, PDO with MySQL or Postgres, mysqli) wait the same way: see [Plain PHP under tenma](compatibility.md). Code blocks when it calls one of the functions that cannot, such as `sleep()`, `file_get_contents()` on a file or curl. They work, but no other request of that worker runs until they return.
 
 ```php
 <?php
@@ -59,16 +59,17 @@ A fiber also gives way only when it waits. A long loop that computes holds up it
 
 ## Calls that wait without blocking
 
-| Call                                                                                                      | Page                                     |
-| --------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `UploadedFile::moveTo()`                                                                                  | [Serving HTTP](http.md)                  |
-| `Client::get()`, `post()`, `send()`                                                                       | [Outgoing HTTP](fetch.md)                |
-| `Task::delay()`, `Task::all()`, `$task->await()`                                                          | [Fibers and asynchronous work](async.md) |
-| `Stream::write()`, `EventStream::send()`, `EventStream::comment()`                                        | [Streams](streams.md)                    |
-| `WebSocket::receive()`, `WebSocket::send()`                                                               | [WebSockets](websockets.md)              |
-| `FileInfo::read()`, `write()` and every other `FileInfo` and `DirectoryInfo` method that touches the disk | [Files](files.md)                        |
-| `Postgres::query()`, `first()`, `execute()`, `script()`, `transaction()`                                  | [Databases and messages](database.md)    |
-| `Redis::command()`, `get()`, `set()`                                                                      | [Databases and messages](database.md)    |
+| Call                                                                                                      | Page                                      |
+| --------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `UploadedFile::moveTo()`                                                                                  | [Serving HTTP](http.md)                   |
+| `Client::get()`, `post()`, `send()`                                                                       | [Outgoing HTTP](fetch.md)                 |
+| `Task::delay()`, `Task::all()`, `$task->await()`                                                          | [Fibers and asynchronous work](async.md)  |
+| `Stream::write()`, `EventStream::send()`, `EventStream::comment()`                                        | [Streams](streams.md)                     |
+| `WebSocket::receive()`, `WebSocket::send()`                                                               | [WebSockets](websockets.md)               |
+| `FileInfo::read()`, `write()` and every other `FileInfo` and `DirectoryInfo` method that touches the disk | [Files](files.md)                         |
+| `Postgres::query()`, `first()`, `execute()`, `script()`, `transaction()`                                  | [Databases and messages](database.md)     |
+| `Redis::command()`, `get()`, `set()`                                                                      | [Databases and messages](database.md)     |
+| PHP's socket streams, `http://` and `https://`, `stream_select()`, PDO MySQL, PDO Postgres, mysqli        | [Plain PHP under tenma](compatibility.md) |
 
 ## Where code can wait
 

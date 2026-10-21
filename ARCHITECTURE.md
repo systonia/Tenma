@@ -7,7 +7,8 @@ commands, the [documentation](docs/index.md) the features.
 
 - **Rust** (`src/`) runs the process: threads, event loops, HTTP, and every operation that waits.
 - **C** (`shim/tenma.c`) embeds PHP. It calls the PHP handlers, converts values between PHP and C, and
-  catches fatal errors. Rust never sees a PHP value directly.
+  catches fatal errors. It also wraps PHP's socket transports and `stream_select()` so that they wait in
+  ops, and implements PDO's driver interface for Postgres. Rust never sees a PHP value directly.
 - **PHP** (`stdlib/`) is the API the scripts use: `Http\Server`, `Request`, `Response`, `Threading\Task`,
   `Data\Postgres`, `FileSystem\FileInfo`. It is embedded in the binary.
 
@@ -24,6 +25,8 @@ Rust:
 | `src/db.rs`      | Postgres (a pool per worker) and Redis (one connection per URL)                                                             |
 | `src/fs.rs`      | file operations for `FileSystem\FileInfo` and `DirectoryInfo`, on background threads                                        |
 | `src/pubsub.rs`  | `Messaging\Channel::publish()` and `subscribe()`, through Redis with `--pubsub`                                             |
+| `src/net.rs`     | waits for PHP's own sockets (fsockopen, mysqlnd, the http wrapper) and `stream_select()` without blocking                   |
+| `src/pdo.rs`     | the PDO driver for Postgres on tokio-postgres, on a helper thread; the C layer implements PDO's driver interface            |
 | `src/files.rs`   | static files: prefixes, ETag and 304, ranges                                                                                |
 | `src/tls.rs`     | `--tls-cert`, `--tls-key` and `--tls-port`: the TLS handshake and ALPN (HTTP/2 or HTTP/1.1), SIGHUP reloads the certificate |
 | `src/streams.rs` | streamed responses and WebSockets                                                                                           |
@@ -130,9 +133,9 @@ Measured on an M-series Mac with `ab`.
 
 ## Not yet
 
-- Asynchronous MySQL, and TLS for Postgres connections.
-- Ops for sockets and DNS. Blocking PHP functions such as PDO or `file_get_contents` hold up their
-  worker.
+- TLS for Postgres connections.
+- Name resolution: `getaddrinfo()` runs on the worker thread. Blocking PHP functions that do not go
+  through PHP's streams (curl, `socket_*()`, files) hold up their worker.
 - Waiting at the top level of a script. `Task::delay()` during startup throws; wrap it in
   `Task::run()`.
 - Streaming large request bodies. Up to `--max-body` they are held in memory.
