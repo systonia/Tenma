@@ -7,7 +7,7 @@ use std::ffi::c_int;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -99,9 +99,12 @@ impl Body for ChannelBody {
 /// The channels of a WebSocket, as the HTTP part gets them for the upgrade.
 pub struct Pipes {
     outgoing: mpsc::Receiver<Message>,
-    incoming: mpsc::Sender<Vec<u8>>,
+    /// Each message with whether it came as a binary frame.
+    incoming: mpsc::Sender<(Vec<u8>, bool)>,
     /// Bytes of the incoming messages PHP has not read yet.
     unread: Rc<Cell<usize>>,
+    /// Bytes of outgoing messages queued and not yet written, for a plugin's back pressure.
+    queued: Arc<AtomicUsize>,
     gone: Gone,
 }
 
@@ -127,8 +130,30 @@ impl Drop for Gone {
 struct Socket {
     outgoing: mpsc::Sender<Message>,
     /// Held by the op of a running receive(), otherwise here.
-    incoming: Rc<RefCell<Option<mpsc::Receiver<Vec<u8>>>>>,
+    incoming: Rc<RefCell<Option<mpsc::Receiver<(Vec<u8>, bool)>>>>,
     unread: Rc<Cell<usize>>,
+    queued: Arc<AtomicUsize>,
+}
+
+/// A plugin adopts the WebSocket of request `rid`: PHP loses it, the plugin gets the writing end, the
+/// incoming messages and the queued-bytes counter. None if the request has no socket, or receive()
+/// is running on it.
+pub fn take_socket(
+    rid: u64,
+) -> Option<(
+    mpsc::Sender<Message>,
+    mpsc::Receiver<(Vec<u8>, bool)>,
+    Arc<AtomicUsize>,
+)> {
+    let socket = SOCKETS.with_borrow_mut(|sockets| sockets.remove(&rid))?;
+    let receiver = socket.incoming.borrow_mut().take();
+    match receiver {
+        Some(receiver) => Some((socket.outgoing, receiver, socket.queued)),
+        None => {
+            SOCKETS.with_borrow_mut(|sockets| sockets.insert(rid, socket));
+            None
+        }
+    }
 }
 
 thread_local! {
@@ -224,12 +249,14 @@ extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
     let (outgoing, outgoing_receiver) = mpsc::channel(SOCKET_BACKLOG);
     let (incoming_sender, incoming) = mpsc::channel(SOCKET_BACKLOG);
     let unread = Rc::new(Cell::new(0));
+    let queued = Arc::new(AtomicUsize::new(0));
     if !php::reply(
         rid,
         Reply::Upgrade(Pipes {
             outgoing: outgoing_receiver,
             incoming: incoming_sender,
             unread: Rc::clone(&unread),
+            queued: Arc::clone(&queued),
             gone: Gone(rid),
         }),
     ) {
@@ -239,6 +266,7 @@ extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
         outgoing,
         incoming: Rc::new(RefCell::new(Some(incoming))),
         unread,
+        queued,
     };
     SOCKETS.with_borrow_mut(|sockets| sockets.insert(rid, socket));
     1
@@ -249,9 +277,11 @@ extern "C" fn tenma_rs_ws_accept(rid: u64) -> c_int {
 /// disconnected after --request-timeout (WriteTimeout), which ends the op too.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> i64 {
-    let Some(sender) =
-        SOCKETS.with_borrow(|sockets| sockets.get(&rid).map(|socket| socket.outgoing.clone()))
-    else {
+    let Some((sender, queued)) = SOCKETS.with_borrow(|sockets| {
+        sockets
+            .get(&rid)
+            .map(|socket| (socket.outgoing.clone(), Arc::clone(&socket.queued)))
+    }) else {
         return -1;
     };
     // Text if it is UTF-8, otherwise a binary frame: bytes arrive as they were sent
@@ -260,6 +290,7 @@ extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> i64 {
         Ok(text) => Message::text(text),
         Err(error) => Message::binary(error.into_bytes()),
     };
+    queued.fetch_add(len, Ordering::Relaxed);
     match sender.try_send(message) {
         Ok(()) => 0,
         Err(mpsc::error::TrySendError::Full(message)) => {
@@ -299,7 +330,7 @@ extern "C" fn tenma_rs_ws_receive(rid: u64) -> u64 {
             receiver: Some(receiver),
         };
         let message = lent.receiver.as_mut().unwrap().recv().await;
-        message.map_or(OpResult::Null, |message| {
+        message.map_or(OpResult::Null, |(message, _)| {
             unread.set(unread.get() - message.len());
             OpResult::Text(message)
         })
@@ -308,8 +339,8 @@ extern "C" fn tenma_rs_ws_receive(rid: u64) -> u64 {
 
 /// A receiver taken out for one receive(): goes back when the op ends, also when it is cancelled.
 struct Lent {
-    slot: Rc<RefCell<Option<mpsc::Receiver<Vec<u8>>>>>,
-    receiver: Option<mpsc::Receiver<Vec<u8>>>,
+    slot: Rc<RefCell<Option<mpsc::Receiver<(Vec<u8>, bool)>>>>,
+    receiver: Option<mpsc::Receiver<(Vec<u8>, bool)>>,
 }
 
 impl Drop for Lent {
@@ -334,6 +365,7 @@ pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
         mut outgoing,
         incoming,
         unread,
+        queued,
         gone: _gone,
     } = pipes;
     let Ok(upgraded) = upgrade.await else {
@@ -350,12 +382,12 @@ pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
         tokio::select! {
             message = stream.next() => match message {
                 Some(Ok(Message::Text(text))) => {
-                    if !accept_message(&incoming, &unread, limit, text.as_bytes().to_vec(), &mut sink).await {
+                    if !accept_message(&incoming, &unread, limit, (text.as_bytes().to_vec(), false), &mut sink).await {
                         break;
                     }
                 }
                 Some(Ok(Message::Binary(data))) => {
-                    if !accept_message(&incoming, &unread, limit, data.to_vec(), &mut sink).await {
+                    if !accept_message(&incoming, &unread, limit, (data.to_vec(), true), &mut sink).await {
                         break;
                     }
                 }
@@ -364,9 +396,11 @@ pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
             },
             message = outgoing.recv() => match message {
                 Some(message) => {
+                    let size = message.len();
                     if sink.send(message).await.is_err() {
                         break;
                     }
+                    queued.fetch_sub(size.min(queued.load(Ordering::Relaxed)), Ordering::Relaxed);
                 }
                 None => {
                     let _ = sink.close().await;
@@ -381,13 +415,13 @@ pub async fn run_websocket(upgrade: OnUpgrade, pipes: Pipes) {
 /// at SOCKET_BACKLOG unread messages or more than $limit unread bytes (one message is at most that)
 /// tenma disconnects the client. False means: end the connection.
 async fn accept_message(
-    incoming: &mpsc::Sender<Vec<u8>>,
+    incoming: &mpsc::Sender<(Vec<u8>, bool)>,
     unread: &Cell<usize>,
     limit: usize,
-    message: Vec<u8>,
+    message: (Vec<u8>, bool),
     sink: &mut (impl SinkExt<Message> + Unpin),
 ) -> bool {
-    let size = message.len();
+    let size = message.0.len();
     let sent = if !incoming.is_closed() && unread.get() + size > limit {
         Err(mpsc::error::TrySendError::Full(message))
     } else {

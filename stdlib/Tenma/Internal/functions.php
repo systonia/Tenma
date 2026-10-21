@@ -13,11 +13,14 @@
 namespace Tenma\Internal;
 
 /** The namespaces of the public API: what `tenma --stubs` and `tenma docs` cover. */
-const NAMESPACES = ['Http', 'Threading', 'FileSystem', 'Messaging', 'Data', 'Development', 'Lsp'];
+const NAMESPACES = ['Http', 'Threading', 'FileSystem', 'Messaging', 'Data', 'Development', 'Lsp', 'Process'];
 
-/** Whether $name is a class of the public API. */
+/** Whether $name is a class of the public API: the namespaces above, and Tenma\Plugin. */
 function isPublic(string $name): bool
 {
+    if ($name === 'Tenma\\Plugin') {
+        return true;
+    }
     foreach (NAMESPACES as $namespace) {
         if (str_starts_with($name, $namespace . '\\')) {
             return true;
@@ -277,6 +280,26 @@ function fs(string $op, string $path, string $second = '', bool $flag = false, s
         'exists', 'stat', 'copy' => json_decode($result, true, flags: JSON_THROW_ON_ERROR),
         default => null,
     };
+}
+
+/**
+ * Called by tenma when it stops (Ctrl+C, SIGTERM), before the plugins shut down and the interpreter
+ * ends: every handler of Process\Shutdown::register() runs in a task of its own; tenma waits for them
+ * up to --stop-timeout.
+ */
+function stopping(): void
+{
+    $handlers = Shutdown::$handlers;
+    Shutdown::$handlers = [];
+    foreach ($handlers as $handler) {
+        \Threading\Task::start(static function () use ($handler): void {
+            try {
+                $handler();
+            } catch (\Throwable $error) {
+                error_log('Error in a stop handler: ' . $error);
+            }
+        }, null, null, 'Shutdown');
+    }
 }
 
 /** The fiber of the durable function $key runs now (null: none): the ops and values it asks for belong to its journal. */

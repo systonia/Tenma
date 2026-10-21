@@ -1943,7 +1943,7 @@ fn stubs_describe_the_public_api_only() {
         "Tenma\\Internal",
         "@internal",
         "class Multipart",
-        "function call(",
+        "function call(string $op",
     ] {
         assert!(!stubs.contains(hidden), "leaks {hidden}");
     }
@@ -4532,4 +4532,140 @@ fn durable_functions_survive_a_crash_and_finish_elsewhere() {
     );
     third.0.kill().unwrap();
     let _ = third.0.wait();
+}
+
+/// Builds the echo plugin of tests/plugins/echo with the system's C compiler, once.
+fn echo_plugin() -> std::path::PathBuf {
+    static BUILT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = BUILT.lock().unwrap();
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/plugins/echo");
+    let library = directory.join("libecho.plugin");
+    let source = directory.join("echo.c");
+    let header = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tenma-plugin");
+    let fresh = library.metadata().and_then(|m| m.modified()).ok()
+        >= source.metadata().and_then(|m| m.modified()).ok();
+    if !library.exists() || !fresh {
+        let status = Command::new("cc")
+            .args(["-shared", "-fPIC", "-O1", "-o"])
+            .arg(&library)
+            .arg("-I")
+            .arg(&header)
+            .arg(&source)
+            .status()
+            .expect("cc runs");
+        assert!(status.success(), "the echo plugin does not build");
+    }
+    library
+}
+
+#[test]
+fn native_plugins_answer_calls_adopt_sockets_and_shut_down() {
+    let port = 18_191;
+    let plugin = echo_plugin();
+    let directory = scratch("plugin");
+    let log = directory.join("shutdown.log");
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([
+                "--plugin",
+                plugin.to_str().unwrap(),
+                "--stop-timeout",
+                "2",
+                "tests/fixtures/plugin.php",
+            ])
+            .env("PORT", port.to_string())
+            .env("ECHO_SHUTDOWN_FILE", &log)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(body(get(port, "/call?text=hello")), "HELLO\n");
+    assert_eq!(body(get(port, "/call-error")), "echo: unknown function\n");
+    assert_eq!(body(get(port, "/await")), "later:a,later:b 0.1s\n");
+    assert_eq!(body(get(port, "/await-error")), "echo: async failure\n");
+    assert_eq!(
+        body(get(port, "/missing")),
+        "no plugin named nope is loaded (tenma --plugin)\n"
+    );
+
+    // The plugin takes the WebSocket over: it greets, echoes text and binary from its own side, reports
+    // its queue and closes on request; PHP hears about it through a channel
+    let (mut socket, _) =
+        tokio_tungstenite::tungstenite::connect(format!("ws://127.0.0.1:{port}/ws")).unwrap();
+    use tokio_tungstenite::tungstenite::Message;
+    assert_eq!(socket.read().unwrap(), Message::text("hello from php"));
+    assert_eq!(
+        socket.read().unwrap(),
+        Message::text("hello from the plugin")
+    );
+    socket.send(Message::text("ping")).unwrap();
+    assert_eq!(socket.read().unwrap(), Message::text("ping"));
+    socket.send(Message::binary(vec![0, 1, 2])).unwrap();
+    assert_eq!(socket.read().unwrap(), Message::binary(vec![0, 1, 2]));
+    socket.send(Message::text("buffered")).unwrap();
+    assert!(socket.read().unwrap().to_string().starts_with("buffered "));
+    socket.send(Message::text("bye")).unwrap();
+    assert!(matches!(socket.read(), Ok(Message::Close(_)) | Err(_)));
+    std::thread::sleep(Duration::from_millis(200));
+    let events = body(get(port, "/events"));
+    assert!(
+        events.contains("adopted ") && events.contains("closed "),
+        "{events}"
+    );
+
+    // SIGTERM: the PHP stop handler runs, then the plugin's shutdown
+    unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
+    let _ = server.0.wait();
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "php stop handler ran\nplugin shut down\n"
+    );
+    let mut stderr = String::new();
+    server
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.contains("plugin echo loaded from"), "{stderr}");
+}
+
+#[test]
+fn tenma_json_configures_the_run() {
+    let port = 18_192;
+    echo_plugin();
+    // tenma.json next to the script: workers, a plugin by a relative path, -d and the stop timeout;
+    // the command line wins for a single value
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args(["--max-body", "3m", "tests/fixtures/config/app.php"])
+            .env("PORT", port.to_string())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(body(get(port, "/?text=json")), "JSON 96M\n");
+    unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
+    let _ = server.0.wait();
+    let mut stderr = String::new();
+    server
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.contains("plugin echo loaded from"), "{stderr}");
+
+    // An unknown key stops tenma with its name
+    let bad = scratch("config");
+    std::fs::write(bad.join("tenma.json"), r#"{"worker": 2}"#).unwrap();
+    std::fs::write(bad.join("app.php"), "<?php echo 'ran';").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
+        .arg(bad.join("app.php"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown key worker"));
 }

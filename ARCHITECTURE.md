@@ -36,6 +36,7 @@ Rust:
 | `src/journal.rs` | `--record`: the event journal of a worker life, its format, and the values of the wrapped PHP functions                     |
 | `src/replay.rs`  | `tenma replay`: plays a journal into a fresh interpreter, answers every op from it, checks responses                        |
 | `src/durable.rs` | `--durable`: the journal of a durable function in Postgres, its lease, its timers and signals, the poller                   |
+| `src/plugins.rs` | `--plugin`: loads native plugins with dlopen and implements the API of `tenma-plugin/tenma_plugin.h`                        |
 
 PHP, in `stdlib/`: one file per class, folders by namespace, the functions of a namespace in its
 `functions.php`. `build.rs` embeds every file; `src/stdlib.rs` loads them.
@@ -52,13 +53,15 @@ PHP, in `stdlib/`: one file per class, folders by namespace, the functions of a 
 
 Everything else:
 
-| Path                 | Does                                                                     |
-| -------------------- | ------------------------------------------------------------------------ |
-| `php-build/build.sh` | builds PHP 8.5 as a static library (embed SAPI, ZTS) with its extensions |
-| `demo/waypoint/`     | a Waypoint app that runs under tenma and unchanged under `php -S`        |
-| `tests/http.rs`      | starts the binary and sends real requests                                |
-| `tests/lsp.rs`       | talks LSP to `tenma lsp` on `tests/fixtures/lsp`                         |
-| `tests/docs.rs`      | runs `tenma docs` on `tests/fixtures/docs` and on tenma's own API        |
+| Path                 | Does                                                                              |
+| -------------------- | --------------------------------------------------------------------------------- |
+| `tenma-plugin/`      | the C ABI of native plugins: `tenma_plugin.h` and the Rust crate of the same name |
+| `tests/plugins/echo` | the plugin of the test suite, in C, built by `cargo test`                         |
+| `php-build/build.sh` | builds PHP 8.5 as a static library (embed SAPI, ZTS) with its extensions          |
+| `demo/waypoint/`     | a Waypoint app that runs under tenma and unchanged under `php -S`                 |
+| `tests/http.rs`      | starts the binary and sends real requests                                         |
+| `tests/lsp.rs`       | talks LSP to `tenma lsp` on `tests/fixtures/lsp`                                  |
+| `tests/docs.rs`      | runs `tenma docs` on `tests/fixtures/docs` and on tenma's own API                 |
 
 `build.sh` lists the extensions and the libraries they need. On macOS the libraries come from the SDK
 and Homebrew, on Linux from the distribution's `-dev` packages. They are linked dynamically.
@@ -144,3 +147,5 @@ Measured on an M-series Mac with `ab`.
 - Streaming large request bodies. Up to `--max-body` they are held in memory.
 - A timeout for handlers that compute instead of wait. An endless loop holds up its worker.
 - Several accepting threads (`SO_REUSEPORT`) for many short connections without keep-alive.
+- A dedicated I/O thread for the WebSockets a native plugin adopted: their reads wait while their
+  worker is busy in PHP, and a worker restart ends them.

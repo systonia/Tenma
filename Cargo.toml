@@ -31,5 +31,8 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["h
 [dev-dependencies]
 h2 = "0.4"
 
+[workspace]
+members = ["tenma-plugin"]
+
 [build-dependencies]
 cc = "1"

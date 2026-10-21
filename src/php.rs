@@ -58,6 +58,7 @@ unsafe extern "C" {
     fn tenma_set_ini_path(path: *const c_char);
     fn tenma_set_server_name(name: *const c_char);
     fn tenma_set_pdo_native();
+    fn tenma_stopping() -> c_int;
     fn tenma_stop();
     fn tenma_thread_start() -> c_int;
     fn tenma_thread_stop();
@@ -419,6 +420,15 @@ pub fn started() -> Result<(), ()> {
         crate::journal::record(crate::journal::Entry::Started);
     }
     if unsafe { tenma_started() } < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+/// tenma stops: the stop handlers of Process\Shutdown start. Err after a fatal error.
+pub fn stopping() -> Result<(), ()> {
+    if unsafe { tenma_stopping() } < 0 {
         Err(())
     } else {
         Ok(())

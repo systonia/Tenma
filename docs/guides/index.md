@@ -30,6 +30,7 @@ module each, with examples you can save and run with `tenma <file>.php`. The
 - [File system](files.md): `FileSystem\FileInfo`, `FileSystem\DirectoryInfo`
 - [Postgres, Redis and pub/sub](database.md): `Data\Postgres`, `Data\Redis`, `Messaging\Channel`
 - [Durable functions](durable.md): `Threading\Durable`, `Threading\Signal`
+- [Native plugins](plugins.md): `Tenma\Plugin`, the C ABI, `Process\Shutdown`
 
 ## Tooling
 

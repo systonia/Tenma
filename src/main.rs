@@ -18,6 +18,7 @@ mod net;
 mod ops;
 mod pdo;
 mod php;
+mod plugins;
 mod pubsub;
 mod replay;
 mod stdlib;
@@ -46,7 +47,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--durable postgres://URL] [--record DIR [--record-on error] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N] [--check] [--inspect]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--durable postgres://URL] [--plugin FILE] [--config tenma.json] [--stop-timeout SECONDS] [--record DIR [--record-on error] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N] [--check] [--inspect]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -96,6 +97,8 @@ struct Options {
     record: Option<&'static journal::Settings>,
     /// `tenma replay`: the one worker plays this instead of serving.
     replay: Option<&'static replay::Plan>,
+    /// How long the stop handlers of Process\Shutdown may take when tenma stops.
+    stop_timeout: Duration,
 }
 
 /// Why a worker's event loop ends.
@@ -277,7 +280,8 @@ fn tool(tool: stdlib::Tool, namespace: &str) -> ExitCode {
 
 /// Options for tenma, then the script; everything after it belongs to the script ($argv), as with `php script.php …`.
 fn parse_args() -> Result<(Vec<String>, Options), String> {
-    let mut args = std::env::args().skip(1);
+    let given: Vec<String> = std::env::args().skip(1).collect();
+    let mut args = with_config(&given)?.into_iter();
     let mut options = Options {
         workers: 1,
         max_body: 10 << 20,
@@ -290,6 +294,7 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         inspect_wait: None,
         record: None,
         replay: None,
+        stop_timeout: Duration::from_secs(10),
     };
     let mut argv = Vec::new();
     let mut pool = None;
@@ -297,6 +302,7 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
     let mut key = None;
     let mut tls_ports = Vec::new();
     let mut record: Option<journal::Settings> = None;
+    let mut plugins = Vec::new();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
@@ -389,6 +395,20 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
                     .filter(|name| !name.is_empty())
                     .collect();
             }
+            "--plugin" => plugins.push(value("--plugin")?),
+            // Already applied by with_config
+            "--config" => {
+                value("--config")?;
+            }
+            "--stop-timeout" => {
+                let seconds = value("--stop-timeout")?;
+                options.stop_timeout = seconds
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|&s| s >= 0.0)
+                    .and_then(|s| Duration::try_from_secs_f64(s).ok())
+                    .ok_or(format!("--stop-timeout {seconds}: not a number of seconds"))?;
+            }
             "--durable" => {
                 let url = value("--durable")?;
                 if !url.starts_with("postgres://") && !url.starts_with("postgresql://") {
@@ -449,6 +469,9 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         pool.unwrap_or((20 / options.workers).clamp(2, 10)),
         std::sync::atomic::Ordering::Relaxed,
     );
+    if !plugins.is_empty() {
+        plugins::load(&plugins)?;
+    }
     if let Some(settings) = record {
         if settings.directory.as_os_str().is_empty() {
             return Err(
@@ -458,6 +481,120 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         options.record = Some(Box::leak(Box::new(settings)));
     }
     Ok((argv, options))
+}
+
+/// The options of tenma.json (next to the script, or `--config FILE`) put in front of the command line
+/// as arguments: the command line wins for single values, lists add up. Keys are the long option
+/// names; `plugins` and `d` take lists, `tls-port` too. Paths in the file count from its directory.
+fn with_config(given: &[String]) -> Result<Vec<String>, String> {
+    let mut file = None;
+    let mut script = None;
+    let mut i = 0;
+    while i < given.len() {
+        let arg = &given[i];
+        if arg == "--config" {
+            file = given.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            script = Some(arg.clone());
+            break;
+        }
+        // Options with a value, as parse_args reads them
+        let takes_value = !matches!(arg.as_str(), "--watch" | "--stubs")
+            && !arg.starts_with("--inspect")
+            && !(arg.starts_with("-d") && arg.len() > 2);
+        i += if takes_value { 2 } else { 1 };
+    }
+    let path = match (file, script) {
+        (Some(file), _) => std::path::PathBuf::from(file),
+        (None, Some(script)) if !matches!(script.as_str(), "build" | "lsp" | "docs" | "replay") => {
+            let next_to = std::path::Path::new(&script)
+                .parent()
+                .map_or_else(
+                    || std::path::PathBuf::from("."),
+                    std::path::Path::to_path_buf,
+                )
+                .join("tenma.json");
+            if !next_to.is_file() {
+                return Ok(given.to_vec());
+            }
+            next_to
+        }
+        _ => return Ok(given.to_vec()),
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let config: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    let directory = path.parent().map_or_else(
+        || std::path::PathBuf::from("."),
+        std::path::Path::to_path_buf,
+    );
+    let relative = |value: &str| -> String {
+        if value.starts_with('/') {
+            value.to_owned()
+        } else {
+            directory.join(value).display().to_string()
+        }
+    };
+    let mut front = Vec::new();
+    for (key, value) in &config {
+        // -d and -c as on the command line, the rest as long options
+        let option = if key.len() == 1 {
+            format!("-{key}")
+        } else {
+            format!("--{key}")
+        };
+        let is_path = matches!(
+            key.as_str(),
+            "plugins" | "tls-cert" | "tls-key" | "c" | "record"
+        );
+        let scalar = |value: &serde_json::Value| -> Result<String, String> {
+            match value {
+                serde_json::Value::String(text) => Ok(if is_path {
+                    relative(text)
+                } else {
+                    text.clone()
+                }),
+                serde_json::Value::Number(number) => Ok(number.to_string()),
+                serde_json::Value::Bool(flag) => Ok(flag.to_string()),
+                other => Err(format!("{}: {key}: not a value: {other}", path.display())),
+            }
+        };
+        match key.as_str() {
+            "workers" | "max-body" | "max-requests" | "max-connections" | "request-timeout"
+            | "db-pool" | "pubsub" | "pdo-pgsql" | "durable" | "server-name" | "tls-cert"
+            | "tls-key" | "c" | "record" | "record-on" | "record-max-body" | "record-redact"
+            | "stop-timeout" => {
+                front.push(option);
+                front.push(scalar(value)?);
+            }
+            "watch" => {
+                if value.as_bool() == Some(true) {
+                    front.push(option);
+                }
+            }
+            "plugins" | "tls-port" | "d" => {
+                let option = if key == "plugins" {
+                    "--plugin".to_owned()
+                } else {
+                    option
+                };
+                for item in value
+                    .as_array()
+                    .ok_or(format!("{}: {key}: a list", path.display()))?
+                {
+                    front.push(option.clone());
+                    front.push(scalar(item)?);
+                }
+            }
+            other => return Err(format!("{}: unknown key {other}", path.display())),
+        }
+    }
+    front.extend(given.iter().cloned());
+    Ok(front)
 }
 
 /// Bytes with an optional unit: 512, 64k, 10m, 1g.
@@ -615,6 +752,7 @@ fn run(argv: &[String], options: Options) -> u8 {
     inspect::release();
     workers.extend(dev_worker);
     stop_workers(workers);
+    plugins::shutdown();
     dev::exit_status().or(php::exit_status()).unwrap_or(0)
 }
 
@@ -1208,6 +1346,20 @@ fn serve(
     // restart up to the full drain. Upgrade: end event streams and WebSockets here, clients reconnect
     ops::in_loop(|| {
         local.block_on(&runtime, async {
+            // tenma stops: the handlers of Process\Shutdown first, up to --stop-timeout
+            if matches!(stop, Stop::Closed) && !BROKEN.get() {
+                if php::stopping().is_err() {
+                    interpreter_broken();
+                } else if tokio::time::timeout(options.stop_timeout, ops::idle())
+                    .await
+                    .is_err()
+                {
+                    eprintln!(
+                        "tenma: stop handlers still running after {} s, going on",
+                        options.stop_timeout.as_secs_f64()
+                    );
+                }
+            }
             let _ = drain.send(());
             let _ = tokio::time::timeout(options.drain, drain.closed()).await;
         })

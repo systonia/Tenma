@@ -368,6 +368,27 @@ ZEND_END_ARG_INFO()
 PHP_FUNCTION(tenma_durable_context);
 PHP_FUNCTION(tenma_op_durable);
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_plugin_call, 0, 3, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, plugin, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, function, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, input, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_op_plugin_await, 0, 3, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, plugin, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, function, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, input, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_plugin_adopt, 0, 2, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, plugin, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, rid, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+PHP_FUNCTION(tenma_plugin_call);
+PHP_FUNCTION(tenma_op_plugin_await);
+PHP_FUNCTION(tenma_plugin_adopt);
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tenma_shutdown, 0, 0, IS_VOID, 0)
 ZEND_END_ARG_INFO()
 
@@ -401,6 +422,9 @@ static const zend_function_entry tenma_functions[] = {
     ZEND_FE(tenma_pubsub, arginfo_tenma_pubsub)
     ZEND_FE(tenma_durable_context, arginfo_tenma_durable_context)
     ZEND_FE(tenma_op_durable, arginfo_tenma_op_durable)
+    ZEND_FE(tenma_plugin_call, arginfo_tenma_plugin_call)
+    ZEND_FE(tenma_op_plugin_await, arginfo_tenma_op_plugin_await)
+    ZEND_FE(tenma_plugin_adopt, arginfo_tenma_plugin_adopt)
     ZEND_FE(tenma_debugger, arginfo_tenma_shutdown)
     ZEND_FE(tenma_reloaded_by, arginfo_tenma_reloaded_by)
     ZEND_FE(tenma_classic_begin, arginfo_tenma_shutdown)
@@ -3746,6 +3770,58 @@ static int fiber_result(enum outcome result) {
     return drain_ready() < 0 ? -1 : code;
 }
 
+/* ---- Native plugins (src/plugins.rs) and stop handlers ---- */
+
+extern int tenma_rs_plugin_call(const char *name, size_t name_len, const char *function, size_t function_len,
+    const char *input, size_t input_len, char **out, size_t *out_len);
+extern void tenma_rs_plugin_free(char *ptr, size_t len);
+extern uint64_t tenma_rs_plugin_await(const char *name, size_t name_len, const char *function, size_t function_len,
+    const char *input, size_t input_len);
+extern uint64_t tenma_rs_plugin_adopt(const char *name, size_t name_len, uint64_t rid);
+
+/** tenma_plugin_call(string $plugin, string $function, string $input): string. Throws RuntimeException. */
+PHP_FUNCTION(tenma_plugin_call) {
+    zend_string *plugin, *function, *input;
+    ZEND_PARSE_PARAMETERS_START(3, 3)
+        Z_PARAM_STR(plugin)
+        Z_PARAM_STR(function)
+        Z_PARAM_STR(input)
+    ZEND_PARSE_PARAMETERS_END();
+    char *out = NULL;
+    size_t out_len = 0;
+    int status = tenma_rs_plugin_call(ZSTR_VAL(plugin), ZSTR_LEN(plugin), ZSTR_VAL(function), ZSTR_LEN(function),
+        ZSTR_VAL(input), ZSTR_LEN(input), &out, &out_len);
+    if (status != 0) {
+        zend_throw_exception_ex(spl_ce_RuntimeException, 0, "%.*s", (int) out_len, out);
+        tenma_rs_plugin_free(out, out_len);
+        RETURN_THROWS();
+    }
+    RETVAL_STRINGL(out, out_len);
+    tenma_rs_plugin_free(out, out_len);
+}
+
+/** tenma_op_plugin_await(string $plugin, string $function, string $input): int. The op of an asynchronous call. */
+PHP_FUNCTION(tenma_op_plugin_await) {
+    zend_string *plugin, *function, *input;
+    ZEND_PARSE_PARAMETERS_START(3, 3)
+        Z_PARAM_STR(plugin)
+        Z_PARAM_STR(function)
+        Z_PARAM_STR(input)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_LONG((zend_long) tenma_rs_plugin_await(ZSTR_VAL(plugin), ZSTR_LEN(plugin), ZSTR_VAL(function), ZSTR_LEN(function), ZSTR_VAL(input), ZSTR_LEN(input)));
+}
+
+/** tenma_plugin_adopt(string $plugin, int $rid): int. The connection ID, 0 if it failed. */
+PHP_FUNCTION(tenma_plugin_adopt) {
+    zend_string *plugin;
+    zend_long rid;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(plugin)
+        Z_PARAM_LONG(rid)
+    ZEND_PARSE_PARAMETERS_END();
+    RETURN_LONG((zend_long) tenma_rs_plugin_adopt(ZSTR_VAL(plugin), ZSTR_LEN(plugin), (uint64_t) rid));
+}
+
 /* ---- Durable functions (src/durable.rs) ---- */
 
 extern void tenma_rs_durable_context(const char *key, size_t len);
@@ -3772,6 +3848,11 @@ PHP_FUNCTION(tenma_op_durable) {
         Z_PARAM_DOUBLE(number)
     ZEND_PARSE_PARAMETERS_END();
     RETURN_LONG((zend_long) tenma_rs_durable(ZSTR_VAL(op), ZSTR_LEN(op), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(name), ZSTR_LEN(name), number));
+}
+
+/** tenma stops: Tenma\Internal\stopping() starts the handlers of Process\Shutdown::register(). -1: fatal. */
+int tenma_stopping(void) {
+    return fiber_result(call_stdlib("Tenma\\Internal\\stopping", 0, NULL)) < 0 ? -1 : 0;
 }
 
 /** The poller resumes a durable function: Threading\Durable::resume($name, $key). -1: fatal. */

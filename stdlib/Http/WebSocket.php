@@ -7,6 +7,12 @@ final class WebSocket
 {
     public function __construct(private readonly int $rid) {}
 
+    /** @internal The request this socket belongs to, for Tenma\Plugin::adopt(). */
+    public function id(): int
+    {
+        return $this->rid;
+    }
+
     /**
      * Waits for the next message without blocking the server; null when the client has closed. Text and binary
      * messages both arrive as a string of their bytes.

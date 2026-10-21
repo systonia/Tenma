@@ -13,4 +13,6 @@ generated: true
 - [`Http`](Http/index.md)
 - [`Lsp`](Lsp/index.md)
 - [`Messaging`](Messaging/index.md)
+- [`Process`](Process/index.md)
+- [`Tenma`](Tenma/index.md)
 - [`Threading`](Threading/index.md)

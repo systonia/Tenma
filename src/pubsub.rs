@@ -66,8 +66,9 @@ fn publish(channel: &[u8], message: &[u8]) {
     }
 }
 
-/// Hands the message to every subscription of the channel in this process.
-fn deliver(channel: &[u8], message: &[u8]) {
+/// Hands the message to every subscription of the channel in this process. Also what a native
+/// plugin's api->post() does, from any thread.
+pub fn deliver(channel: &[u8], message: &[u8]) {
     let mut channels = channels();
     if let Some(subscriptions) = channels.get_mut(channel) {
         // A worker that went away without unsubscribing (restart after a fatal error) closed its receivers

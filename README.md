@@ -60,26 +60,29 @@ tenma --version
 
 Everything after the script goes to the script's `$argv`.
 
-| Option                      | Default            |                                                                |
-| --------------------------- | ------------------ | -------------------------------------------------------------- |
-| `--workers N`, `-w N`       | 1                  | worker threads; `auto` = one per CPU core                      |
-| `--max-body SIZE`           | `10m`              | largest request body and WebSocket message                     |
-| `--max-requests N`          | none               | a worker restarts its interpreter after N requests             |
-| `--max-connections N`       | 1024               | open connections per worker; more get a 503                    |
-| `--request-timeout SECONDS` | 30                 | time for headers and body, and for a stalled write             |
-| `--db-pool N`               | 20 / workers, 2–10 | Postgres connections per worker and URL                        |
-| `--pubsub redis://HOST`     | none               | `Messaging\Channel::publish()` through Redis, to every process |
-| `--pdo-pgsql native`        | `tenma`            | PDO keeps libpq for Postgres instead of tenma's driver         |
-| `--record DIR`              | none               | every worker writes its journal there, for `tenma replay`      |
-| `--durable postgres://URL`  | none               | the database of durable functions (`Threading\Durable`)        |
-| `--tls-cert FILE`           | none               | HTTPS with this certificate chain (PEM)                        |
-| `--tls-key FILE`            | none               | the private key for `--tls-cert` (PEM)                         |
-| `--tls-port N`              | every port         | HTTPS only on this port; any number of times                   |
-| `--server-name NAME`        | `localhost`        | `$_SERVER['SERVER_NAME']` in classic mode                      |
-| `-d name=value`             |                    | a PHP setting, as with `php -d`                                |
-| `-c FILE\|DIR`              |                    | a `php.ini`, as with `php -c`                                  |
-| `--watch`                   |                    | reload on changes, run the hooks of `tenma.dev.php`            |
-| `--inspect[=[HOST:]PORT]`   | `127.0.0.1:9229`   | the debugger; also `--inspect-wait` and `--inspect-brk`        |
+| Option                      | Default                         |                                                                |
+| --------------------------- | ------------------------------- | -------------------------------------------------------------- |
+| `--workers N`, `-w N`       | 1                               | worker threads; `auto` = one per CPU core                      |
+| `--max-body SIZE`           | `10m`                           | largest request body and WebSocket message                     |
+| `--max-requests N`          | none                            | a worker restarts its interpreter after N requests             |
+| `--max-connections N`       | 1024                            | open connections per worker; more get a 503                    |
+| `--request-timeout SECONDS` | 30                              | time for headers and body, and for a stalled write             |
+| `--db-pool N`               | 20 / workers, 2–10              | Postgres connections per worker and URL                        |
+| `--pubsub redis://HOST`     | none                            | `Messaging\Channel::publish()` through Redis, to every process |
+| `--pdo-pgsql native`        | `tenma`                         | PDO keeps libpq for Postgres instead of tenma's driver         |
+| `--record DIR`              | none                            | every worker writes its journal there, for `tenma replay`      |
+| `--durable postgres://URL`  | none                            | the database of durable functions (`Threading\Durable`)        |
+| `--plugin FILE`             | none                            | loads a native plugin (`Tenma\Plugin`); any number of times    |
+| `--config FILE`             | `tenma.json` next to the script | the options as JSON                                            |
+| `--stop-timeout SECONDS`    | `10`                            | how long stop handlers may take when tenma stops               |
+| `--tls-cert FILE`           | none                            | HTTPS with this certificate chain (PEM)                        |
+| `--tls-key FILE`            | none                            | the private key for `--tls-cert` (PEM)                         |
+| `--tls-port N`              | every port                      | HTTPS only on this port; any number of times                   |
+| `--server-name NAME`        | `localhost`                     | `$_SERVER['SERVER_NAME']` in classic mode                      |
+| `-d name=value`             |                                 | a PHP setting, as with `php -d`                                |
+| `-c FILE\|DIR`              |                                 | a `php.ini`, as with `php -c`                                  |
+| `--watch`                   |                                 | reload on changes, run the hooks of `tenma.dev.php`            |
+| `--inspect[=[HOST:]PORT]`   | `127.0.0.1:9229`                | the debugger; also `--inspect-wait` and `--inspect-brk`        |
 
 More in [Command line and deployment](docs/guides/deployment.md).
 

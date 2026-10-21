@@ -1,0 +1,7 @@
+{
+    "workers": 2,
+    "max-body": "2m",
+    "plugins": ["../../plugins/echo/libecho.plugin"],
+    "d": ["memory_limit=96M"],
+    "stop-timeout": 3
+}

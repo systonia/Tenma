@@ -1,6 +1,6 @@
 ---
 title: Configuration and php.ini
-description: PHP settings with -d, -c and php.ini, the defaults Tenma sets, built-in extensions and opcache.
+description: PHP settings with -d, -c and php.ini, tenma.json for the options, the defaults Tenma sets, built-in extensions and opcache.
 order: 400
 ---
 
@@ -18,6 +18,29 @@ tenma -c /etc/app/php.ini -d memory_limit=512M -d date.timezone=Europe/Berlin in
 | `-d name=value`                    | sets one setting; any number of times                    |
 | `ini_set()`                        | changes a setting from the script                        |
 | `php_ini_loaded_file()`            | tells which `php.ini` was read, or `false`               |
+
+## tenma.json
+
+Every command-line option can also stand in a `tenma.json` next to the script, or in the file
+`--config FILE` names:
+
+```json
+{
+  "workers": "auto",
+  "max-body": "20m",
+  "pubsub": "redis://cache",
+  "plugins": ["./native/libvirgo.so"],
+  "d": ["memory_limit=512M", "date.timezone=Europe/Berlin"],
+  "stop-timeout": 10
+}
+```
+
+Keys are the long option names without `--`; `plugins`, `tls-port` and `d` take lists, `watch` a
+boolean. The command line wins over the file for single values; lists add up. Paths in the file
+(`plugins`, `tls-cert`, `tls-key`, `c`, `record`) count from the file's directory, paths on the
+command line from the working directory. An unknown key stops tenma with its name, as an unknown
+option does. `--watch` does not reload it: a changed `tenma.json` needs a restart, because workers,
+plugins and the pool are set up once.
 
 ## Where settings come from
 
