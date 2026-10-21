@@ -10,7 +10,7 @@
 //! DAP threads are fibers: every request, timer and `Task::run()` task is one, with the stack
 //! it waits in.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -211,6 +211,10 @@ enum Step {
     Over,
     In,
     Out,
+    /// Only in a replay: to the statement before, by replaying again up to it.
+    Back,
+    /// Only in a replay: back to the last stop before this one.
+    Reverse,
 }
 
 thread_local! {
@@ -218,6 +222,39 @@ thread_local! {
     static PREVIOUS: Cell<(usize, u32)> = const { Cell::new((0, 0)) };
     /// The step under way: in which fiber, from which depth.
     static STEPPING: Cell<Option<(Step, usize, u32)>> = const { Cell::new(None) };
+    /// Statements since the interpreter started: a replay runs the same ones in the same order, so
+    /// a number names a moment to return to.
+    static STATEMENTS: Cell<u64> = const { Cell::new(0) };
+    /// The statements the worker stopped at in this replay, for reverseContinue.
+    static STOPS: RefCell<Vec<Moment>> = const { RefCell::new(Vec::new()) };
+    /// Per fiber, its last statements: a step back goes to the one before in the same fiber, at the
+    /// same depth or above, while other fibers' statements lie in between.
+    static LAST: RefCell<HashMap<usize, Vec<Moment>>> = RefCell::new(HashMap::new());
+    /// Replaying again: stop at this statement, nowhere before.
+    static TARGET: Cell<Option<Moment>> = const { Cell::new(None) };
+    /// A step back was asked for: the replay starts over once the worker gets there.
+    static AGAIN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A statement the worker arrived at: the same one in every replay, as the statement number, line
+/// and call depth together.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Moment {
+    statement: u64,
+    line: u32,
+    depth: u32,
+}
+
+/// Set by `tenma replay`: the debugger then offers stepping back.
+static REPLAYING: AtomicBool = AtomicBool::new(false);
+
+pub fn replaying() {
+    REPLAYING.store(true, Ordering::Relaxed);
+}
+
+/// Whether the replay's worker should start over for a step back; asked once per interpreter life.
+pub fn replay_again() -> bool {
+    AGAIN.replace(false)
 }
 
 /// Before `php::start`: PHP gets the debugger's extension and runs without opcache.
@@ -230,6 +267,8 @@ pub fn configure() {
 pub fn thread() {
     PREVIOUS.set((0, 0));
     STEPPING.set(None);
+    STATEMENTS.set(0);
+    LAST.with_borrow_mut(HashMap::clear);
     unsafe { tenma_inspect_thread() }
 }
 
@@ -417,6 +456,7 @@ fn handle(request: &Value) -> bool {
                     "supportsSetVariable": true,
                     "supportsHitConditionalBreakpoints": true,
                     "supportsExceptionFilterOptions": true,
+                    "supportsStepBack": REPLAYING.load(Ordering::Relaxed),
                 }),
             );
             event("initialized", json!({}));
@@ -549,6 +589,14 @@ fn handle(request: &Value) -> bool {
             respond(request, json!({}));
             resume(Some(Step::Out));
         }
+        "stepBack" | "reverseContinue" if REPLAYING.load(Ordering::Relaxed) => {
+            respond(request, json!({}));
+            resume(Some(if request["command"] == "stepBack" {
+                Step::Back
+            } else {
+                Step::Reverse
+            }));
+        }
         "pause" => {
             PAUSE.store(true, Ordering::Relaxed);
             respond(request, json!({}));
@@ -572,6 +620,7 @@ extern "C" fn tenma_rs_statement(
     frame: usize,
     fiber: usize,
 ) {
+    STATEMENTS.set(STATEMENTS.get() + 1);
     if ENDING.load(Ordering::Relaxed) || PREVIOUS.replace((frame, line)) == (frame, line) {
         return;
     }
@@ -603,6 +652,33 @@ extern "C" fn tenma_rs_return(
 /// Stops at this line of `file` if the editor wants it: `entry` for --inspect-brk or stopOnEntry,
 /// on pause, after a step or at a breakpoint.
 fn arrive(file: &[u8], line: u32, fiber: usize, entry: bool) {
+    // On the way back to a statement nothing else stops; once there, it is a step
+    if AGAIN.get() {
+        return;
+    }
+    let here = Moment {
+        statement: STATEMENTS.get(),
+        line,
+        depth: unsafe { tenma_inspect_depth() },
+    };
+    LAST.with_borrow_mut(|last| {
+        let history = last.entry(fiber).or_default();
+        history.push(here);
+        if history.len() > 64 {
+            history.remove(0);
+        }
+    });
+    if let Some(target) = TARGET.get() {
+        // The same moment as before; past it (the code changed), the next statement
+        let same = target.line == 0 || here == target;
+        if here.statement < target.statement || (here.statement == target.statement && !same) {
+            return;
+        }
+        TARGET.set(None);
+        ENTRY.store(false, Ordering::Relaxed);
+        stop_here(json!({"reason": "step"}), fiber);
+        return;
+    }
     let reason = if entry {
         "entry"
     } else if PAUSE.swap(false, Ordering::Relaxed) {
@@ -623,8 +699,53 @@ fn arrive(file: &[u8], line: u32, fiber: usize, entry: bool) {
 /// Stops, and after a step stops again where it arrives.
 fn stop_here(body: Value, fiber: usize) {
     STEPPING.set(None);
+    let now = LAST
+        .with_borrow(|last| last.get(&fiber).and_then(|history| history.last().copied()))
+        .unwrap_or(Moment {
+            statement: STATEMENTS.get(),
+            line: 0,
+            depth: 0,
+        });
+    STOPS.with_borrow_mut(|stops| {
+        stops.retain(|at| at.statement < now.statement);
+        stops.push(now);
+    });
     let step = stop(body);
-    STEPPING.set(step.map(|step| (step, fiber, unsafe { tenma_inspect_depth() })));
+    match step {
+        // Back in time: the replay starts over and runs up to the moment wanted, the statement
+        // before this one in its fiber, or the last stop before it
+        Some(Step::Back | Step::Reverse) => {
+            let target = if step == Some(Step::Back) {
+                LAST.with_borrow(|last| {
+                    last.get(&fiber).and_then(|history| {
+                        history
+                            .iter()
+                            .rev()
+                            .skip(1)
+                            .find(|moment| moment.depth <= now.depth)
+                            .copied()
+                    })
+                })
+            } else {
+                STOPS.with_borrow(|stops| {
+                    stops
+                        .iter()
+                        .rev()
+                        .find(|at| at.statement < now.statement)
+                        .copied()
+                })
+            };
+            // Nothing before: the first statement of the script
+            TARGET.set(Some(target.unwrap_or(Moment {
+                statement: 1,
+                line: 0,
+                depth: 0,
+            })));
+            AGAIN.set(true);
+            crate::request_restart();
+        }
+        other => STEPPING.set(other.map(|step| (step, fiber, unsafe { tenma_inspect_depth() }))),
+    }
 }
 
 /// `Debugger::break()`: stops if an editor is connected.
@@ -880,6 +1001,8 @@ fn arrived(step: Step, depth: u32) -> bool {
         Step::In => true,
         Step::Over => now <= depth,
         Step::Out => now < depth,
+        // Never under way: a replay starts over for them
+        Step::Back | Step::Reverse => false,
     }
 }
 

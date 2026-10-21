@@ -85,19 +85,38 @@ pub fn in_loop<T>(run: impl FnOnce() -> T) -> T {
 /// Starts an op and reports its result to PHP. A fatal error while resuming makes the worker
 /// unusable. 0 if no event loop is running, e.g. at script startup or while the interpreter is
 /// torn down; spawn_local would abort the process there.
-pub fn spawn(future: impl Future<Output = OpResult> + 'static) -> u64 {
-    spawn_with(future, true)
+/// `kind` and `detail` say what the op is (sleep, fetch GET https://…): the journal records them with the
+/// result, and a replay checks them against what it recorded.
+pub fn spawn(
+    kind: &'static str,
+    detail: String,
+    future: impl Future<Output = OpResult> + 'static,
+) -> u64 {
+    spawn_with(kind, detail, future, true)
 }
 
 /// Like spawn, but tenma_op_cancel does not cancel the op: it runs to completion and keeps a script
 /// alive until then. For ops that cannot be interrupted cleanly (file system on background threads).
-pub fn spawn_uncancellable(future: impl Future<Output = OpResult> + 'static) -> u64 {
-    spawn_with(future, false)
+pub fn spawn_uncancellable(
+    kind: &'static str,
+    detail: String,
+    future: impl Future<Output = OpResult> + 'static,
+) -> u64 {
+    spawn_with(kind, detail, future, false)
 }
 
-fn spawn_with(future: impl Future<Output = OpResult> + 'static, abortable: bool) -> u64 {
+fn spawn_with(
+    kind: &'static str,
+    detail: String,
+    future: impl Future<Output = OpResult> + 'static,
+    abortable: bool,
+) -> u64 {
     if !IN_LOOP.get() {
         return 0;
+    }
+    // A replay answers from the journal instead of running the op
+    if let Some(op) = crate::replay::intercept(kind, &detail) {
+        return op;
     }
     let op = php::next_id();
     // The task owns the guard from the start: even a task aborted before it ever ran cleans up
@@ -106,6 +125,7 @@ fn spawn_with(future: impl Future<Output = OpResult> + 'static, abortable: bool)
     let task = tokio::task::spawn_local(async move {
         let _finished = finished;
         let result = future.await;
+        crate::journal::record_op(op, kind, &detail, &result);
         // After a fatal error the interpreter is unusable until the worker has restarted
         if !crate::broken() && php::complete(op, result).is_err() {
             crate::interpreter_broken();
@@ -117,7 +137,7 @@ fn spawn_with(future: impl Future<Output = OpResult> + 'static, abortable: bool)
 
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_sleep(milliseconds: i64) -> u64 {
-    spawn(async move {
+    spawn("sleep", format!("{milliseconds} ms"), async move {
         tokio::time::sleep(Duration::from_millis(milliseconds.max(0) as u64)).await;
         OpResult::Null
     })
@@ -162,11 +182,14 @@ extern "C" fn tenma_rs_fetch(
     let url = text(url, url_len);
     let headers = text(headers, headers_len);
     let body = php::bytes(body, body_len).to_vec();
+    let detail = format!("{method} {url}");
     let request = {
         let client = client();
         // A typo must not turn into a GET that may well succeed
         let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
-            return spawn(async { OpResult::Error("invalid method".into()) });
+            return spawn("fetch", detail, async {
+                OpResult::Error("invalid method".into())
+            });
         };
         let mut request = client
             .request(method, &url)
@@ -179,7 +202,7 @@ extern "C" fn tenma_rs_fetch(
         }
         request
     };
-    spawn(async move {
+    spawn("fetch", detail, async move {
         let response = match request.send().await {
             Ok(response) => response,
             Err(error) => return OpResult::Error(fetch_error(&error, timeout_ms)),

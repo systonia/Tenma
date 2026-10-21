@@ -4226,3 +4226,188 @@ fn pdo_pgsql_runs_on_tokio_postgres() {
         "{output:?}"
     );
 }
+
+/// Records requests against tests/fixtures/journal.php into `directory` and returns the first journal.
+fn record_journal(port: u16, directory: &std::path::Path, extra: &[&str]) -> std::path::PathBuf {
+    let user = std::env::var("USER").unwrap();
+    let mut args = vec!["--record", directory.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    args.push("tests/fixtures/journal.php");
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args(&args)
+            .env("PORT", port.to_string())
+            .env("JOURNAL_MARKER", "recorded")
+            .env(
+                "DATABASE_URL",
+                std::env::var("DATABASE_URL")
+                    .unwrap_or(format!("postgres://{user}@localhost/postgres")),
+            )
+            .spawn()
+            .unwrap(),
+    );
+    let first = get(port, "/");
+    assert!(first.contains(r#""marker": "recorded""#), "{first}");
+    if get(port, "/data").starts_with("HTTP/1.1 200") {
+        assert!(get(port, "/data").contains(r#""n": 42"#));
+    }
+    assert!(get(port, "/boom").starts_with("HTTP/1.1 500"));
+    // SIGTERM: the worker closes its journal with the list of files
+    unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
+    let _ = server.0.wait();
+    let mut journals: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "trace"))
+        .collect();
+    journals.sort();
+    assert_eq!(journals.len(), 1, "{journals:?}");
+    journals.remove(0)
+}
+
+fn replay(journal: &std::path::Path, extra: &[&str]) -> (i32, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
+        .arg("replay")
+        .arg(journal)
+        .args(extra)
+        .env_remove("JOURNAL_MARKER")
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn replay_plays_a_recorded_journal_again() {
+    let port = 18_184;
+    let directory = scratch("journal");
+    let journal = record_journal(port, &directory, &[]);
+
+    // Time, random values, the timer, the fetch, the query and the environment repeat exactly
+    let (status, log) = replay(&journal, &["--check"]);
+    assert_eq!(status, 0, "{log}");
+    assert!(
+        log.contains("request(s) replayed, 0 response(s) differ"),
+        "{log}"
+    );
+    let (status, log) = replay(&journal, &["--until", "1", "--check"]);
+    assert_eq!(status, 0, "{log}");
+    assert!(log.contains("stopped after request 1"), "{log}");
+
+    // A handler that now waits longer diverges where it starts the other op
+    let changed = directory.join("changed.php");
+    std::fs::write(
+        &changed,
+        std::fs::read_to_string("tests/fixtures/journal.php")
+            .unwrap()
+            .replace("Task::delay(0.05)", "Task::delay(0.07)"),
+    )
+    .unwrap();
+    let data = std::fs::read(&journal).unwrap();
+    let length = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+    let header_length = u32::from_le_bytes(data[5..9].try_into().unwrap()) as usize;
+    let mut header: serde_json::Value =
+        serde_json::from_slice(&data[9..9 + header_length]).unwrap();
+    header["script"] = serde_json::Value::String(changed.to_str().unwrap().into());
+    let json = header.to_string();
+    let mut patched = vec![1u8];
+    patched.extend_from_slice(&((json.len() + 4) as u32).to_le_bytes());
+    patched.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    patched.extend_from_slice(json.as_bytes());
+    patched.extend_from_slice(&data[5 + length..]);
+    let diverging = directory.join("changed.trace");
+    std::fs::write(&diverging, patched).unwrap();
+    let (status, log) = replay(&diverging, &["--check"]);
+    assert_eq!(status, 1, "{log}");
+    assert!(
+        log.contains("diverged: the journal has op")
+            && log.contains("sleep 50 ms")
+            && log.contains("sleep 70 ms"),
+        "{log}"
+    );
+    assert!(
+        log.contains("file(s) differ from the recording") || log.contains("diverged"),
+        "{log}"
+    );
+}
+
+#[test]
+fn record_on_error_keeps_only_failed_lives() {
+    let port = 18_185;
+    let directory = scratch("journal-error");
+    // The one life answers a 500 (/boom): its journal stays
+    let journal = record_journal(port, &directory, &["--record-on", "error"]);
+    assert!(journal.exists());
+
+    // A life without any failure leaves nothing behind
+    let clean = scratch("journal-clean");
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([
+                "--record",
+                clean.to_str().unwrap(),
+                "--record-on",
+                "error",
+                "tests/fixtures/hello.php",
+            ])
+            .env("PORT", (port + 1).to_string())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(get(port + 1, "/").starts_with("HTTP/1.1 200"));
+    unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
+    let _ = server.0.wait();
+    assert_eq!(std::fs::read_dir(&clean).unwrap().count(), 0);
+}
+
+#[test]
+fn replay_steps_back_in_the_debugger() {
+    let port = 18_186;
+    let debugger = 18_187;
+    let directory = scratch("journal-back");
+    let journal = record_journal(port, &directory, &[]);
+    let _replay = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args([&format!("--inspect-wait={debugger}"), "replay"])
+            .arg(&journal)
+            .env_remove("JOURNAL_MARKER")
+            .spawn()
+            .unwrap(),
+    );
+    let mut dap = Dap::connect(debugger);
+    let capabilities = dap.request("initialize", serde_json::json!({"adapterID": "tenma"}));
+    assert_eq!(capabilities["supportsStepBack"], serde_json::json!(true));
+    dap.expect("event", "initialized");
+    // The first request's handler: Task::delay on line 20, the fetch on line 21
+    let script = std::path::Path::new("tests/fixtures/journal.php");
+    dap.break_at(script, &[21]);
+    dap.request("configurationDone", serde_json::json!({}));
+    let stop = dap.stopped();
+    assert_eq!(
+        (stop.line, &stop.event["reason"]),
+        (21, &serde_json::json!("breakpoint"))
+    );
+    dap.command("next");
+    let stop = dap.stopped();
+    assert_eq!(
+        (stop.line, &stop.event["reason"]),
+        (22, &serde_json::json!("step"))
+    );
+    // Back: the replay starts over and stops at the statement before, line 21 again
+    dap.command("stepBack");
+    let stop = dap.stopped();
+    assert_eq!(
+        (stop.line, &stop.event["reason"]),
+        (21, &serde_json::json!("step"))
+    );
+    // And on from there as if nothing happened
+    dap.command("next");
+    assert_eq!(dap.stopped().line, 22);
+    // reverseContinue goes back to the last stop before this one: line 21
+    dap.command("reverseContinue");
+    assert_eq!(dap.stopped().line, 21);
+    dap.command("continue");
+}

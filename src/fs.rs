@@ -148,7 +148,8 @@ extern "C" fn tenma_rs_fs(
         path(bytes(second, second_len)),
     );
     let data = bytes(data, data_len).to_vec();
-    ops::spawn_uncancellable(async move {
+    let detail = format!("{op} {}", target.display());
+    ops::spawn_uncancellable("fs", detail, async move {
         let label = if second.as_os_str().is_empty() {
             target.display().to_string()
         } else {

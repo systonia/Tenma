@@ -1520,6 +1520,7 @@ dependencies = [
  "percent-encoding",
  "redis",
  "reqwest",
+ "ring",
  "rustls",
  "serde_json",
  "tokio",

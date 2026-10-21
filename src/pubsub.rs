@@ -124,7 +124,7 @@ fn receive(id: u64) -> u64 {
     }) else {
         return 0;
     };
-    ops::spawn(async move {
+    ops::spawn("pubsub", format!("receive {id}"), async move {
         let Some(receiver) = slot.borrow_mut().take() else {
             return OpResult::Error("this subscription is already receiving".into());
         };

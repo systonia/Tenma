@@ -117,6 +117,11 @@ pub fn next_id() -> u64 {
     NEXT_ID.replace(NEXT_ID.get() + 1)
 }
 
+/// A replay gives requests and ops the IDs the journal recorded.
+pub fn set_next_id(id: u64) {
+    NEXT_ID.set(id);
+}
+
 /// Called from PHP via `tenma_respond`: passes the response to the waiting request.
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_respond(rid: u64, raw: *mut RawResponse) {
@@ -139,6 +144,25 @@ pub enum Reply {
 
 /// Gives a waiting request its response. False if it is not (or no longer) waiting.
 pub fn reply(rid: u64, reply: Reply) -> bool {
+    if crate::journal::recording() {
+        crate::journal::record_response(
+            rid,
+            match &reply {
+                Reply::Full(response) => crate::journal::Reply::Full {
+                    status: response.status,
+                    headers: response.headers.clone(),
+                    body: response.body.clone(),
+                },
+                Reply::Stream {
+                    status, headers, ..
+                } => crate::journal::Reply::Stream {
+                    status: *status,
+                    headers: headers.clone(),
+                },
+                Reply::Upgrade(_) => crate::journal::Reply::Upgrade,
+            },
+        );
+    }
     WAITING
         .with_borrow_mut(|waiting| waiting.remove(&rid))
         .is_some_and(|sender| sender.send(reply).is_ok())
@@ -249,6 +273,7 @@ pub enum Outcome {
 }
 
 /// Result of an op that goes to the waiting fiber.
+#[derive(Clone, Debug, PartialEq)]
 pub enum OpResult {
     Null,
     Text(Vec<u8>),
@@ -390,6 +415,9 @@ pub fn exit_status() -> Option<u8> {
 /// The event loop is running: PHP starts what the script scheduled at startup (timers, Task::run()).
 /// Err if PHP fails fatally while doing so.
 pub fn started() -> Result<(), ()> {
+    if crate::journal::recording() {
+        crate::journal::record(crate::journal::Entry::Started);
+    }
     if unsafe { tenma_started() } < 0 {
         Err(())
     } else {
@@ -477,6 +505,9 @@ pub fn gone(rid: u64) {
     if crate::broken() || !crate::ops::looping() {
         return;
     }
+    if crate::journal::recording() {
+        crate::journal::record(crate::journal::Entry::Gone { rid });
+    }
     if unsafe { tenma_request_gone(rid) } < 0 {
         crate::interpreter_broken();
     }
@@ -509,6 +540,26 @@ pub fn handle(handler: u32, request: &Request) -> Outcome {
         protocol: Str::of(request.protocol),
     };
     let rid = next_id();
+    if crate::journal::recording() {
+        crate::journal::record_request(
+            rid,
+            crate::journal::RawRequest {
+                handler,
+                method: request.method.to_vec(),
+                uri: request.uri.to_vec(),
+                headers: request
+                    .headers
+                    .iter()
+                    .map(|(name, value)| (name.to_vec(), value.to_vec()))
+                    .collect(),
+                body: request.body.to_vec(),
+                remote: request.remote.to_string(),
+                local: request.local.to_string(),
+                https: request.https,
+                protocol: request.protocol.to_vec(),
+            },
+        );
+    }
     let (sender, receiver) = oneshot::channel();
     WAITING.with_borrow_mut(|waiting| waiting.insert(rid, sender));
     let code = unsafe { tenma_handle(handler, rid, &raw) };

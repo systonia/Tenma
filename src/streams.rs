@@ -192,15 +192,17 @@ extern "C" fn tenma_rs_stream_write(rid: u64, chunk: *const u8, len: usize) -> i
     };
     match sender.try_send(Bytes::copy_from_slice(bytes(chunk, len))) {
         Ok(()) => 0,
-        Err(mpsc::error::TrySendError::Full(chunk)) => match ops::spawn(async move {
-            match sender.send(chunk).await {
-                Ok(()) => OpResult::Null,
-                Err(_) => OpResult::Error("connection closed".into()),
+        Err(mpsc::error::TrySendError::Full(chunk)) => {
+            match ops::spawn("stream.write", rid.to_string(), async move {
+                match sender.send(chunk).await {
+                    Ok(()) => OpResult::Null,
+                    Err(_) => OpResult::Error("connection closed".into()),
+                }
+            }) {
+                0 => -1,
+                op => op as i64,
             }
-        }) {
-            0 => -1,
-            op => op as i64,
-        },
+        }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             STREAMS.with_borrow_mut(|streams| streams.remove(&rid));
             -1
@@ -260,15 +262,17 @@ extern "C" fn tenma_rs_ws_send(rid: u64, text: *const u8, len: usize) -> i64 {
     };
     match sender.try_send(message) {
         Ok(()) => 0,
-        Err(mpsc::error::TrySendError::Full(message)) => match ops::spawn(async move {
-            match sender.send(message).await {
-                Ok(()) => OpResult::Null,
-                Err(_) => OpResult::Error("connection closed".into()),
+        Err(mpsc::error::TrySendError::Full(message)) => {
+            match ops::spawn("ws.send", rid.to_string(), async move {
+                match sender.send(message).await {
+                    Ok(()) => OpResult::Null,
+                    Err(_) => OpResult::Error("connection closed".into()),
+                }
+            }) {
+                0 => -1,
+                op => op as i64,
             }
-        }) {
-            0 => -1,
-            op => op as i64,
-        },
+        }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             SOCKETS.with_borrow_mut(|sockets| sockets.remove(&rid));
             -1
@@ -286,7 +290,7 @@ extern "C" fn tenma_rs_ws_receive(rid: u64) -> u64 {
     }) else {
         return 0;
     };
-    ops::spawn(async move {
+    ops::spawn("ws.receive", rid.to_string(), async move {
         let Some(receiver) = incoming.borrow_mut().take() else {
             return OpResult::Error("receive() is already running on this WebSocket".into());
         };

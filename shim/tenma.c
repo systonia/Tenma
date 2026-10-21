@@ -2083,6 +2083,99 @@ static void register_pdo_driver(void) {
     php_pdo_register_driver(&tenma_pg_driver);
 }
 
+/* ---------------------------------------------------------------------------------------------------
+ * The journal (src/journal.rs): PHP functions whose results come from the outside world (the clock,
+ * randomness, the process) are wrapped. Recording writes every result into the journal, a replay
+ * returns the recorded one instead of calling the function. Functions that block the worker are
+ * noted, so a replay can say why it cannot be exact.
+ * ------------------------------------------------------------------------------------------------- */
+
+#include <ext/standard/php_var.h>
+
+extern void tenma_rs_journal_value(const char *name, size_t name_len, const char *value, size_t len);
+extern int tenma_rs_journal_take(const char *name, size_t name_len, char **value, size_t *len);
+extern void tenma_rs_journal_free(char *value, size_t len);
+extern void tenma_rs_journal_note(const char *name, size_t name_len);
+
+/** 0: nothing. 1: recording. 2: replaying. Per worker thread, set from src/journal.rs and src/replay.rs. */
+static _Thread_local int journal_mode = 0;
+
+void tenma_set_journal_mode(int mode) {
+    journal_mode = mode;
+}
+
+static struct {
+    const char *name;
+    /** 1: the function blocks the worker; only noted, never replaced */
+    int blocking;
+    zif_handler original;
+} journaled[] = {
+    {"time", 0, NULL}, {"microtime", 0, NULL}, {"hrtime", 0, NULL}, {"date", 0, NULL}, {"gmdate", 0, NULL},
+    {"idate", 0, NULL}, {"localtime", 0, NULL}, {"getdate", 0, NULL}, {"mktime", 0, NULL}, {"gmmktime", 0, NULL},
+    {"strtotime", 0, NULL}, {"date_create", 0, NULL}, {"date_create_immutable", 0, NULL},
+    {"random_int", 0, NULL}, {"random_bytes", 0, NULL}, {"mt_rand", 0, NULL}, {"rand", 0, NULL},
+    {"lcg_value", 0, NULL}, {"uniqid", 0, NULL}, {"getmypid", 0, NULL}, {"gethostname", 0, NULL},
+    {"sys_getloadavg", 0, NULL},
+    {"sleep", 1, NULL}, {"usleep", 1, NULL}, {"time_nanosleep", 1, NULL}, {"curl_exec", 1, NULL},
+    {"curl_multi_exec", 1, NULL}, {"pg_connect", 1, NULL}, {"pg_query", 1, NULL},
+};
+
+static ZEND_NAMED_FUNCTION(journaled_function) {
+    zend_string *name = execute_data->func->common.function_name;
+    zif_handler original = NULL;
+    int blocking = 0;
+    for (size_t i = 0; i < sizeof(journaled) / sizeof(journaled[0]); i++) {
+        if (zend_string_equals_cstr(name, journaled[i].name, strlen(journaled[i].name))) {
+            original = journaled[i].original;
+            blocking = journaled[i].blocking;
+        }
+    }
+    if (original == NULL) {
+        zend_throw_error(NULL, "tenma: journaled function %s has no original", ZSTR_VAL(name));
+        return;
+    }
+    if (journal_mode != 0 && blocking) {
+        tenma_rs_journal_note(ZSTR_VAL(name), ZSTR_LEN(name));
+    }
+    if (journal_mode == 2 && !blocking) {
+        char *value;
+        size_t len;
+        if (tenma_rs_journal_take(ZSTR_VAL(name), ZSTR_LEN(name), &value, &len)) {
+            const unsigned char *p = (const unsigned char *) value;
+            php_unserialize_data_t var_hash;
+            PHP_VAR_UNSERIALIZE_INIT(var_hash);
+            int ok = php_var_unserialize(return_value, &p, p + len, &var_hash);
+            PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+            tenma_rs_journal_free(value, len);
+            if (ok) {
+                return;
+            }
+            zval_ptr_dtor(return_value);
+            ZVAL_UNDEF(return_value);
+        }
+    }
+    original(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    if (journal_mode == 1 && !blocking && EG(exception) == NULL) {
+        smart_str buffer = {0};
+        php_serialize_data_t data;
+        PHP_VAR_SERIALIZE_INIT(data);
+        php_var_serialize(&buffer, return_value, &data);
+        PHP_VAR_SERIALIZE_DESTROY(data);
+        tenma_rs_journal_value(ZSTR_VAL(name), ZSTR_LEN(name), buffer.s != NULL ? ZSTR_VAL(buffer.s) : "", buffer.s != NULL ? ZSTR_LEN(buffer.s) : 0);
+        smart_str_free(&buffer);
+    }
+}
+
+static void wrap_journaled(void) {
+    for (size_t i = 0; i < sizeof(journaled) / sizeof(journaled[0]); i++) {
+        zend_function *function = zend_hash_str_find_ptr(CG(function_table), journaled[i].name, strlen(journaled[i].name));
+        if (function != NULL && function->type == ZEND_INTERNAL_FUNCTION) {
+            journaled[i].original = function->internal_function.handler;
+            function->internal_function.handler = journaled_function;
+        }
+    }
+}
+
 int tenma_start(void) {
     // Like console.log, echo reaches the console at once, even when stdout is a pipe
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -2105,6 +2198,7 @@ int tenma_start(void) {
     register_async_transports();
     wrap_stream_select();
     register_pdo_driver();
+    wrap_journaled();
     return 0;
 }
 

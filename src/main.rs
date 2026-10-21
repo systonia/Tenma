@@ -12,11 +12,13 @@ mod dev;
 mod files;
 mod fs;
 mod inspect;
+mod journal;
 mod net;
 mod ops;
 mod pdo;
 mod php;
 mod pubsub;
+mod replay;
 mod stdlib;
 mod streams;
 mod tls;
@@ -43,7 +45,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--record DIR [--record-on error] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N] [--check] [--inspect]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -89,6 +91,10 @@ struct Options {
     /// --inspect-wait (`Some(false)`) and --inspect-brk (`Some(true)`): wait for the debugger, and
     /// whether the script then stops at its first statement unless the editor decides.
     inspect_wait: Option<bool>,
+    /// --record: every worker writes its journal there.
+    record: Option<&'static journal::Settings>,
+    /// `tenma replay`: the one worker plays this instead of serving.
+    replay: Option<&'static replay::Plan>,
 }
 
 /// Why a worker's event loop ends.
@@ -117,6 +123,7 @@ thread_local! {
 pub fn interpreter_broken() {
     eprintln!("tenma: fatal PHP error, restarting worker");
     BROKEN.set(true);
+    journal::record_fatal();
     // Their fibers are gone with the interpreter: pending requests get their 500 and streams end
     // now, not after the drain
     php::forget_waiting();
@@ -126,6 +133,11 @@ pub fn interpreter_broken() {
 
 pub fn broken() -> bool {
     BROKEN.get()
+}
+
+/// The worker's event loop should end and its interpreter start over: a replay stepping back.
+pub fn request_restart() {
+    RESTART.with(|restart| restart.notify_one());
 }
 
 fn main() -> ExitCode {
@@ -160,6 +172,10 @@ fn main() -> ExitCode {
     if let Err(message) = php::start() {
         eprintln!("tenma: {message}");
         return ExitCode::FAILURE;
+    }
+    // Before the editor connects: its initialize asks whether stepping back works
+    if options.inspect.is_some() && argv.first().is_some_and(|first| first == "replay") {
+        inspect::replaying();
     }
     if let Some(address) = options.inspect
         && let Err(message) = inspect::listen(address, options.inspect_wait)
@@ -271,12 +287,15 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         drain: DRAIN,
         inspect: None,
         inspect_wait: None,
+        record: None,
+        replay: None,
     };
     let mut argv = Vec::new();
     let mut pool = None;
     let mut certificate = None;
     let mut key = None;
     let mut tls_ports = Vec::new();
+    let mut record: Option<journal::Settings> = None;
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
@@ -349,6 +368,26 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
             }
             "--server-name" => php::set_server_name(&value("--server-name")?)?,
             "--pubsub" => pubsub::use_redis(&value("--pubsub")?)?,
+            "--record" => {
+                let directory = value("--record")?;
+                record.get_or_insert_with(Default::default).directory = directory.into();
+            }
+            "--record-on" => match value("--record-on")?.as_str() {
+                "error" => record.get_or_insert_with(Default::default).only_on_error = true,
+                "always" => record.get_or_insert_with(Default::default).only_on_error = false,
+                other => return Err(format!("--record-on {other}: error or always")),
+            },
+            "--record-max-body" => {
+                record.get_or_insert_with(Default::default).max_body =
+                    parse_size(&value("--record-max-body")?)?;
+            }
+            "--record-redact" => {
+                record.get_or_insert_with(Default::default).redact = value("--record-redact")?
+                    .split(',')
+                    .map(|name| name.trim().to_ascii_lowercase())
+                    .filter(|name| !name.is_empty())
+                    .collect();
+            }
             "--pdo-pgsql" => match value("--pdo-pgsql")?.as_str() {
                 "native" => php::pdo_native(),
                 "tenma" => {}
@@ -402,6 +441,14 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         pool.unwrap_or((20 / options.workers).clamp(2, 10)),
         std::sync::atomic::Ordering::Relaxed,
     );
+    if let Some(settings) = record {
+        if settings.directory.as_os_str().is_empty() {
+            return Err(
+                "--record-on, --record-max-body and --record-redact need --record DIR".into(),
+            );
+        }
+        options.record = Some(Box::leak(Box::new(settings)));
+    }
     Ok((argv, options))
 }
 
@@ -429,6 +476,9 @@ fn parse_size(text: &str) -> Result<usize, String> {
 fn run(argv: &[String], options: Options) -> u8 {
     if argv[0] == "build" {
         return build(argv.get(1).map_or(dev::FILE, String::as_str), options);
+    }
+    if argv[0] == "replay" {
+        return replay_journal(&argv[1..], options);
     }
     let mut changes = if options.watch {
         match watch::start() {
@@ -560,6 +610,42 @@ fn run(argv: &[String], options: Options) -> u8 {
     dev::exit_status().or(php::exit_status()).unwrap_or(0)
 }
 
+/// `tenma replay FILE`: one worker plays the journal with the recorded script, environment and
+/// directory; no port opens.
+fn replay_journal(args: &[String], mut options: Options) -> u8 {
+    let plan = match replay::plan(args) {
+        Ok(plan) => plan,
+        Err(message) => {
+            eprintln!("tenma: {message}");
+            return 2;
+        }
+    };
+    let (argv, env, cwd) = match replay::recorded_run(&plan) {
+        Ok(run) => run,
+        Err(message) => {
+            eprintln!("tenma: {message}");
+            return 2;
+        }
+    };
+    // The script sees what it saw then: before any worker thread, so setting the environment is safe
+    for (key, value) in env {
+        unsafe { std::env::set_var(key, value) };
+    }
+    if !cwd.is_empty() && std::env::set_current_dir(&cwd).is_err() {
+        eprintln!("tenma: cannot change to the recorded directory {cwd}");
+    }
+    options.replay = Some(Box::leak(Box::new(plan)));
+    options.workers = 1;
+    let (worker, ready) = spawn_worker(&argv, options, Some(BTreeSet::new()), false);
+    if let Err(status) = ready {
+        stop_workers(vec![worker]);
+        return status;
+    }
+    let status = worker.thread.join().unwrap_or(1);
+    inspect::release();
+    status
+}
+
 /// `tenma build`: runs the hooks of tenma.dev.php once, in order; 1 if one fails.
 fn build(path: &str, options: Options) -> u8 {
     let Ok(path) = std::path::Path::new(path).canonicalize() else {
@@ -679,9 +765,21 @@ fn worker(
     if dev {
         watch::dev_thread();
     }
+    static WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let index = WORKERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut first = true;
     let mut status = 0;
     loop {
+        if let Some(settings) = options.record
+            && !dev
+            && let Err(message) = journal::start(settings, index, journal::header(argv))
+        {
+            eprintln!("tenma: {message}");
+            if first {
+                let _ = ready.send(Err(1));
+            }
+            return 1;
+        }
         if let Err(message) = php::thread_start() {
             eprintln!("tenma: {message}");
             if !first {
@@ -698,6 +796,9 @@ fn worker(
         BROKEN.set(false);
         HANDLED.set(0);
         watch::forget();
+        if let Some(plan) = options.replay {
+            replay::prepare(plan);
+        }
         let loaded = load(argv, dev, options);
         // Also after a failure: the file with the syntax error is watched too
         watch::report();
@@ -718,7 +819,14 @@ fn worker(
                         restart_process();
                     }
                 }
-                if listeners.is_empty() {
+                if options.replay.is_some() {
+                    status = replay_run(options);
+                    if inspect::replay_again() {
+                        Stop::Restart
+                    } else {
+                        Stop::Closed
+                    }
+                } else if listeners.is_empty() {
                     // If the script ended with exit() or die(), tenma starts nothing it had scheduled
                     // With --watch, exit() in a hook ends tenma through dev::EXIT
                     let ended = if php::script_exited() {
@@ -775,6 +883,10 @@ fn worker(
                 }
             }
         };
+        if journal::recording() {
+            watch::report();
+            journal::finish(journal::loaded_files());
+        }
         php::thread_stop();
         first = false;
         match stop {
@@ -925,6 +1037,30 @@ fn run_until_idle(
     } else {
         php::exit_status().unwrap_or(status)
     })
+}
+
+/// A replay's event loop: the journal drives PHP until its end; with the debugger stepping back, the
+/// loop ends early and the worker starts over.
+fn replay_run(options: Options) -> u8 {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio does not start");
+    let restart = RESTART.with(Rc::clone);
+    let _ = futures_util::FutureExt::now_or_never(restart.notified());
+    let local = LocalSet::new();
+    let status = ops::in_loop(|| {
+        local.block_on(&runtime, async {
+            tokio::select! {
+                biased;
+                () = restart.notified() => 1,
+                status = replay::drive() => status,
+            }
+        })
+    });
+    drop(local);
+    runtime.shutdown_timeout(Duration::from_millis(100));
+    if options.replay.is_none() { 1 } else { status }
 }
 
 /// Loads the standard library and the script (or tenma.dev.php) into this thread's PHP interpreter.

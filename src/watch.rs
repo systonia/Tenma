@@ -63,6 +63,7 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_included(path: *const u8, len: usize) {
+    crate::journal::loaded(crate::php::bytes(path, len));
     if let Some(watcher) = WATCHER.get() {
         let path = Path::new(std::ffi::OsStr::from_bytes(crate::php::bytes(path, len)));
         let _ = watcher.send(Message::Loaded(

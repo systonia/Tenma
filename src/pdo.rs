@@ -351,6 +351,7 @@ extern "C" fn tenma_rs_pdo(
     let op = text(op, op_len);
     let sql = text(sql, sql_len);
     let params = params(bytes(packed, params_len));
+    let detail = format!("{op} {id} {sql}");
     let future = run(op, id, sql, params);
     if blocking == 0 && ops::looping() {
         let (sender, receiver) = oneshot::channel::<Result<Vec<u8>, String>>();
@@ -359,7 +360,7 @@ extern "C" fn tenma_rs_pdo(
                 let _ = sender.send(future.await.map_err(|error| sqlstate(&error)));
             }))
             .expect("PDO thread gone");
-        return ops::spawn(async move {
+        return ops::spawn("pdo", detail, async move {
             match receiver.await {
                 Ok(Ok(buffer)) => OpResult::Text(buffer),
                 Ok(Err(error)) => OpResult::Error(error),

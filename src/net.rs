@@ -61,7 +61,11 @@ async fn wait(fd: RawFd, events: i32, timeout_ms: i64) -> OpResult {
 /// One descriptor; the op's value is "ready" or "timeout".
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_wait_fd(fd: i32, events: i32, timeout_ms: i64) -> u64 {
-    ops::spawn(wait(fd, events, timeout_ms))
+    ops::spawn(
+        "net",
+        format!("wait {fd} {events}"),
+        wait(fd, events, timeout_ms),
+    )
 }
 
 /// stream_select(): several descriptors with their events, `count` of each. The op's value has one
@@ -76,7 +80,7 @@ extern "C" fn tenma_rs_select(
 ) -> u64 {
     let fds = unsafe { std::slice::from_raw_parts(fds, count) }.to_vec();
     let events = unsafe { std::slice::from_raw_parts(events, count) }.to_vec();
-    ops::spawn(async move {
+    ops::spawn("net", format!("select {fds:?}"), async move {
         let mut set = JoinSet::new();
         for (index, (&fd, &events)) in fds.iter().zip(&events).enumerate() {
             let interest = interest(events);

@@ -642,7 +642,8 @@ extern "C" fn tenma_rs_db(
     } else {
         ops::spawn
     };
-    spawn(async move {
+    let detail = format!("{op} {target} {sql}");
+    spawn("db", detail, async move {
         let result = match op.split_once('.') {
             Some(("pg", mode)) => postgres(
                 mode.to_owned(),

@@ -94,18 +94,18 @@ extern "C" fn tenma_rs_dev(op: *const u8, op_len: usize, arg: *const u8, arg_len
             let roots: Vec<(PathBuf, bool)> =
                 serde_json::from_value(value["roots"].clone()).unwrap_or_default();
             let directory = PathBuf::from(string(&value["directory"]));
-            ops::spawn(async move {
+            ops::spawn("dev", "watch".into(), async move {
                 crate::watch::roots(roots, directory).await;
                 OpResult::Null
             })
         }
         b"settled" => {
             settled();
-            ops::spawn(async { OpResult::Null })
+            ops::spawn("dev", "settled".into(), async { OpResult::Null })
         }
         // Changed paths below the hooks' directories and their modification times, all separated
         // by null bytes
-        b"next" => ops::spawn(async {
+        b"next" => ops::spawn("dev", "next".into(), async {
             match crate::watch::hook_changes().await {
                 Some(paths) => {
                     let mut fields = Vec::new();
@@ -131,7 +131,8 @@ extern "C" fn tenma_rs_dev(op: *const u8, op_len: usize, arg: *const u8, arg_len
                     .unwrap_or_default(),
                 directory: string(&value["directory"]).into(),
             };
-            ops::spawn(run(command))
+            let detail = command.name.clone();
+            ops::spawn("dev", detail, run(command))
         }
         _ => 0,
     }
