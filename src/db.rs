@@ -114,7 +114,7 @@ pub fn clear() {
 
 /// A parameter as text; the server decides the type, as with PDO.
 #[derive(Debug)]
-struct TextParam(Option<String>);
+pub struct TextParam(pub Option<String>);
 
 impl ToSql for TextParam {
     fn to_sql(&self, _: &Type, out: &mut BytesMut) -> Result<IsNull, Failure> {
@@ -670,7 +670,7 @@ extern "C" fn tenma_rs_db_abandon(rid: u64) {
 }
 
 /// The error message with all causes: otherwise tokio-postgres only says "db error".
-fn describe(error: &(dyn Error + 'static)) -> String {
+pub fn describe(error: &(dyn Error + 'static)) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {

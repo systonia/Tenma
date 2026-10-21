@@ -14,6 +14,7 @@ mod fs;
 mod inspect;
 mod net;
 mod ops;
+mod pdo;
 mod php;
 mod pubsub;
 mod stdlib;
@@ -42,7 +43,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -348,6 +349,11 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
             }
             "--server-name" => php::set_server_name(&value("--server-name")?)?,
             "--pubsub" => pubsub::use_redis(&value("--pubsub")?)?,
+            "--pdo-pgsql" => match value("--pdo-pgsql")?.as_str() {
+                "native" => php::pdo_native(),
+                "tenma" => {}
+                other => return Err(format!("--pdo-pgsql {other}: native or tenma")),
+            },
             "--tls-cert" => certificate = Some(value("--tls-cert")?),
             "--tls-key" => key = Some(value("--tls-key")?),
             "--tls-port" => {

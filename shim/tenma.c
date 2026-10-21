@@ -1206,6 +1206,883 @@ static void wrap_stream_select(void) {
     }
 }
 
+/* ---------------------------------------------------------------------------------------------------
+ * The PDO driver "pgsql" of tenma, on tokio-postgres (src/pdo.rs) instead of libpq: inside a fiber a
+ * query suspends only the fiber. It takes the place of ext/pdo_pgsql unless --pdo-pgsql native is given.
+ * Values arrive as the text Postgres prints, typed by OID as pdo_pgsql types them. Not covered: large
+ * objects, the Pdo\Pgsql class with its pgsql-specific methods, COPY and unbuffered fetching.
+ * ------------------------------------------------------------------------------------------------- */
+
+#include <ext/pdo/php_pdo.h>
+#include <ext/pdo/php_pdo_driver.h>
+#include <main/php_memory_streams.h>
+
+struct pdo_result {
+    uint8_t *ptr;
+    size_t len;
+    int error;
+};
+
+extern uint64_t tenma_rs_pdo(const char *op, size_t op_len, uint64_t id, const char *sql, size_t sql_len,
+    const char *params, size_t params_len, int blocking, struct pdo_result *out);
+extern void tenma_rs_pdo_free(uint8_t *ptr, size_t len);
+extern void tenma_rs_pdo_close(uint64_t id);
+extern const pdo_driver_t pdo_pgsql_driver;
+extern int pdo_pgsql_scanner(pdo_scanner_t *s);
+static zend_string *exception_message(zend_object *exception);
+
+static int pdo_native = 0;
+
+/** --pdo-pgsql native: PDO keeps libpq. */
+void tenma_set_pdo_native(void) {
+    pdo_native = 1;
+}
+
+#define PG_BOOLOID 16
+#define PG_BYTEAOID 17
+#define PG_INT8OID 20
+#define PG_INT2OID 21
+#define PG_INT4OID 23
+#define PG_TEXTOID 25
+#define PG_OIDOID 26
+#define PG_FLOAT4OID 700
+#define PG_FLOAT8OID 701
+#define PG_VARCHAROID 1043
+#define PG_DATEOID 1082
+#define PG_TIMESTAMPOID 1114
+#define PG_NULL 0xFFFFFFFFu
+
+typedef struct {
+    uint64_t id;
+    int emulate_prepares;
+    int errcode;
+    char *errmsg;
+    int persistent;
+} tenma_pg_handle;
+
+typedef struct {
+    tenma_pg_handle *H;
+    zend_string *query;
+    /** The result as src/pdo.rs packs it; the arrays below point into it. */
+    zend_string *buffer;
+    uint32_t columns;
+    uint64_t rows;
+    uint64_t affected;
+    /** Rows fetched so far; the current row is current - 1. */
+    uint64_t current;
+    const char **names;
+    uint32_t *name_lengths;
+    uint32_t *oids;
+    const uint8_t **row_starts;
+    /** Bound parameters by position, strings or null, as the server will see them. */
+    zval *params;
+    uint32_t param_count;
+} tenma_pg_stmt;
+
+static const struct pdo_dbh_methods tenma_pg_methods;
+static const struct pdo_stmt_methods tenma_pg_stmt_methods;
+
+/** Records an error "SQLSTATE|message" (as src/pdo.rs reports it) on the handle or the statement. */
+static void pg_record_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *text, size_t len) {
+    tenma_pg_handle *H = dbh->driver_data;
+    pdo_error_type *code = stmt != NULL ? &stmt->error_code : &dbh->error_code;
+    const char *bar = memchr(text, '|', len);
+    if (bar != NULL && bar - text == 5) {
+        memcpy(*code, text, 5);
+        (*code)[5] = '\0';
+        text = bar + 1;
+        len -= 6;
+    } else {
+        strcpy(*code, "HY000");
+    }
+    if (H->errmsg != NULL) {
+        pefree(H->errmsg, H->persistent);
+    }
+    H->errmsg = pemalloc(len + 1, H->persistent);
+    memcpy(H->errmsg, text, len);
+    H->errmsg[len] = '\0';
+    // What pdo_pgsql puts there: libpq's PGRES_FATAL_ERROR
+    H->errcode = 7;
+    if (dbh->methods == NULL) {
+        pdo_throw_exception(H->errcode, H->errmsg, code);
+    }
+}
+
+/**
+ * Runs an op of src/pdo.rs: "connect", "query" or "exec". 1 with the result in *buffer, 0 after an
+ * error, recorded on the handle or statement; a cancellation of the fiber stays pending as an exception.
+ */
+static int pg_call(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *op, const char *sql, size_t sql_len,
+    const char *params, size_t params_len, zend_string **buffer) {
+    tenma_pg_handle *H = dbh->driver_data;
+    *buffer = NULL;
+    struct pdo_result out = {NULL, 0, 0};
+    uint64_t id = tenma_rs_pdo(op, strlen(op), H->id, sql, sql_len, params, params_len, EG(active_fiber) == NULL, &out);
+    if (id != 0) {
+        zval result;
+        if (!await_op(id, &result)) {
+            // The op failed: await() threw a RuntimeException with the server's message. Anything
+            // else (Cancelled) is not the database's business and stays pending
+            if (EG(exception) != NULL && EG(exception)->ce == spl_ce_RuntimeException) {
+                zend_string *borrowed = exception_message(EG(exception));
+                zend_string *message = borrowed != NULL ? zend_string_copy(borrowed) : ZSTR_EMPTY_ALLOC();
+                zend_clear_exception();
+                pg_record_error(dbh, stmt, ZSTR_VAL(message), ZSTR_LEN(message));
+                zend_string_release(message);
+            }
+            return 0;
+        }
+        if (Z_TYPE(result) != IS_STRING) {
+            zval_ptr_dtor(&result);
+            pg_record_error(dbh, stmt, "HY000|unexpected result", 23);
+            return 0;
+        }
+        *buffer = Z_STR(result);
+        return 1;
+    }
+    if (out.error) {
+        pg_record_error(dbh, stmt, (const char *) out.ptr, out.len);
+        tenma_rs_pdo_free(out.ptr, out.len);
+        return 0;
+    }
+    *buffer = zend_string_init((const char *) out.ptr, out.len, 0);
+    tenma_rs_pdo_free(out.ptr, out.len);
+    return 1;
+}
+
+static uint32_t read_u32(const uint8_t *p) {
+    return (uint32_t) p[0] | (uint32_t) p[1] << 8 | (uint32_t) p[2] << 16 | (uint32_t) p[3] << 24;
+}
+
+static uint64_t read_u64(const uint8_t *p) {
+    return (uint64_t) read_u32(p) | (uint64_t) read_u32(p + 4) << 32;
+}
+
+static void pg_free_result(tenma_pg_stmt *S) {
+    if (S->buffer != NULL) {
+        zend_string_release(S->buffer);
+        S->buffer = NULL;
+    }
+    efree(S->names);
+    efree(S->name_lengths);
+    efree(S->oids);
+    efree(S->row_starts);
+    S->names = NULL;
+    S->name_lengths = NULL;
+    S->oids = NULL;
+    S->row_starts = NULL;
+    S->columns = 0;
+    S->rows = 0;
+    S->affected = 0;
+    S->current = 0;
+}
+
+/** Takes a result buffer apart: columns, then where every row starts. 0 if it is malformed. */
+static int pg_take_result(tenma_pg_stmt *S, zend_string *buffer) {
+    pg_free_result(S);
+    S->buffer = buffer;
+    const uint8_t *p = (const uint8_t *) ZSTR_VAL(buffer);
+    const uint8_t *end = p + ZSTR_LEN(buffer);
+    if (end - p < 4) {
+        return 0;
+    }
+    S->columns = read_u32(p);
+    p += 4;
+    S->names = safe_emalloc(S->columns, sizeof(char *), 0);
+    S->name_lengths = safe_emalloc(S->columns, sizeof(uint32_t), 0);
+    S->oids = safe_emalloc(S->columns, sizeof(uint32_t), 0);
+    for (uint32_t i = 0; i < S->columns; i++) {
+        if (end - p < 4) {
+            return 0;
+        }
+        uint32_t len = read_u32(p);
+        p += 4;
+        if ((size_t) (end - p) < (size_t) len + 4) {
+            return 0;
+        }
+        S->names[i] = (const char *) p;
+        S->name_lengths[i] = len;
+        p += len;
+        S->oids[i] = read_u32(p);
+        p += 4;
+    }
+    if (end - p < 16) {
+        return 0;
+    }
+    S->rows = read_u64(p);
+    S->affected = read_u64(p + 8);
+    p += 16;
+    S->row_starts = safe_emalloc((size_t) S->rows, sizeof(uint8_t *), 0);
+    for (uint64_t row = 0; row < S->rows; row++) {
+        S->row_starts[row] = p;
+        for (uint32_t i = 0; i < S->columns; i++) {
+            if (end - p < 4) {
+                return 0;
+            }
+            uint32_t len = read_u32(p);
+            p += 4;
+            if (len != PG_NULL) {
+                if ((size_t) (end - p) < len) {
+                    return 0;
+                }
+                p += len;
+            }
+        }
+    }
+    return 1;
+}
+
+/** The value of a column in the current row; 0 for NULL. */
+static int pg_value(tenma_pg_stmt *S, uint32_t column, const char **value, size_t *len) {
+    const uint8_t *p = S->row_starts[S->current - 1];
+    for (uint32_t i = 0; i <= column; i++) {
+        uint32_t size = read_u32(p);
+        p += 4;
+        if (i == column) {
+            if (size == PG_NULL) {
+                return 0;
+            }
+            *value = (const char *) p;
+            *len = size;
+            return 1;
+        }
+        if (size != PG_NULL) {
+            p += size;
+        }
+    }
+    return 0;
+}
+
+static void pg_handle_closer(pdo_dbh_t *dbh) {
+    tenma_pg_handle *H = dbh->driver_data;
+    if (H == NULL) {
+        return;
+    }
+    if (H->id != 0) {
+        tenma_rs_pdo_close(H->id);
+    }
+    if (H->errmsg != NULL) {
+        pefree(H->errmsg, H->persistent);
+    }
+    pefree(H, H->persistent);
+    dbh->driver_data = NULL;
+}
+
+static bool pg_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t *stmt, zval *driver_options) {
+    tenma_pg_handle *H = dbh->driver_data;
+    tenma_pg_stmt *S = ecalloc(1, sizeof(tenma_pg_stmt));
+    S->H = H;
+    stmt->driver_data = S;
+    stmt->methods = &tenma_pg_stmt_methods;
+    int emulate = driver_options != NULL
+        ? pdo_attr_lval(driver_options, PDO_ATTR_EMULATE_PREPARES, H->emulate_prepares) == 1
+        : H->emulate_prepares;
+    if (emulate) {
+        stmt->supports_placeholders = PDO_PLACEHOLDER_NONE;
+    } else {
+        stmt->supports_placeholders = PDO_PLACEHOLDER_NAMED;
+        stmt->named_rewrite_template = "$%d";
+    }
+    zend_string *rewritten = NULL;
+    int result = pdo_parse_params(stmt, sql, &rewritten);
+    if (result == -1) {
+        strcpy(dbh->error_code, stmt->error_code);
+        return false;
+    }
+    S->query = result == 1 ? rewritten : zend_string_copy(sql);
+    return true;
+}
+
+static zend_long pg_handle_doer(pdo_dbh_t *dbh, const zend_string *sql) {
+    zend_string *buffer;
+    if (!pg_call(dbh, NULL, "exec", ZSTR_VAL(sql), ZSTR_LEN(sql), NULL, 0, &buffer)) {
+        return -1;
+    }
+    tenma_pg_stmt scratch = {0};
+    zend_long affected = pg_take_result(&scratch, buffer) ? (zend_long) scratch.affected : -1;
+    pg_free_result(&scratch);
+    return affected;
+}
+
+static zend_string *pg_handle_quoter(pdo_dbh_t *dbh, const zend_string *unquoted, enum pdo_param_type paramtype) {
+    smart_str quoted = {0};
+    if (paramtype == PDO_PARAM_LOB) {
+        // bytea as hex: '\x6869'
+        static const char hex[] = "0123456789abcdef";
+        smart_str_appendl(&quoted, "'\\x", 3);
+        for (size_t i = 0; i < ZSTR_LEN(unquoted); i++) {
+            unsigned char byte = (unsigned char) ZSTR_VAL(unquoted)[i];
+            smart_str_appendc(&quoted, hex[byte >> 4]);
+            smart_str_appendc(&quoted, hex[byte & 15]);
+        }
+        smart_str_appendc(&quoted, '\'');
+        smart_str_0(&quoted);
+        return quoted.s;
+    }
+    // ponytail: standard_conforming_strings is on since Postgres 9.1, so only the quote needs doubling;
+    // a server with it off would read backslashes as escapes
+    if (memchr(ZSTR_VAL(unquoted), '\0', ZSTR_LEN(unquoted)) != NULL) {
+        return NULL;
+    }
+    smart_str_appendc(&quoted, '\'');
+    for (size_t i = 0; i < ZSTR_LEN(unquoted); i++) {
+        char c = ZSTR_VAL(unquoted)[i];
+        if (c == '\'') {
+            smart_str_appendc(&quoted, '\'');
+        }
+        smart_str_appendc(&quoted, c);
+    }
+    smart_str_appendc(&quoted, '\'');
+    smart_str_0(&quoted);
+    return quoted.s;
+}
+
+static bool pg_handle_command(pdo_dbh_t *dbh, const char *command) {
+    zend_string *buffer;
+    if (!pg_call(dbh, NULL, "exec", command, strlen(command), NULL, 0, &buffer)) {
+        return false;
+    }
+    zend_string_release(buffer);
+    return true;
+}
+
+static bool pg_handle_begin(pdo_dbh_t *dbh) {
+    return pg_handle_command(dbh, "BEGIN");
+}
+
+static bool pg_handle_commit(pdo_dbh_t *dbh) {
+    return pg_handle_command(dbh, "COMMIT");
+}
+
+static bool pg_handle_rollback(pdo_dbh_t *dbh) {
+    return pg_handle_command(dbh, "ROLLBACK");
+}
+
+static bool pg_handle_set_attribute(pdo_dbh_t *dbh, zend_long attr, zval *value) {
+    tenma_pg_handle *H = dbh->driver_data;
+    switch (attr) {
+        case PDO_ATTR_EMULATE_PREPARES:
+            {
+                bool flag;
+                if (!pdo_get_bool_param(&flag, value)) {
+                    return false;
+                }
+                H->emulate_prepares = flag;
+                return true;
+            }
+        // Accepted for scripts written for pdo_pgsql; every statement is prepared and fully fetched here
+        case PDO_ATTR_DRIVER_SPECIFIC:
+        case PDO_ATTR_PREFETCH:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/** The first value of the first row of a one-column result, or NULL. */
+static zend_string *pg_single_value(pdo_dbh_t *dbh, const char *sql, const char *params, size_t params_len) {
+    zend_string *buffer;
+    if (!pg_call(dbh, NULL, "query", sql, strlen(sql), params, params_len, &buffer)) {
+        return NULL;
+    }
+    tenma_pg_stmt scratch = {0};
+    zend_string *value = NULL;
+    if (pg_take_result(&scratch, buffer) && scratch.rows > 0 && scratch.columns > 0) {
+        scratch.current = 1;
+        const char *text;
+        size_t len;
+        if (pg_value(&scratch, 0, &text, &len)) {
+            value = zend_string_init(text, len, 0);
+        }
+    }
+    pg_free_result(&scratch);
+    return value;
+}
+
+/** Parameters for src/pdo.rs: each as 4 bytes of length and its bytes, length 0xFFFFFFFF for NULL. */
+static void pg_pack_param(smart_str *out, const char *value, size_t len) {
+    uint32_t size = value == NULL ? PG_NULL : (uint32_t) len;
+    char head[4] = {(char) size, (char) (size >> 8), (char) (size >> 16), (char) (size >> 24)};
+    smart_str_appendl(out, head, 4);
+    if (value != NULL) {
+        smart_str_appendl(out, value, len);
+    }
+}
+
+static zend_string *pg_handle_last_id(pdo_dbh_t *dbh, const zend_string *name) {
+    if (name == NULL) {
+        return pg_single_value(dbh, "SELECT LASTVAL()", NULL, 0);
+    }
+    smart_str params = {0};
+    pg_pack_param(&params, ZSTR_VAL(name), ZSTR_LEN(name));
+    zend_string *id = pg_single_value(dbh, "SELECT CURRVAL($1)", ZSTR_VAL(params.s), ZSTR_LEN(params.s));
+    smart_str_free(&params);
+    return id;
+}
+
+static void pg_handle_fetch_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, zval *info) {
+    tenma_pg_handle *H = dbh->driver_data;
+    if (H->errcode) {
+        add_next_index_long(info, H->errcode);
+    } else {
+        add_next_index_null(info);
+    }
+    if (H->errmsg != NULL) {
+        add_next_index_string(info, H->errmsg);
+    }
+}
+
+static int pg_handle_get_attribute(pdo_dbh_t *dbh, zend_long attr, zval *value) {
+    tenma_pg_handle *H = dbh->driver_data;
+    switch (attr) {
+        case PDO_ATTR_EMULATE_PREPARES:
+            ZVAL_BOOL(value, H->emulate_prepares);
+            return 1;
+        case PDO_ATTR_DRIVER_SPECIFIC:
+            ZVAL_FALSE(value);
+            return 1;
+        case PDO_ATTR_CLIENT_VERSION:
+            ZVAL_STRING(value, "tenma");
+            return 1;
+        case PDO_ATTR_SERVER_VERSION: {
+            zend_string *version = pg_single_value(dbh, "SHOW server_version", NULL, 0);
+            if (version == NULL) {
+                return -1;
+            }
+            ZVAL_STR(value, version);
+            return 1;
+        }
+        case PDO_ATTR_CONNECTION_STATUS:
+            ZVAL_STRING(value, "Connection OK; waiting to send.");
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static const struct pdo_dbh_methods tenma_pg_methods = {
+    pg_handle_closer,
+    pg_handle_preparer,
+    pg_handle_doer,
+    pg_handle_quoter,
+    pg_handle_begin,
+    pg_handle_commit,
+    pg_handle_rollback,
+    pg_handle_set_attribute,
+    pg_handle_last_id,
+    pg_handle_fetch_error,
+    pg_handle_get_attribute,
+    NULL, /* check_liveness */
+    NULL, /* get_driver_methods */
+    NULL, /* persistent_shutdown */
+    NULL, /* in_transaction: PDO keeps track */
+    NULL, /* get_gc */
+    pdo_pgsql_scanner,
+};
+
+/* ---- statements ---- */
+
+static void pg_free_params(tenma_pg_stmt *S) {
+    if (S->params != NULL) {
+        for (uint32_t i = 0; i < S->param_count; i++) {
+            zval_ptr_dtor(&S->params[i]);
+        }
+        efree(S->params);
+        S->params = NULL;
+        S->param_count = 0;
+    }
+}
+
+static int pg_stmt_dtor(pdo_stmt_t *stmt) {
+    tenma_pg_stmt *S = stmt->driver_data;
+    if (S == NULL) {
+        return 1;
+    }
+    pg_free_result(S);
+    pg_free_params(S);
+    if (S->query != NULL) {
+        zend_string_release(S->query);
+    }
+    efree(S);
+    stmt->driver_data = NULL;
+    return 1;
+}
+
+static int pg_stmt_execute(pdo_stmt_t *stmt) {
+    tenma_pg_stmt *S = stmt->driver_data;
+    smart_str params = {0};
+    // bound_param_map holds every placeholder twice (by name and by position): the bound parameters count
+    uint32_t count = stmt->bound_params != NULL ? zend_hash_num_elements(stmt->bound_params) : 0;
+    for (uint32_t i = 0; i < count && i < S->param_count; i++) {
+        zval *param = &S->params[i];
+        if (Z_TYPE_P(param) == IS_STRING) {
+            pg_pack_param(&params, Z_STRVAL_P(param), Z_STRLEN_P(param));
+        } else {
+            pg_pack_param(&params, NULL, 0);
+        }
+    }
+    // With emulated prepares PDO has put the values into the query itself
+    zend_string *sql = stmt->supports_placeholders == PDO_PLACEHOLDER_NONE ? stmt->active_query_string : S->query;
+    zend_string *buffer;
+    int ok = pg_call(stmt->dbh, stmt, "query", ZSTR_VAL(sql), ZSTR_LEN(sql),
+        params.s != NULL ? ZSTR_VAL(params.s) : NULL, params.s != NULL ? ZSTR_LEN(params.s) : 0, &buffer);
+    smart_str_free(&params);
+    if (!ok) {
+        return 0;
+    }
+    if (!pg_take_result(S, buffer)) {
+        pg_free_result(S);
+        pg_record_error(stmt->dbh, stmt, "HY000|malformed result", 22);
+        return 0;
+    }
+    php_pdo_stmt_set_column_count(stmt, (int) S->columns);
+    stmt->row_count = (zend_long) (S->columns == 0 ? S->affected : S->rows);
+    return 1;
+}
+
+static int pg_stmt_fetch(pdo_stmt_t *stmt, enum pdo_fetch_orientation ori, zend_long offset) {
+    tenma_pg_stmt *S = stmt->driver_data;
+    if (S->buffer == NULL) {
+        return 0;
+    }
+    // Every row is in memory: scrolling costs nothing, so every orientation works
+    int64_t target;
+    switch (ori) {
+        case PDO_FETCH_ORI_NEXT:
+            target = (int64_t) S->current + 1;
+            break;
+        case PDO_FETCH_ORI_PRIOR:
+            target = (int64_t) S->current - 1;
+            break;
+        case PDO_FETCH_ORI_FIRST:
+            target = 1;
+            break;
+        case PDO_FETCH_ORI_LAST:
+            target = (int64_t) S->rows;
+            break;
+        case PDO_FETCH_ORI_ABS:
+            target = offset;
+            break;
+        case PDO_FETCH_ORI_REL:
+            target = (int64_t) S->current + offset;
+            break;
+        default:
+            return 0;
+    }
+    if (target < 1 || target > (int64_t) S->rows) {
+        return 0;
+    }
+    S->current = (uint64_t) target;
+    return 1;
+}
+
+static int pg_stmt_describe(pdo_stmt_t *stmt, int colno) {
+    tenma_pg_stmt *S = stmt->driver_data;
+    if (S->buffer == NULL || colno < 0 || (uint32_t) colno >= S->columns) {
+        return 0;
+    }
+    stmt->columns[colno].name = zend_string_init(S->names[colno], S->name_lengths[colno], 0);
+    // As pdo_pgsql reports a variable-length column: PQfsize and PQfmod give -1
+    stmt->columns[colno].maxlen = (size_t) -1;
+    stmt->columns[colno].precision = (zend_ulong) -1;
+    return 1;
+}
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/** bytea as Postgres prints it, '\x' and hex, back to bytes; escape format bytes stay as they are. */
+static zend_string *pg_unescape_bytea(const char *text, size_t len) {
+    if (len < 2 || text[0] != '\\' || text[1] != 'x') {
+        return zend_string_init(text, len, 0);
+    }
+    zend_string *bytes = zend_string_alloc((len - 2) / 2, 0);
+    size_t n = 0;
+    for (size_t i = 2; i + 1 < len; i += 2) {
+        int high = hex_digit(text[i]), low = hex_digit(text[i + 1]);
+        if (high < 0 || low < 0) {
+            break;
+        }
+        ZSTR_VAL(bytes)[n++] = (char) (high << 4 | low);
+    }
+    ZSTR_VAL(bytes)[n] = '\0';
+    ZSTR_LEN(bytes) = n;
+    return bytes;
+}
+
+static int pg_stmt_get_col(pdo_stmt_t *stmt, int colno, zval *result, enum pdo_param_type *type) {
+    tenma_pg_stmt *S = stmt->driver_data;
+    if (S->buffer == NULL || S->current == 0 || colno < 0 || (uint32_t) colno >= S->columns) {
+        return 0;
+    }
+    const char *value;
+    size_t len;
+    if (!pg_value(S, (uint32_t) colno, &value, &len)) {
+        ZVAL_NULL(result);
+        return 1;
+    }
+    switch (S->oids[colno]) {
+        case PG_BOOLOID:
+            ZVAL_BOOL(result, len > 0 && value[0] == 't');
+            break;
+        case PG_INT2OID:
+        case PG_INT4OID:
+        case PG_INT8OID:
+        case PG_OIDOID:
+            ZVAL_LONG(result, ZEND_STRTOL(value, NULL, 10));
+            break;
+        case PG_FLOAT4OID:
+        case PG_FLOAT8OID:
+            if (len == 8 && memcmp(value, "Infinity", 8) == 0) {
+                ZVAL_DOUBLE(result, ZEND_INFINITY);
+            } else if (len == 9 && memcmp(value, "-Infinity", 9) == 0) {
+                ZVAL_DOUBLE(result, -ZEND_INFINITY);
+            } else if (len == 3 && memcmp(value, "NaN", 3) == 0) {
+                ZVAL_DOUBLE(result, ZEND_NAN);
+            } else {
+                ZVAL_DOUBLE(result, zend_strtod(value, NULL));
+            }
+            break;
+        case PG_BYTEAOID: {
+            // As pdo_pgsql: a stream over the bytes
+            zend_string *bytes = pg_unescape_bytea(value, len);
+            php_stream *stream = php_stream_memory_open(TEMP_STREAM_READONLY, bytes);
+            php_stream_to_zval(stream, result);
+            zend_string_release(bytes);
+            break;
+        }
+        default:
+            ZVAL_STRINGL(result, value, len);
+    }
+    return 1;
+}
+
+/** A parameter's value as the server will read it: null, 't'/'f', bytea as hex, otherwise its string. */
+static void pg_param_value(zval *target, zval *parameter, enum pdo_param_type type) {
+    if (Z_ISREF_P(parameter)) {
+        parameter = Z_REFVAL_P(parameter);
+    }
+    zval_ptr_dtor(target);
+    if (type == PDO_PARAM_NULL || Z_TYPE_P(parameter) == IS_NULL) {
+        ZVAL_NULL(target);
+        return;
+    }
+    if (Z_TYPE_P(parameter) == IS_TRUE || Z_TYPE_P(parameter) == IS_FALSE) {
+        ZVAL_STRINGL(target, Z_TYPE_P(parameter) == IS_TRUE ? "t" : "f", 1);
+        return;
+    }
+    if (type == PDO_PARAM_LOB) {
+        zend_string *bytes;
+        if (Z_TYPE_P(parameter) == IS_RESOURCE) {
+            php_stream *stream;
+            php_stream_from_zval_no_verify(stream, parameter);
+            bytes = stream != NULL ? php_stream_copy_to_mem(stream, PHP_STREAM_COPY_ALL, 0) : NULL;
+            if (bytes == NULL) {
+                bytes = ZSTR_EMPTY_ALLOC();
+            }
+        } else {
+            bytes = zval_get_string(parameter);
+        }
+        zend_string *hex = zend_string_alloc(ZSTR_LEN(bytes) * 2 + 2, 0);
+        static const char digits[] = "0123456789abcdef";
+        ZSTR_VAL(hex)[0] = '\\';
+        ZSTR_VAL(hex)[1] = 'x';
+        for (size_t i = 0; i < ZSTR_LEN(bytes); i++) {
+            unsigned char byte = (unsigned char) ZSTR_VAL(bytes)[i];
+            ZSTR_VAL(hex)[2 + i * 2] = digits[byte >> 4];
+            ZSTR_VAL(hex)[3 + i * 2] = digits[byte & 15];
+        }
+        ZSTR_VAL(hex)[ZSTR_LEN(hex)] = '\0';
+        zend_string_release(bytes);
+        ZVAL_STR(target, hex);
+        return;
+    }
+    ZVAL_STR(target, zval_get_string(parameter));
+}
+
+static int pg_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_data *param, enum pdo_param_event event) {
+    tenma_pg_stmt *S = stmt->driver_data;
+    if (!param->is_param) {
+        return 1;
+    }
+    if (stmt->supports_placeholders != PDO_PLACEHOLDER_NAMED) {
+        // Emulated: PDO quotes the value into the query, a bool must become 't' or 'f' first
+        if (event == PDO_PARAM_EVT_NORMALIZE && PDO_PARAM_TYPE(param->param_type) == PDO_PARAM_BOOL
+            && (param->param_type & PDO_PARAM_INPUT_OUTPUT) != PDO_PARAM_INPUT_OUTPUT) {
+            const char *flag = zend_is_true(&param->parameter) ? "t" : "f";
+            param->param_type = PDO_PARAM_STR;
+            zval_ptr_dtor(&param->parameter);
+            ZVAL_STRINGL(&param->parameter, flag, 1);
+        }
+        return 1;
+    }
+    switch (event) {
+        case PDO_PARAM_EVT_NORMALIZE:
+            // $1, $2 or a name PDO rewrote to one: the position
+            if (param->name != NULL) {
+                if (ZSTR_VAL(param->name)[0] == '$') {
+                    param->paramno = ZEND_ATOL(ZSTR_VAL(param->name) + 1) - 1;
+                } else {
+                    zend_string *rewritten = stmt->bound_param_map != NULL
+                        ? zend_hash_find_ptr(stmt->bound_param_map, param->name)
+                        : NULL;
+                    if (rewritten == NULL) {
+                        pg_record_error(stmt->dbh, stmt, "HY093|parameter was not defined", 31);
+                        return 0;
+                    }
+                    param->paramno = ZEND_ATOL(ZSTR_VAL(rewritten) + 1) - 1;
+                }
+            }
+            return 1;
+        case PDO_PARAM_EVT_ALLOC:
+            if (stmt->bound_param_map != NULL && !zend_hash_index_exists(stmt->bound_param_map, param->paramno)) {
+                pg_record_error(stmt->dbh, stmt, "HY093|parameter was not defined", 31);
+                return 0;
+            }
+            return 1;
+        case PDO_PARAM_EVT_EXEC_PRE: {
+            if (stmt->bound_param_map == NULL) {
+                return 1;
+            }
+            uint32_t count = zend_hash_num_elements(stmt->bound_param_map);
+            if (S->params == NULL || S->param_count != count) {
+                pg_free_params(S);
+                S->params = ecalloc(count, sizeof(zval));
+                S->param_count = count;
+            }
+            if (param->paramno >= 0 && (uint32_t) param->paramno < count) {
+                pg_param_value(&S->params[param->paramno], &param->parameter, PDO_PARAM_TYPE(param->param_type));
+            }
+            return 1;
+        }
+        default:
+            return 1;
+    }
+}
+
+static int pg_stmt_get_column_meta(pdo_stmt_t *stmt, zend_long colno, zval *return_value) {
+    tenma_pg_stmt *S = stmt->driver_data;
+    if (S->buffer == NULL || colno < 0 || colno >= S->columns) {
+        return FAILURE;
+    }
+    array_init(return_value);
+    uint32_t oid = S->oids[colno];
+    add_assoc_long(return_value, "pgsql:oid", oid);
+    const char *native = NULL;
+    enum pdo_param_type type = PDO_PARAM_STR;
+    switch (oid) {
+        case PG_BOOLOID: native = "bool"; type = PDO_PARAM_BOOL; break;
+        case PG_BYTEAOID: native = "bytea"; type = PDO_PARAM_LOB; break;
+        case PG_INT8OID: native = "int8"; type = PDO_PARAM_INT; break;
+        case PG_INT2OID: native = "int2"; type = PDO_PARAM_INT; break;
+        case PG_INT4OID: native = "int4"; type = PDO_PARAM_INT; break;
+        case PG_OIDOID: type = PDO_PARAM_LOB; break;
+        case PG_FLOAT4OID: native = "float4"; break;
+        case PG_FLOAT8OID: native = "float8"; break;
+        case PG_TEXTOID: native = "text"; break;
+        case PG_VARCHAROID: native = "varchar"; break;
+        case PG_DATEOID: native = "date"; break;
+        case PG_TIMESTAMPOID: native = "timestamp"; break;
+        default: break;
+    }
+    if (native != NULL) {
+        add_assoc_string(return_value, "native_type", native);
+    }
+    add_assoc_long(return_value, "pdo_type", type);
+    return SUCCESS;
+}
+
+static int pg_stmt_cursor_closer(pdo_stmt_t *stmt) {
+    pg_free_result(stmt->driver_data);
+    return 1;
+}
+
+static const struct pdo_stmt_methods tenma_pg_stmt_methods = {
+    pg_stmt_dtor,
+    pg_stmt_execute,
+    pg_stmt_fetch,
+    pg_stmt_describe,
+    pg_stmt_get_col,
+    pg_stmt_param_hook,
+    NULL, /* set_attribute */
+    NULL, /* get_attribute */
+    pg_stmt_get_column_meta,
+    NULL, /* next_rowset */
+    pg_stmt_cursor_closer,
+};
+
+/** user='...' for the connection string: quotes and backslashes escaped, as pdo_pgsql does. */
+static void pg_append_credential(smart_str *out, const char *key, const char *value) {
+    smart_str_appendc(out, ' ');
+    smart_str_appends(out, key);
+    smart_str_appendl(out, "='", 2);
+    for (const char *p = value; *p != '\0'; p++) {
+        if (*p == '\'' || *p == '\\') {
+            smart_str_appendc(out, '\\');
+        }
+        smart_str_appendc(out, *p);
+    }
+    smart_str_appendc(out, '\'');
+}
+
+static int pg_handle_factory(pdo_dbh_t *dbh, zval *driver_options) {
+    tenma_pg_handle *H = pecalloc(1, sizeof(tenma_pg_handle), dbh->is_persistent);
+    H->persistent = dbh->is_persistent;
+    dbh->driver_data = H;
+    dbh->skip_param_evt = 1 << PDO_PARAM_EVT_EXEC_POST | 1 << PDO_PARAM_EVT_FETCH_PRE | 1 << PDO_PARAM_EVT_FETCH_POST;
+    // PDO's "key=value;key=value" as libpq's "key=value key=value"
+    smart_str conninfo = {0};
+    for (size_t i = 0; i < dbh->data_source_len; i++) {
+        smart_str_appendc(&conninfo, dbh->data_source[i] == ';' ? ' ' : dbh->data_source[i]);
+    }
+    zend_long timeout = driver_options != NULL ? pdo_attr_lval(driver_options, PDO_ATTR_TIMEOUT, 30) : 30;
+    smart_str_append_printf(&conninfo, " connect_timeout=" ZEND_LONG_FMT, timeout);
+    if (dbh->username != NULL && strstr(dbh->data_source, "user=") == NULL) {
+        pg_append_credential(&conninfo, "user", dbh->username);
+    }
+    if (dbh->password != NULL && strstr(dbh->data_source, "password=") == NULL) {
+        pg_append_credential(&conninfo, "password", dbh->password);
+    }
+    smart_str_0(&conninfo);
+    zend_string *buffer;
+    int ok = pg_call(dbh, NULL, "connect", ZSTR_VAL(conninfo.s), ZSTR_LEN(conninfo.s), NULL, 0, &buffer);
+    smart_str_free(&conninfo);
+    // From here on PDO calls the closer when the object goes
+    dbh->methods = &tenma_pg_methods;
+    if (!ok) {
+        return 0;
+    }
+    H->id = ZEND_STRTOUL(ZSTR_VAL(buffer), NULL, 10);
+    zend_string_release(buffer);
+    dbh->alloc_own_columns = 1;
+    dbh->max_escaped_char_length = 2;
+    return 1;
+}
+
+static const pdo_driver_t tenma_pg_driver = {
+    PDO_DRIVER_HEADER(pgsql),
+    pg_handle_factory,
+};
+
+/** Puts tenma's driver in the place of pdo_pgsql, unless --pdo-pgsql native keeps libpq. */
+static void register_pdo_driver(void) {
+    if (pdo_native) {
+        return;
+    }
+    php_pdo_unregister_driver(&pdo_pgsql_driver);
+    php_pdo_register_driver(&tenma_pg_driver);
+}
+
 int tenma_start(void) {
     // Like console.log, echo reaches the console at once, even when stdout is a pipe
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1227,6 +2104,7 @@ int tenma_start(void) {
     wrap_exit();
     register_async_transports();
     wrap_stream_select();
+    register_pdo_driver();
     return 0;
 }
 

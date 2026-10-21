@@ -57,6 +57,7 @@ unsafe extern "C" {
     fn tenma_define_ini(entry: *const c_char);
     fn tenma_set_ini_path(path: *const c_char);
     fn tenma_set_server_name(name: *const c_char);
+    fn tenma_set_pdo_native();
     fn tenma_stop();
     fn tenma_thread_start() -> c_int;
     fn tenma_thread_stop();
@@ -305,6 +306,11 @@ pub fn start() -> Result<(), String> {
     } else {
         Err("PHP does not start".into())
     }
+}
+
+/// `--pdo-pgsql native`: PDO keeps libpq for Postgres instead of tenma's driver. Only before `start`.
+pub fn pdo_native() {
+    unsafe { tenma_set_pdo_native() };
 }
 
 /// A setting like `php -d name=value`. Only before `start`.

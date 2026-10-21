@@ -4138,3 +4138,91 @@ fn mysql_through_mysqlnd_is_async() {
         "{inserted}"
     );
 }
+
+#[test]
+fn pdo_pgsql_runs_on_tokio_postgres() {
+    let port = 18_183;
+    let user = std::env::var("USER").unwrap();
+    let log = scratch("pdo").join("cancel.log");
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .arg("tests/fixtures/pdo_pgsql.php")
+            .env("PORT", port.to_string())
+            .env(
+                "DATABASE_URL",
+                std::env::var("DATABASE_URL")
+                    .unwrap_or(format!("postgres://{user}@localhost/postgres")),
+            )
+            .env("CANCEL_LOG", &log)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    if !get(port, "/setup").starts_with("HTTP/1.1 200") {
+        skip("no Postgres reachable");
+        return;
+    }
+    assert!(get(port, "/parallel").ends_with("1,2 0.5s\n"));
+    let inserted = get(port, "/insert?name=O'Reilly");
+    for expected in [
+        r#""name": "O'Reilly""#,
+        r#""amount": "9.99""#,
+        r#""flag": true"#,
+        r#""data": "00016869""#,
+        r#""tags": "{a,b}""#,
+        r#""same": true"#,
+    ] {
+        assert!(inserted.contains(expected), "{inserted}");
+    }
+    assert!(get(port, "/rollback").ends_with("O'Reilly\n"));
+    assert!(get(port, "/error").ends_with("42703 column \"nope\" does not exist\n"));
+    let placeholders = get(port, "/placeholders");
+    assert!(
+        placeholders.contains("\"x\",\n        5\n")
+            && placeholders.contains(r#""a": "q'1""#)
+            && placeholders.contains(r#""b": 7"#)
+            && placeholders.contains(r#""int4""#)
+            && placeholders.contains(r#""'it''s'""#),
+        "{placeholders}"
+    );
+    assert!(get(port, "/scroll").ends_with("5 3 2 UTF8\n"));
+    let mut early = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    early
+        .write_all(b"GET /cancelled HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    drop(early);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        "cancelled in query\n"
+    );
+    server.0.kill().unwrap();
+    let mut stdout = String::new();
+    server
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    assert_eq!(stdout, "pgsql 2\n");
+
+    // --pdo-pgsql native keeps libpq: ext/pdo_pgsql reports its client version
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
+        .args([
+            "--pdo-pgsql",
+            "native",
+            "tests/fixtures/scripts/pdo_native.php",
+        ])
+        .env(
+            "DATABASE_URL",
+            format!("postgres://{user}@localhost/postgres"),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("libpq"),
+        "{output:?}"
+    );
+}
