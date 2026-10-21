@@ -32,3 +32,8 @@ new Server($port, function (Request $request) use ($port) {
         'memory' => ini_get('memory_limit'),
     ]);
 })->start();
+
+// Startup work with an op before the first request, and a task that lives until the interpreter shuts down:
+// a replay that starts over to step back numbers its ops from 1 again, and stops nowhere while the old
+// interpreter is torn down
+$warmUp = Task::run(fn () => Task::delay(0.01));

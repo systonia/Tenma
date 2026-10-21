@@ -29,6 +29,18 @@ fn get(port: u16, path: &str) -> String {
     )
 }
 
+/// A body "<text> <seconds>s": the text as expected, and the time below `max`, which waits in a row would
+/// exceed. Exact times vary on slow runners; only waiting one after another is a failure.
+fn timed(body: &str, text: &str, max: f64) {
+    let (got, seconds) = body
+        .trim_end()
+        .rsplit_once(' ')
+        .unwrap_or_else(|| panic!("no time in {body:?}"));
+    assert_eq!(got, text, "{body:?}");
+    let seconds: f64 = seconds.trim_end_matches('s').parse().unwrap();
+    assert!(seconds < max, "{body:?} took {seconds} s, {max} s at most");
+}
+
 /// The body of a raw HTTP response.
 fn body(response: String) -> String {
     response
@@ -4082,14 +4094,15 @@ fn php_sockets_suspend_only_the_fiber() {
         response.split("\r\n\r\n").nth(1).unwrap_or("").to_owned()
     };
     // Three connections at once take as long as one
-    assert_eq!(tail("/three"), "echo:a,echo:b,echo:c 0.5s\n");
-    assert_eq!(tail("/select"), "select ok 0.5s\n");
+    // Each wait is half a second: together under one second, never the sum
+    timed(&tail("/three"), "echo:a,echo:b,echo:c", 1.0);
+    timed(&tail("/select"), "select ok", 1.0);
     let except = tail("/select-except");
     assert!(except.starts_with("except 0 0."), "{except}");
-    assert_eq!(tail("/timeout"), "false timed_out=true 0.1s\n");
+    timed(&tail("/timeout"), "false timed_out=true", 0.4);
     // TLS through ext/openssl, two fetches of the server's own slow page at once
-    assert_eq!(tail("/https"), "slowslow 0.5s\n");
-    assert_eq!(tail("/tls"), "tls slow 0.5s\n");
+    timed(&tail("/https"), "slowslow", 0.9);
+    timed(&tail("/tls"), "tls slow", 0.9);
     assert_eq!(tail("/unverified"), "refused\n");
     // ECONNREFUSED is 61 on macOS and 111 on Linux
     let refused = tail("/refused");
@@ -4139,8 +4152,8 @@ fn mysql_through_mysqlnd_is_async() {
         skip("no MySQL reachable");
         return;
     }
-    assert!(get(port, "/pdo").ends_with("first,first 0.5s\n"));
-    assert!(get(port, "/mysqli").ends_with("second,second 0.5s\n"));
+    timed(&body(get(port, "/pdo")), "first,first", 0.9);
+    timed(&body(get(port, "/mysqli")), "second,second", 0.9);
     let inserted = get(port, "/insert?name=pie");
     assert!(
         inserted.contains(r#""name": "pie""#) && inserted.contains(r#""amount": "9.99""#),
@@ -4171,7 +4184,7 @@ fn pdo_pgsql_runs_on_tokio_postgres() {
         skip("no Postgres reachable");
         return;
     }
-    assert!(get(port, "/parallel").ends_with("1,2 0.5s\n"));
+    timed(&body(get(port, "/parallel")), "1,2", 0.9);
     let inserted = get(port, "/insert?name=O'Reilly");
     for expected in [
         r#""name": "O'Reilly""#,

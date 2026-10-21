@@ -73,6 +73,8 @@ pub fn prepare(plan: &Plan) {
         });
     });
     journal::set_mode(2);
+    // Requests and ops get the IDs they had when recorded: also when the worker starts over to step back
+    php::set_next_id(1);
 }
 
 /// The next entry, without taking it.

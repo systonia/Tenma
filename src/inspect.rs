@@ -254,7 +254,9 @@ pub fn replaying() {
 
 /// Whether the replay's worker should start over for a step back; asked once per interpreter life.
 pub fn replay_again() -> bool {
-    AGAIN.replace(false)
+    // Stays set while the old interpreter shuts down, which still runs PHP (destructors): nothing stops
+    // there. The next interpreter's thread() clears it
+    AGAIN.get()
 }
 
 /// Before `php::start`: PHP gets the debugger's extension and runs without opcache.
@@ -268,6 +270,7 @@ pub fn thread() {
     PREVIOUS.set((0, 0));
     STEPPING.set(None);
     STATEMENTS.set(0);
+    AGAIN.set(false);
     LAST.with_borrow_mut(HashMap::clear);
     unsafe { tenma_inspect_thread() }
 }
