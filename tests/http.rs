@@ -4600,6 +4600,47 @@ fn echo_plugin() -> std::path::PathBuf {
 }
 
 #[test]
+fn check_reads_tenma_json_and_loads_its_plugins_without_starting() {
+    let plugin = echo_plugin();
+    let directory = scratch("check");
+    let app = directory.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let check = |target: &str| {
+        Command::new(env!("CARGO_BIN_EXE_tenma"))
+            .args(["check", target])
+            .current_dir(&directory)
+            .output()
+            .unwrap()
+    };
+
+    let missing = check("app/index.php");
+    assert!(missing.status.success(), "{missing:?}");
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("no app/tenma.json"));
+
+    let config = format!(
+        "{{\"plugins\": [\"{}\"], \"workers\": 2}}",
+        plugin.display()
+    );
+    std::fs::write(app.join("tenma.json"), &config).unwrap();
+    let fine = check("app/index.php");
+    assert!(fine.status.success(), "{fine:?}");
+    assert!(String::from_utf8_lossy(&fine.stderr).contains("plugin echo loaded"));
+    assert!(String::from_utf8_lossy(&fine.stdout).contains("app/tenma.json is fine"));
+
+    // Written next to the wrong script: the one in the working directory does not count
+    std::fs::write(directory.join("tenma.json"), "{\"wrokers\": 2}").unwrap();
+    let elsewhere = check("app/index.php");
+    assert!(elsewhere.status.success(), "{elsewhere:?}");
+    assert!(
+        String::from_utf8_lossy(&elsewhere.stderr)
+            .contains("./tenma.json is not the one app/index.php gets")
+    );
+    let unknown = check("tenma.json");
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("unknown key wrokers"));
+}
+
+#[test]
 fn native_plugins_shut_down_after_a_script_without_servers() {
     let plugin = echo_plugin();
     let directory = scratch("plugin-script");

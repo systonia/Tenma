@@ -19,6 +19,7 @@ tenma --version
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `tenma script.php`                                       | runs the script; it serves if it starts an `Http\Server`                                                                 |
 | `tenma build [tenma.dev.php]`                            | runs the [build hooks](watch.md#tenma-build) once, `./tenma.dev.php` by default                                          |
+| `tenma check [script.php\|tenma.json]`                   | checks the options and plugins of [tenma.json](configuration.md#tenmajson) without starting                              |
 | `tenma lsp`                                              | the [language server](language-server.md), on stdin and stdout                                                           |
 | `tenma docs [paths] [--out <dir>]`                       | writes [reference pages](reference-docs.md), into `docs/reference` by default                                            |
 | `tenma --stubs [DIR]`                                    | prints Tenma's PHP API as stubs, or writes one file per class to DIR (see [Stubs for IDEs](#stubs-for-ides-and-phpstan)) |

@@ -47,7 +47,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--durable postgres://URL] [--plugin FILE] [--config tenma.json] [--stop-timeout SECONDS] [--record DIR [--record-on error] [--record-max-size SIZE] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N | --request N] [--check]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma replay FILE --list   (the requests of a journal, numbered for --request)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--durable postgres://URL] [--plugin FILE] [--config tenma.json] [--stop-timeout SECONDS] [--record DIR [--record-on error] [--record-max-size SIZE] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma check [script.php|tenma.json]   (checks the options and plugins of tenma.json without starting)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N | --request N] [--check]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma replay FILE --list   (the requests of a journal, numbered for --request)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -149,6 +149,7 @@ fn main() -> ExitCode {
         Some("--stubs") => return stubs(),
         Some("lsp") => return tool(stdlib::Tool::Lsp, "Lsp"),
         Some("docs") => return tool(stdlib::Tool::Docs, "Docs"),
+        Some("check") => return check(),
         Some("--version" | "-v") => {
             println!(
                 "tenma {} (PHP {})",
@@ -159,7 +160,8 @@ fn main() -> ExitCode {
         }
         _ => {}
     }
-    let (argv, options) = match parse_args() {
+    let given: Vec<String> = std::env::args().skip(1).collect();
+    let (argv, options) = match parse_args(&given) {
         Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("{message}\n{USAGE}");
@@ -304,9 +306,8 @@ fn tool(tool: stdlib::Tool, namespace: &str) -> ExitCode {
 }
 
 /// Options for tenma, then the script; everything after it belongs to the script ($argv), as with `php script.php …`.
-fn parse_args() -> Result<(Vec<String>, Options), String> {
-    let given: Vec<String> = std::env::args().skip(1).collect();
-    let mut args = with_config(&given)?.into_iter();
+fn parse_args(given: &[String]) -> Result<(Vec<String>, Options), String> {
+    let mut args = with_config(given)?.into_iter();
     let mut options = Options {
         workers: 1,
         max_body: 10 << 20,
@@ -510,6 +511,52 @@ fn parse_args() -> Result<(Vec<String>, Options), String> {
         options.record = Some(Box::leak(Box::new(settings)));
     }
     Ok((argv, options))
+}
+
+/// `tenma check [script.php | tenma.json]`: reads the tenma.json the script gets (default
+/// index.php), checks its options and loads its plugins as a start would, without running PHP. The
+/// first problem ends it with status 1.
+fn check() -> ExitCode {
+    let target = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "index.php".to_owned());
+    let path = std::path::Path::new(&target);
+    let config = if path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+    {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."))
+            .join("tenma.json")
+    };
+    // The usual slip: a tenma.json written in the working directory, next to another script
+    let here = std::fs::canonicalize("tenma.json").ok();
+    if here.is_some() && here != std::fs::canonicalize(&config).ok() {
+        eprintln!("tenma check: warning: ./tenma.json is not the one {target} gets");
+    }
+    if !config.is_file() {
+        println!("tenma check: no {}, nothing to check", config.display());
+        return ExitCode::SUCCESS;
+    }
+
+    let given = [
+        "--config".to_owned(),
+        config.display().to_string(),
+        target.clone(),
+    ];
+    match parse_args(&given) {
+        Ok(_) => {
+            println!("tenma check: {} is fine", config.display());
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("tenma check: {message}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// The options of tenma.json (next to the script, or `--config FILE`) put in front of the command line
