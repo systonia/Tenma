@@ -59,14 +59,21 @@ A command hook runs the program as its own process, without a shell, in the dire
 
 ```json
 {
-    "hooks": [
-        {
-            "name": "css",
-            "inputs": ["assets/app.css", "views/**/*.php", "src/**/*.php"],
-            "outputs": ["public/app.css"],
-            "run": ["tailwindcss", "-i", "assets/app.css", "-o", "public/app.css", "--minify"]
-        }
-    ]
+  "hooks": [
+    {
+      "name": "css",
+      "inputs": ["assets/app.css", "views/**/*.php", "src/**/*.php"],
+      "outputs": ["public/app.css"],
+      "run": [
+        "tailwindcss",
+        "-i",
+        "assets/app.css",
+        "-o",
+        "public/app.css",
+        "--minify"
+      ]
+    }
+  ]
 }
 ```
 
@@ -74,14 +81,14 @@ Any program works the same way, such as a script of the project that writes a ca
 
 ```json
 {
-    "hooks": [
-        {
-            "name": "routes",
-            "inputs": ["src/**/*.php"],
-            "outputs": ["var/routes.php"],
-            "run": ["php", "bin/routes.php"]
-        }
-    ]
+  "hooks": [
+    {
+      "name": "routes",
+      "inputs": ["src/**/*.php"],
+      "outputs": ["var/routes.php"],
+      "run": ["php", "bin/routes.php"]
+    }
+  ]
 }
 ```
 
@@ -89,14 +96,14 @@ A PHP hook gets the changed paths, an empty list on the first run. It may use Te
 
 ```json
 {
-    "hooks": [
-        {
-            "name": "icons",
-            "inputs": ["public/icons/*.svg"],
-            "outputs": ["var/icons.php"],
-            "php": "bin/icons.php"
-        }
-    ]
+  "hooks": [
+    {
+      "name": "icons",
+      "inputs": ["public/icons/*.svg"],
+      "outputs": ["var/icons.php"],
+      "php": "bin/icons.php"
+    }
+  ]
 }
 ```
 
