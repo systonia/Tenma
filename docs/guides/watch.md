@@ -1,24 +1,23 @@
 ---
 title: Watch mode and build hooks
-description: Reload the app on every change with --watch, run build steps from tenma.dev.php, and run them once with tenma build.
+description: Reload the app on every change with --watch, run the build steps of tenma.json, and run them once with tenma build.
 order: 310
 ---
 
-`tenma --watch` reloads the app whenever a file it loaded changes. Build steps such as a stylesheet or a cache come from a `tenma.dev.php` next to the script; watch mode runs them on every change, and `tenma build` runs them once.
+`tenma --watch` reloads the app whenever a file it loaded changes. Build steps such as a stylesheet or a cache are the `hooks` of the [tenma.json](configuration.md) next to the script; watch mode runs them on every change, and `tenma build` runs them once.
 
 ```bash
 tenma --watch app.php    # serve and reload on changes
-tenma build              # run the hooks of ./tenma.dev.php once
+tenma build              # run the hooks of ./tenma.json once
 ```
 
-| Feature                                                                           | Does                                                                                  |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `--watch`                                                                         | reloads the workers when a loaded file changes                                        |
-| [`Development\Watch::reloadedBy()`](../reference/Development/Watch.md#reloadedby) | the file whose change caused the current run, or `null` on the first run              |
-| `tenma.dev.php`                                                                   | returns a list of [`Development\Hook`](../reference/Development/Hook.md): build steps |
-| `.tenma-ignore`                                                                   | paths the hooks never look at                                                         |
-| `tenma build [tenma.dev.php]`                                                     | runs every hook once, for CI and Docker                                               |
-| [`Development\Problems::report()`](diagnostics.md)                                | under `--watch`, problems the app reports appear in the editor                        |
+| Feature                                                                           | Does                                                                     |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `--watch`                                                                         | reloads the workers when a loaded file changes                           |
+| [`Development\Watch::reloadedBy()`](../reference/Development/Watch.md#reloadedby) | the file whose change caused the current run, or `null` on the first run |
+| `hooks` in `tenma.json`                                                           | build steps                                                              |
+| `tenma build [tenma.json]`                                                        | runs every hook once, for CI and Docker                                  |
+| [`Development\Problems::report()`](diagnostics.md)                                | under `--watch`, problems the app reports appear in the editor           |
 
 `--watch` is for development. In production, deploy and restart instead.
 
@@ -44,102 +43,87 @@ if ($changed !== null) {
 new Http\Server(8080, fn () => "ok\n")->start();
 ```
 
-## Build hooks: tenma.dev.php
+## Build hooks
 
-A `tenma.dev.php` next to the script returns a list of [`Development\Hook`](../reference/Development/Hook.md). Production code never loads it.
+The `hooks` of the `tenma.json` next to the script are a list of build steps. Only `--watch` and `tenma build` run them.
 
-| Parameter | Does                                                                                  |
-| --------- | ------------------------------------------------------------------------------------- |
-| `inputs`  | globs relative to `tenma.dev.php`: `*` and `?` within a name, `**` across directories |
-| `run`     | a command as a list of strings, or a PHP callable that gets the changed paths         |
-| `outputs` | the files `run` writes; they never trigger this hook again                            |
-| `name`    | the prefix of its log lines; default: the program's file name, or `#N` (its position) |
+| Key       | Does                                                                               |
+| --------- | ---------------------------------------------------------------------------------- |
+| `inputs`  | globs relative to `tenma.json`: `*` and `?` within a name, `**` across directories |
+| `run`     | a command: the program and its arguments, as a list of strings                     |
+| `php`     | instead of `run`: a PHP file that returns a callable, which gets the changed paths |
+| `outputs` | the files the hook writes; they never trigger it again                             |
+| `name`    | the prefix of its log lines; default: the file name of the program or PHP file     |
 
-A command hook runs the program as its own process, without a shell, in the directory of `tenma.dev.php`. This one rebuilds a stylesheet from every template that uses its classes:
+A command hook runs the program as its own process, without a shell, in the directory of `tenma.json`. This one rebuilds a stylesheet from every template that uses its classes:
 
-```php
-<?php
-// tenma.dev.php
-
-use Development\Hook;
-
-return [
-    new Hook(
-        inputs: ['assets/app.css', 'views/**/*.php', 'src/**/*.php'],
-        outputs: ['public/app.css'],
-        run: ['tailwindcss', '-i', 'assets/app.css', '-o', 'public/app.css', '--minify'],
-        name: 'css',
-    ),
-];
+```json
+{
+    "hooks": [
+        {
+            "name": "css",
+            "inputs": ["assets/app.css", "views/**/*.php", "src/**/*.php"],
+            "outputs": ["public/app.css"],
+            "run": ["tailwindcss", "-i", "assets/app.css", "-o", "public/app.css", "--minify"]
+        }
+    ]
+}
 ```
 
 Any program works the same way, such as a script of the project that writes a cache:
 
-```php
-<?php
-// tenma.dev.php
-
-use Development\Hook;
-
-return [
-    new Hook(
-        inputs: ['src/**/*.php'],
-        outputs: ['var/routes.php'],
-        run: ['php', 'bin/routes.php'],
-        name: 'routes',
-    ),
-];
+```json
+{
+    "hooks": [
+        {
+            "name": "routes",
+            "inputs": ["src/**/*.php"],
+            "outputs": ["var/routes.php"],
+            "run": ["php", "bin/routes.php"]
+        }
+    ]
+}
 ```
 
-A PHP hook gets the changed paths, an empty list on the first run. It may use Tenma's async functions. This one writes a list of icons for the app to `include`:
+A PHP hook gets the changed paths, an empty list on the first run. It may use Tenma's async functions and [`Development\Problems::report()`](diagnostics.md). This one writes a list of icons for the app to `include`:
+
+```json
+{
+    "hooks": [
+        {
+            "name": "icons",
+            "inputs": ["public/icons/*.svg"],
+            "outputs": ["var/icons.php"],
+            "php": "bin/icons.php"
+        }
+    ]
+}
+```
 
 ```php
 <?php
-// tenma.dev.php
+// bin/icons.php
 
-use Development\Hook;
 use FileSystem\FileInfo;
 
-function listIcons(array $changed): void
-{
+return function (array $changed): void {
     $icons = [];
-    foreach (glob(__DIR__ . '/public/icons/*.svg') as $file) {
+    foreach (glob(dirname(__DIR__) . '/public/icons/*.svg') as $file) {
         $icons[basename($file, '.svg')] = '/icons/' . basename($file);
     }
 
     $code = '<?php return ' . var_export($icons, true) . ';';
-    new FileInfo(__DIR__ . '/var/icons.php')->write($code);
-}
-
-return [
-    new Hook(
-        inputs: ['public/icons/*.svg'],
-        outputs: ['var/icons.php'],
-        run: listIcons(...),
-        name: 'icons',
-    ),
-];
+    new FileInfo(dirname(__DIR__) . '/var/icons.php')->write($code);
+};
 ```
 
-## .tenma-ignore
-
-A glob like `**/*.php` would otherwise look at every file in `vendor/`. A `.tenma-ignore` next to `tenma.dev.php` lists what is no input. One entry per line, `#` starts a comment:
-
-```text
-# a path in the project (has a slash)
-storage/cache
-# any file or directory with that name (no slash)
-node_modules
-*.log
-```
-
-Without the file, `.git`, `node_modules` and `vendor` are left out. Changing `.tenma-ignore` reloads the hooks.
+A glob like `**/*.php` never looks into `.git`, `node_modules` or `vendor`.
 
 ## tenma build
 
 ```bash
-tenma build                    # the hooks of ./tenma.dev.php
-tenma build path/tenma.dev.php
+tenma build                    # the hooks of ./tenma.json
+tenma build path/tenma.json
 ```
 
 `tenma build` runs every hook once, in dependency order, then exits. Use it in CI and in a Dockerfile, so the production image contains the built files without the hooks ever running there:
@@ -171,8 +155,8 @@ Hooks:
 - A hook that writes files into its own inputs without declaring them as `outputs` is stopped after five runs in a row.
 - A failing hook (an exception, or an exit status other than 0) skips the hooks after it. The server keeps running.
 - A command's processes, including those it started itself, get SIGTERM when the hook ends or reloads, and SIGKILL 2 seconds later.
-- Changing `tenma.dev.php`, or a file it or a PHP hook loaded, reloads the hooks.
-- `exit()` in a hook ends Tenma.
-- `tenma build` exits with status 1 if a hook fails or the hooks form a cycle.
+- Changing `tenma.json`, or a file a PHP hook loaded, reloads the hooks.
+- `exit()` in a PHP hook ends Tenma.
+- `tenma build` exits with status 1 if a hook fails, the list is invalid or the hooks form a cycle. [`tenma check`](configuration.md) checks the list without running it.
 
-See also: [`Development\Hook`](../reference/Development/Hook.md), [`Development\Watch::reloadedBy()`](../reference/Development/Watch.md#reloadedby), [Command line](command-line.md), [Debugger](debugger.md).
+See also: [Configuration](configuration.md), [`Development\Watch::reloadedBy()`](../reference/Development/Watch.md#reloadedby), [Command line](command-line.md), [Debugger](debugger.md).

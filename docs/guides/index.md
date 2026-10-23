@@ -35,7 +35,7 @@ module each, with examples you can save and run with `tenma <file>.php`. The
 ## Tooling
 
 - [Command line](command-line.md): every subcommand and option, exit codes, stubs
-- [Watch mode and build hooks](watch.md): `--watch`, `tenma.dev.php`, `tenma build`
+- [Watch mode and build hooks](watch.md): `--watch`, the hooks of `tenma.json`, `tenma build`
 - [Debugger](debugger.md): `--inspect` and editor setup
 - [Language server](language-server.md): `tenma lsp` and its provider interfaces
 - [Diagnostics](diagnostics.md): problems a running app reports to the editor

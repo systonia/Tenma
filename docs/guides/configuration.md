@@ -42,8 +42,11 @@ command line from the working directory. An unknown key stops tenma with its nam
 option does. `--watch` does not reload it: a changed `tenma.json` needs a restart, because workers,
 plugins and the pool are set up once.
 
+`hooks` is the one key that is no option: the build steps that `--watch` and `tenma build` run
+([Watch mode](watch.md#build-hooks)). A changed list reloads them under `--watch`.
+
 `tenma check [script.php | tenma.json]` reads the file a script gets (default `index.php`), checks
-its options and loads its plugins as a start would, without running PHP. It warns when a
+its options and hooks and loads its plugins as a start would, without running PHP. It warns when a
 `tenma.json` in the working directory is not that file, the usual result of an installer run in the
 wrong directory, and ends with status 1 at the first problem:
 

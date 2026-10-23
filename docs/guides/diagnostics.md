@@ -111,6 +111,6 @@ new Http\Server(8080, function (Request $request) {
 - The lists go to `.tenma/diagnostics/` in the project directory. A `.gitignore` in `.tenma/` keeps them out of the repository.
 - [`tenma lsp`](language-server.md) reads them once a second. It publishes them to the editor next to the problems its providers find.
 - New entries also go to stderr as `path:line:column: severity: message`. Problem matchers and Vim's quickfix read this format.
-- When `--watch` runs the script again, what the script reported is cleared. What the hooks of `tenma.dev.php` reported is cleared when they reload. A fixed problem therefore disappears without its reporter taking it back.
+- When `--watch` runs the script again, what the script reported is cleared. What the hooks of `tenma.json` reported is cleared when they reload. A fixed problem therefore disappears without its reporter taking it back.
 
 See also: [`Development\Problems::report()`](../reference/Development/Problems.md#report), [Language server](language-server.md), [Watch mode](watch.md).

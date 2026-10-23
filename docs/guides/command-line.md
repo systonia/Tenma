@@ -8,7 +8,7 @@ order: 300
 
 ```text
 tenma [options] <script.php> [arguments …]
-tenma [options] build [tenma.dev.php]
+tenma [options] build [tenma.json]
 tenma lsp
 tenma docs [<path>...] [--out <dir>]
 tenma --stubs [DIR]
@@ -18,8 +18,8 @@ tenma --version
 | Command                                                  | Does                                                                                                                     |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `tenma script.php`                                       | runs the script; it serves if it starts an `Http\Server`                                                                 |
-| `tenma build [tenma.dev.php]`                            | runs the [build hooks](watch.md#tenma-build) once, `./tenma.dev.php` by default                                          |
-| `tenma check [script.php\|tenma.json]`                   | checks the options and plugins of [tenma.json](configuration.md#tenmajson) without starting                              |
+| `tenma build [tenma.json]`                               | runs the [build hooks](watch.md#tenma-build) once, `./tenma.json` by default                                             |
+| `tenma check [script.php\|tenma.json]`                   | checks the options, hooks and plugins of [tenma.json](configuration.md#tenmajson) without starting                       |
 | `tenma lsp`                                              | the [language server](language-server.md), on stdin and stdout                                                           |
 | `tenma docs [paths] [--out <dir>]`                       | writes [reference pages](reference-docs.md), into `docs/reference` by default                                            |
 | `tenma --stubs [DIR]`                                    | prints Tenma's PHP API as stubs, or writes one file per class to DIR (see [Stubs for IDEs](#stubs-for-ides-and-phpstan)) |
@@ -53,7 +53,7 @@ Options come before the script. Each takes its value as the next argument.
 | `--server-name NAME`           | `localhost`                     | `$_SERVER['SERVER_NAME']` in [classic mode](classic-mode.md)                                       |
 | `-d name=value`                |                                 | a PHP setting, also written `-dname=value`; any number of times                                    |
 | `-c FILE\|DIR`                 |                                 | the `php.ini` to read, or the directory that holds it                                              |
-| `--watch`                      |                                 | reloads on changes and runs the hooks of `tenma.dev.php` ([Watch mode](watch.md))                  |
+| `--watch`                      |                                 | reloads on changes and runs the hooks of `tenma.json` ([Watch mode](watch.md))                     |
 | `--inspect[=[HOST:]PORT]`      | `127.0.0.1:9229`                | starts the [debugger](debugger.md)                                                                 |
 | `--inspect-wait[=[HOST:]PORT]` | `127.0.0.1:9229`                | the debugger; the script waits until the editor has set its breakpoints                            |
 | `--inspect-brk[=[HOST:]PORT]`  | `127.0.0.1:9229`                | the debugger; the script waits, then stops at its first line                                       |

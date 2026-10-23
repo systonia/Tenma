@@ -20,26 +20,31 @@ final class Dev
     /** @var array<int, true> Stopped by the emergency brake */
     public static array $stopped = [];
 
-    public static function load(mixed $list): void
+    /** @param list<array{inputs: list<string>, run?: list<string>, php?: string, outputs?: list<string>, name?: string}> $list checked by src/dev.rs */
+    public static function load(array $list): void
     {
-        if (!is_array($list) || !array_is_list($list)) {
-            throw new DevError('tenma.dev.php must return a list of Development\Hook, not ' . get_debug_type($list));
-        }
-        foreach ($list as $index => $hook) {
-            if (!$hook instanceof \Development\Hook) {
-                throw new DevError("tenma.dev.php: entry $index is " . get_debug_type($hook) . ', not a Development\Hook');
-            }
-            $inputs = array_map(self::absolute(...), $hook->inputs);
+        foreach ($list as $hook) {
+            $inputs = array_map(self::absolute(...), $hook['inputs']);
             self::$hooks[] = [
-                'name' => $hook->name ?? (is_array($hook->run) ? basename($hook->run[0]) : '#' . ($index + 1)),
+                'name' => $hook['name'] ?? basename($hook['run'][0] ?? $hook['php']),
                 'inputs' => array_map(self::regex(...), $inputs),
                 'roots' => array_map(self::root(...), $inputs),
-                'outputs' => array_map(self::absolute(...), $hook->outputs),
-                'run' => $hook->run,
+                'outputs' => array_map(self::absolute(...), $hook['outputs'] ?? []),
+                'run' => isset($hook['php']) ? self::callable($hook['php']) : $hook['run'],
                 'after' => [],
             ];
         }
         self::order();
+    }
+
+    /** A PHP hook: the file returns the callable, which gets the changed paths. */
+    private static function callable(string $file): \Closure
+    {
+        $run = require self::absolute($file);
+        if (!is_callable($run)) {
+            throw new DevError("$file must return a callable, not " . get_debug_type($run));
+        }
+        return $run(...);
     }
 
     private static function absolute(string $path): string

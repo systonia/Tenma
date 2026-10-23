@@ -2227,7 +2227,12 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
     let list = directory.join(".tenma/diagnostics/app.checks.json");
     let publish = "<?php\n\\Development\\Problems::report('checks', [['file' => __FILE__, 'line' => 2, 'message' => 'run one', 'severity' => 'warning'], ['file' => 'page.tpl.php', 'line' => 1, 'message' => 'relative']]);\necho 'run one' . (\\Development\\Watch::reloadedBy() === null ? '' : ' again') . \"\\n\";";
     std::fs::write(&script, publish).unwrap();
-    std::fs::write(directory.join("bin/tenma.dev.php"), "<?php\nreturn [new Development\\Hook(name: 'check', inputs: [], run: fn () => \\Development\\Problems::report('hooks', [['file' => __FILE__, 'line' => 1, 'message' => 'from a hook']]))];\n").unwrap();
+    std::fs::write(
+        directory.join("bin/tenma.json"),
+        r#"{"hooks": [{"name": "check", "inputs": [], "php": "check.php"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(directory.join("bin/check.php"), "<?php\nreturn fn () => \\Development\\Problems::report('hooks', [['file' => __FILE__, 'line' => 1, 'message' => 'from a hook']]);\n").unwrap();
 
     // Without --watch nobody shows it: nothing is written
     let plain = Command::new(env!("CARGO_BIN_EXE_tenma"))
@@ -2276,7 +2281,7 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
             script.canonicalize().unwrap().display()
         )
     );
-    // tenma.dev.php's hooks run without a script of their own: their lists go to the same project
+    // PHP hooks run without a script of their own: their lists go to the same project
     let hooks = directory.join(".tenma/diagnostics/dev.hooks.json");
     for _ in 0..50 {
         if hooks.exists() {
@@ -2289,7 +2294,6 @@ fn diagnostics_reach_the_project_under_watch_and_go_with_the_reload_which_the_sc
             .unwrap()
             .contains("from a hook")
     );
-
     // Fixed: the reload clears it without the script taking it back
     std::thread::sleep(Duration::from_millis(200));
     // and the script learns what changed
@@ -2350,7 +2354,7 @@ fn hook_project(name: &str) -> std::path::PathBuf {
     std::fs::write(directory.join("assets/app.css"), "a { }").unwrap();
     std::fs::write(
         directory.join("copy.sh"),
-        "#!/bin/sh\necho \"copying $1\"\ncat \"$1\" > \"$2\"\n",
+        "#!/bin/sh\necho \"copying $1\"\ncat \"$1\" > \"$2\"\nprintf '%s' \"$3\" >> \"$2\"\n",
     )
     .unwrap();
     std::fs::set_permissions(
@@ -2358,7 +2362,8 @@ fn hook_project(name: &str) -> std::path::PathBuf {
         std::os::unix::fs::PermissionsExt::from_mode(0o755),
     )
     .unwrap();
-    std::fs::write(directory.join("tenma.dev.php"), minify_hooks("")).unwrap();
+    std::fs::write(directory.join("minify.php"), "<?php\nreturn function (array $changed) {\n    require_once __DIR__ . '/transform.php';\n    file_put_contents(__DIR__ . '/runs.log', 'minify ' . implode(',', array_map('basename', $changed)) . \"\\n\", FILE_APPEND);\n    file_put_contents(__DIR__ . '/public/app.min.css', transform(str_replace(' ', '', file_get_contents(__DIR__ . '/public/app.css'))));\n};\n").unwrap();
+    std::fs::write(directory.join("tenma.json"), minify_hooks("")).unwrap();
     // Loaded only when the hook runs
     std::fs::write(
         directory.join("transform.php"),
@@ -2368,10 +2373,31 @@ fn hook_project(name: &str) -> std::path::PathBuf {
     directory
 }
 
+/// The CSS hook appends `suffix` to its copy.
 fn minify_hooks(suffix: &str) -> String {
-    format!(
-        "<?php\nreturn [\n    new Development\\Hook(inputs: ['public/app.css'], outputs: ['public/app.min.css'], name: 'minify', run: function (array $changed) {{\n        require_once __DIR__ . '/transform.php';\n        file_put_contents(__DIR__ . '/runs.log', 'minify ' . implode(',', array_map('basename', $changed)) . \"\\n\", FILE_APPEND);\n        file_put_contents(__DIR__ . '/public/app.min.css', transform(str_replace(' ', '', file_get_contents(__DIR__ . '/public/app.css'))) . '{suffix}');\n    }}),\n    new Development\\Hook(inputs: ['assets/**/*.css'], outputs: ['public/app.css'], run: ['./copy.sh', 'assets/app.css', 'public/app.css'], name: 'css'),\n];\n"
+    serde_json::json!({"hooks": [
+        {"name": "minify", "inputs": ["public/app.css"], "outputs": ["public/app.min.css"], "php": "minify.php"},
+        {"name": "css", "inputs": ["assets/**/*.css"], "outputs": ["public/app.css"], "run": ["./copy.sh", "assets/app.css", "public/app.css", suffix]},
+    ]})
+    .to_string()
+}
+
+/// `tenma build FILE` with a tenma.json of these hooks.
+fn build_hooks(
+    directory: &std::path::Path,
+    file: &str,
+    hooks: serde_json::Value,
+) -> std::process::Output {
+    std::fs::write(
+        directory.join(file),
+        serde_json::json!({"hooks": hooks}).to_string(),
     )
+    .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_tenma"))
+        .args(["build", file])
+        .current_dir(directory)
+        .output()
+        .unwrap()
 }
 
 #[test]
@@ -2396,28 +2422,25 @@ fn build_runs_hooks_in_order_and_fails_on_cycles() {
         "minify app.css\n"
     );
 
-    std::fs::write(directory.join("cycle.php"), "<?php return [\n    new Development\\Hook(inputs: ['b'], outputs: ['a'], run: fn () => null, name: 'a'),\n    new Development\\Hook(inputs: ['a'], outputs: ['b'], run: fn () => null, name: 'b'),\n];").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
-        .args(["build", "cycle.php"])
-        .current_dir(&directory)
-        .output()
-        .unwrap();
+    let output = build_hooks(
+        &directory,
+        "cycle.json",
+        serde_json::json!([
+            {"name": "a", "inputs": ["b"], "outputs": ["a"], "run": ["true"]},
+            {"name": "b", "inputs": ["a"], "outputs": ["b"], "run": ["true"]},
+        ]),
+    );
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("form a cycle"),
         "{output:?}"
     );
 
-    std::fs::write(
-        directory.join("fails.php"),
-        "<?php return [new Development\\Hook(inputs: [], run: ['false'])];",
-    )
-    .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
-        .args(["build", "fails.php"])
-        .current_dir(&directory)
-        .output()
-        .unwrap();
+    let output = build_hooks(
+        &directory,
+        "fails.json",
+        serde_json::json!([{"inputs": [], "run": ["false"]}]),
+    );
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stderr)
@@ -2425,13 +2448,25 @@ fn build_runs_hooks_in_order_and_fails_on_cycles() {
         "{output:?}"
     );
 
+    // A hook without its command fails before anything runs
+    let output = build_hooks(
+        &directory,
+        "broken.json",
+        serde_json::json!([{"inputs": []}]),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("broken.json: hooks[0]: either run (a command) or php (a file)"),
+        "{output:?}"
+    );
+
     // Output that is no UTF-8 is printed as well as it goes, and the hook runs on
-    std::fs::write(directory.join("latin1.php"), "<?php return [new Development\\Hook(inputs: [], run: ['sh', '-c', 'printf \"caf\\\\351\\\\n\"; sleep 0.3; echo after'], name: 'latin1')];").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
-        .args(["build", "latin1.php"])
-        .current_dir(&directory)
-        .output()
-        .unwrap();
+    let output = build_hooks(
+        &directory,
+        "latin1.json",
+        serde_json::json!([{"name": "latin1", "inputs": [], "run": ["sh", "-c", "printf 'caf\\351\\n'; sleep 0.3; echo after"]}]),
+    );
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
@@ -2467,7 +2502,7 @@ fn watch_runs_hooks_on_changes() {
         "minify app.css\nminify app.css\n"
     );
 
-    // A file a hook loaded as it ran reloads the hooks, which run again; so does tenma.dev.php
+    // A file a PHP hook loaded as it ran reloads the hooks, which run again; so does tenma.json
     std::fs::write(
         directory.join("transform.php"),
         "<?php function transform($css) { return strtoupper($css); }",
@@ -2475,9 +2510,9 @@ fn watch_runs_hooks_on_changes() {
     .unwrap();
     let response = eventually(port, "/", |response| response.ends_with("B{}"));
     assert!(response.ends_with("\r\n\r\nB{}"), "{response}");
-    std::fs::write(directory.join("tenma.dev.php"), minify_hooks("/* dev */")).unwrap();
-    let response = eventually(port, "/", |response| response.ends_with("B{}/* dev */"));
-    assert!(response.ends_with("\r\n\r\nB{}/* dev */"), "{response}");
+    std::fs::write(directory.join("tenma.json"), minify_hooks("/*dev*/")).unwrap();
+    let response = eventually(port, "/", |response| response.ends_with("B{}/*DEV*/"));
+    assert!(response.ends_with("\r\n\r\nB{}/*DEV*/"), "{response}");
     let _ = std::fs::remove_dir_all(directory);
 }
 
@@ -2488,7 +2523,8 @@ fn watch_stops_hooks_that_trigger_themselves() {
     std::fs::create_dir_all(directory.join("src")).unwrap();
     std::fs::write(directory.join("app.php"), "<?php").unwrap();
     // Writes into its own inputs without declaring it
-    std::fs::write(directory.join("tenma.dev.php"), "<?php return [new Development\\Hook(inputs: ['src/*.txt'], name: 'loop', run: fn () => file_put_contents(__DIR__ . '/src/self.txt', microtime()))];").unwrap();
+    let hooks = serde_json::json!({"hooks": [{"name": "loop", "inputs": ["src/*.txt"], "run": ["sh", "-c", "echo $$ > src/self.txt"]}]});
+    std::fs::write(directory.join("tenma.json"), hooks.to_string()).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_tenma"))
         .args(["--watch", "app.php"])
         .current_dir(&directory)
@@ -2521,7 +2557,8 @@ fn watch_keeps_hook_roots_recursive_when_the_app_loads_from_them() {
         "<?php require __DIR__ . '/src/a.php'; echo \"loaded\\n\";",
     )
     .unwrap();
-    std::fs::write(directory.join("tenma.dev.php"), "<?php return [new Development\\Hook(inputs: ['src/**/*.txt'], name: 'txt', run: fn (array $changed) => print('changed ' . implode(',', array_map('basename', $changed)) . \"\\n\"))];").unwrap();
+    let hooks = serde_json::json!({"hooks": [{"name": "txt", "inputs": ["src/**/*.txt"], "run": ["sh", "-c", "ls src/sub"]}]});
+    std::fs::write(directory.join("tenma.json"), hooks.to_string()).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_tenma"))
         .args(["--watch", "app.php"])
         .current_dir(&directory)
@@ -2548,7 +2585,7 @@ fn watch_keeps_hook_roots_recursive_when_the_app_loads_from_them() {
     wait_for("loaded");
     std::thread::sleep(Duration::from_millis(300));
     std::fs::write(directory.join("src/sub/deep.txt"), "x").unwrap();
-    wait_for("changed deep.txt");
+    wait_for("[txt] deep.txt");
     let _ = std::fs::remove_dir_all(directory);
 }
 

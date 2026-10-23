@@ -5,7 +5,7 @@ namespace Tenma\Internal;
 /** Problems::report(): who publishes, and the project's directory for `tenma lsp`. */
 final class Diagnostics
 {
-    /** The script's workers ('app') or the hooks of tenma.dev.php ('dev'): --watch clears each on its reload */
+    /** The script's workers ('app') or the hooks of tenma.json ('dev'): --watch clears each on its reload */
     public static string $group = 'app';
 
     /** The nearest directory with a composer.json above $directory, or $directory itself. */

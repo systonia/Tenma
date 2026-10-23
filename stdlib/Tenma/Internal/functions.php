@@ -323,18 +323,17 @@ function milliseconds(float $seconds, int $minimum = 0): int
 }
 
 /**
- * Runs tenma.dev.php (src/dev.rs): checks the hooks it returns and orders them, then runs each
- * once and, with $watch, again whenever their inputs change. Without $watch (`tenma build`)
- * a failed hook makes tenma exit with 1.
+ * Runs the hooks of tenma.json in $directory (src/dev.rs, which checked $hooks): orders them,
+ * then runs each once and, with $watch, again whenever their inputs change. Without $watch
+ * (`tenma build`) a failed hook makes tenma exit with 1.
  */
-function dev(string $file, bool $watch): void
+function dev(string $directory, string $hooks, bool $watch): void
 {
-    Dev::$directory = dirname($file);
+    Dev::$directory = $directory;
     // What the hooks publish stays when the script reloads, and the other way round
     Diagnostics::$group = 'dev';
-    $list = require $file;
     try {
-        Dev::load($list);
+        Dev::load(json_decode($hooks, true, flags: JSON_THROW_ON_ERROR));
     } catch (DevError $error) {
         // A mistake in the list, not in code: the message is enough, no stack trace
         error_log('tenma: ' . $error->getMessage());
@@ -368,7 +367,7 @@ function diagnostics(string $source, array $list): void
     if (get_cfg_var('tenma.watch') !== '1') {
         return;
     }
-    // The hooks run without a script of their own (eval): their project is the one of tenma.dev.php, which is
+    // The hooks run without a script of their own (eval): their project is the one of tenma.json, which is
     // also where --watch clears their lists
     $script = $_SERVER['SCRIPT_FILENAME'] ?? null;
     $from = match (true) {

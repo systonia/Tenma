@@ -3,9 +3,10 @@
 //! request). A thread watches their directories, not the files: many editors save by writing a
 //! new file and renaming it over the old one. Only a different content counts as a change.
 //!
-//! The dev thread (tenma.dev.php, src/dev.rs) reports its files as well, and the directories its
-//! hooks read: changes there go to the hooks, which match them against their globs. `.tenma-ignore`
-//! next to tenma.dev.php leaves out what is no input (see Ignore).
+//! The dev thread (the hooks of tenma.json, src/dev.rs) reports its files as well (PHP hooks), and
+//! the directories its hooks read:
+//! changes there go to the hooks, which match them against their globs. `.git`, `node_modules`
+//! and `vendor` are no input (see IGNORED).
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -23,19 +24,19 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(1);
 
-/// Who loaded a file: the workers running the script, or the dev thread running tenma.dev.php.
+/// Who loaded a file: the workers running the script, or the dev thread running the hooks.
 const APP: u8 = 1;
 const DEV: u8 = 2;
 
 enum Message {
     /// A file PHP loaded, by whom, and the earliest time it may have been loaded.
     Loaded(PathBuf, u8, SystemTime),
-    /// Directories the hooks read, recursively or not, and the project with `.tenma-ignore`.
+    /// Directories the hooks read, recursively or not, and the project they belong to.
     Roots(Vec<(PathBuf, bool)>, PathBuf),
     Event(notify::Result<notify::Event>),
 }
 
-/// What changed once the writing settled: the first file of the script and of tenma.dev.php.
+/// What changed once the writing settled: the first file of the script and of the hooks.
 #[derive(Default)]
 pub struct Changes {
     pub app: Option<PathBuf>,
@@ -89,7 +90,7 @@ pub fn forget() {
     SINCE.set(SystemTime::now());
 }
 
-/// This thread runs tenma.dev.php: its files restart it, not the workers.
+/// This thread runs the hooks: its files restart it, not the workers.
 pub fn dev_thread() {
     GROUP.set(DEV);
 }
@@ -97,6 +98,13 @@ pub fn dev_thread() {
 /// The dev thread with --watch, as opposed to `tenma build`.
 pub fn is_dev_thread() -> bool {
     WATCHER.get().is_some() && GROUP.get() == DEV
+}
+
+/// The tenma.json with the hooks: a change reloads them.
+pub fn hooks_file(path: &Path) {
+    if let Some(watcher) = WATCHER.get() {
+        let _ = watcher.send(Message::Loaded(path.to_path_buf(), DEV, SystemTime::now()));
+    }
 }
 
 /// Watches the directories the hooks read. Changes still queued from the previous interpreter are
@@ -167,8 +175,8 @@ fn copy_path(reloaded: Option<&Path>, buffer: *mut u8, capacity: usize) -> usize
     bytes.len()
 }
 
-/// Removes the Problems::report() lists that `group` ("app": the script, "dev": tenma.dev.php) published in the
-/// project of `file`: when that group reloads, a fixed problem goes without its reporter clearing it, and what is
+/// Removes the Problems::report() lists that `group` ("app": the script, "dev": the hooks) published in
+/// the project of `file`: when that group reloads, a fixed problem goes without its reporter clearing it, and what is
 /// still wrong is published again. The stdlib finds the project the same way (Diagnostics::project).
 pub fn clear_diagnostics(file: &Path, group: &str) {
     let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
@@ -233,7 +241,7 @@ fn watch(
     // Directories that could not be watched (inotify's max_user_watches): reported once each
     let mut failed = HashSet::new();
     let mut roots: Vec<(PathBuf, bool)> = Vec::new();
-    let mut ignore = Ignore::default();
+    let mut project = PathBuf::new();
     let mut candidates = HashSet::new();
     // Since when events come, and until when to wait for more
     let mut settle: Option<(Instant, Instant)> = None;
@@ -276,16 +284,8 @@ fn watch(
                     }
                 }
             }
-            Ok(Message::Roots(new, project)) => {
-                // A changed .tenma-ignore reloads the hooks, like a file tenma.dev.php loaded
-                let file = project.join(IGNORE);
-                ignore = Ignore::read(&file, project);
-                if loaded.insert(file.clone(), DEV).is_none() {
-                    files.insert(file.clone(), fingerprint(&file));
-                    if let Some(directory) = file.parent() {
-                        watch_directory(&mut watcher, &mut directories, &mut failed, directory);
-                    }
-                }
+            Ok(Message::Roots(new, hooks_project)) => {
+                project = hooks_project;
                 for root in new {
                     if roots.contains(&root) {
                         continue;
@@ -296,7 +296,7 @@ fn watch(
                         notify::RecursiveMode::NonRecursive
                     };
                     // ponytail: a directory missing now is not watched once it appears; restart tenma
-                    // (or touch tenma.dev.php) after creating it. Upgrade: watch the nearest parent.
+                    // (or touch tenma.json) after creating it. Upgrade: watch the nearest parent.
                     if let Err(error) = watcher.watch(&root.0, mode) {
                         eprintln!(
                             "tenma: cannot watch {} for hooks: {error}",
@@ -325,7 +325,7 @@ fn watch(
                     }
                 }
                 for path in event.paths {
-                    if let Some(path) = relevant(&loaded, &roots, &ignore, path) {
+                    if let Some(path) = relevant(&loaded, &roots, &project, path) {
                         candidates.insert(path);
                         wait_for_more(&mut settle);
                     }
@@ -356,7 +356,7 @@ fn watch(
                     if groups & DEV != 0 {
                         batch.dev.get_or_insert(path.clone());
                     }
-                    if below(&roots, &path) && !ignore.ignored(&path) {
+                    if below(&roots, &path) && !ignored(&project, &path) {
                         let modified = std::fs::metadata(&path)
                             .and_then(|meta| meta.modified())
                             .ok();
@@ -429,11 +429,11 @@ fn below(roots: &[(PathBuf, bool)], path: &Path) -> bool {
 fn relevant(
     loaded: &HashMap<PathBuf, u8>,
     roots: &[(PathBuf, bool)],
-    ignore: &Ignore,
+    project: &Path,
     path: PathBuf,
 ) -> Option<PathBuf> {
     let wanted =
-        |path: &Path| loaded.contains_key(path) || (below(roots, path) && !ignore.ignored(path));
+        |path: &Path| loaded.contains_key(path) || (below(roots, path) && !ignored(project, path));
     if wanted(&path) {
         return Some(path);
     }
@@ -441,80 +441,17 @@ fn relevant(
     wanted(&resolved).then_some(resolved)
 }
 
-const IGNORE: &str = ".tenma-ignore";
+/// Below the hooks' directories but no input: a glob like `**/*.php` neither runs a hook for nor
+/// reads every file in `vendor/`.
+const IGNORED: [&str; 3] = [".git", "node_modules", "vendor"];
 
-/// `.tenma-ignore` next to tenma.dev.php: what below the hooks' directories is no input, so that
-/// a glob like `**/*.php` neither runs a hook for nor reads every file in `vendor/`. One entry per
-/// line, `#` starts a comment. An entry with a slash is a path in the project (`storage/cache`),
-/// one without matches any file or directory name (`node_modules`, `*.log`); `*` and `?` as in
-/// globs. Without the file: .git, node_modules and vendor.
-#[derive(Default)]
-struct Ignore {
-    project: PathBuf,
-    /// Components of a path in the project
-    paths: Vec<Vec<Vec<u8>>>,
-    names: Vec<Vec<u8>>,
-}
-
-impl Ignore {
-    fn read(file: &Path, project: PathBuf) -> Self {
-        let text = std::fs::read(file).unwrap_or_else(|_| b".git\nnode_modules\nvendor\n".to_vec());
-        let mut ignore = Ignore {
-            project,
-            ..Ignore::default()
-        };
-        for line in text.split(|&byte| byte == b'\n') {
-            let entry = line.trim_ascii();
-            if entry.is_empty() || entry.starts_with(b"#") {
-                continue;
-            }
-            let entry = entry.strip_suffix(b"/").unwrap_or(entry);
-            if entry.contains(&b'/') {
-                let entry = entry.strip_prefix(b"/").unwrap_or(entry);
-                ignore.paths.push(
-                    entry
-                        .split(|&byte| byte == b'/')
-                        .map(<[u8]>::to_vec)
-                        .collect(),
-                );
-            } else {
-                ignore.names.push(entry.to_vec());
-            }
-        }
-        ignore
-    }
-
-    fn ignored(&self, path: &Path) -> bool {
-        let Ok(relative) = path.strip_prefix(&self.project) else {
-            return false;
-        };
-        let parts: Vec<&[u8]> = relative.iter().map(|part| part.as_bytes()).collect();
-        parts
+/// A path in the project with an ignored directory or file name in it.
+fn ignored(project: &Path, path: &Path) -> bool {
+    path.strip_prefix(project).is_ok_and(|relative| {
+        relative
             .iter()
-            .any(|part| self.names.iter().any(|name| wildcard(name, part)))
-            || self.paths.iter().any(|entry| {
-                entry.len() <= parts.len()
-                    && entry
-                        .iter()
-                        .zip(&parts)
-                        .all(|(pattern, part)| wildcard(pattern, part))
-            })
-    }
-}
-
-/// `*` and `?` within a name.
-fn wildcard(pattern: &[u8], text: &[u8]) -> bool {
-    match (pattern.split_first(), text.split_first()) {
-        (None, None) => true,
-        (Some((b'*', rest)), _) => {
-            wildcard(rest, text) || (!text.is_empty() && wildcard(pattern, &text[1..]))
-        }
-        (Some((b'?', rest)), Some((_, text_rest))) => wildcard(rest, text_rest),
-        (Some((expected, rest)), Some((byte, text_rest))) => {
-            expected == byte && wildcard(rest, text_rest)
-        }
-        _ => false,
-    }
+            .any(|part| IGNORED.iter().any(|name| part == *name))
+    })
 }
 
 #[cfg(test)]
@@ -522,29 +459,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ignores_names_and_paths_in_the_project() {
-        let directory = std::env::temp_dir().join(format!("tenma-ignore-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let file = directory.join(IGNORE);
-        let defaults = Ignore::read(&file, "/p".into());
-        assert!(
-            defaults.ignored(Path::new("/p/vendor/a/b.php"))
-                && defaults.ignored(Path::new("/p/x/node_modules/y.js"))
-        );
-        assert!(
-            !defaults.ignored(Path::new("/p/src/a.php"))
-                && !defaults.ignored(Path::new("/elsewhere/vendor/a.php"))
-        );
-        std::fs::write(&file, "# own list\n*.log\n/storage/c?che/\n").unwrap();
-        let own = Ignore::read(&file, "/p".into());
-        assert!(
-            own.ignored(Path::new("/p/a/b.log")) && own.ignored(Path::new("/p/storage/cache/x"))
-        );
-        assert!(
-            !own.ignored(Path::new("/p/vendor/a.php"))
-                && !own.ignored(Path::new("/p/src/storage/cache/x"))
-        );
-        let _ = std::fs::remove_dir_all(directory);
+    fn ignores_git_node_modules_and_vendor_in_the_project() {
+        let project = Path::new("/p");
+        assert!(ignored(project, Path::new("/p/vendor/a/b.php")));
+        assert!(ignored(project, Path::new("/p/x/node_modules/y.js")));
+        assert!(!ignored(project, Path::new("/p/src/a.php")));
+        assert!(!ignored(project, Path::new("/elsewhere/vendor/a.php")));
     }
 
     #[test]

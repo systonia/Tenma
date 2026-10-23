@@ -3706,7 +3706,7 @@ PHP_FUNCTION(tenma_pubsub) {
         ZSTR_VAL(message), ZSTR_LEN(message)));
 }
 
-/** tenma_op_dev(string $op, string $arg): int. Starts an op for the hooks of tenma.dev.php (src/dev.rs). */
+/** tenma_op_dev(string $op, string $arg): int. Starts an op for the hooks of tenma.json (src/dev.rs). */
 PHP_FUNCTION(tenma_op_dev) {
     zend_string *op, *arg;
     ZEND_PARSE_PARAMETERS_START(2, 2)

@@ -31,7 +31,7 @@ Rust:
 | `src/tls.rs`     | `--tls-cert`, `--tls-key` and `--tls-port`: the TLS handshake and ALPN (HTTP/2 or HTTP/1.1), SIGHUP reloads the certificate |
 | `src/streams.rs` | streamed responses and WebSockets                                                                                           |
 | `src/watch.rs`   | `--watch`: which loaded files really changed (content, not timestamps)                                                      |
-| `src/dev.rs`     | the hooks of `tenma.dev.php`                                                                                                |
+| `src/dev.rs`     | the hooks of `tenma.json`                                                                                                   |
 | `src/inspect.rs` | `--inspect`: the debugger, stops a worker inside PHP's statement handler                                                    |
 | `src/journal.rs` | `--record`: the event journal of a worker life, its format, and the values of the wrapped PHP functions                     |
 | `src/replay.rs`  | `tenma replay`: plays a journal into a fresh interpreter, answers every op from it, checks responses                        |

@@ -50,7 +50,7 @@ composer require --dev tenma/stubs
 
 ```
 tenma [options] <script.php> [arguments …]
-tenma build [tenma.dev.php]          # run the build hooks once
+tenma build [tenma.json]             # run the build hooks once
 tenma lsp                            # language server for editors
 tenma docs [<path>...] [--out <dir>] # Markdown reference pages
 tenma --stubs [DIR]                  # the PHP API as stubs
@@ -82,7 +82,7 @@ Everything after the script goes to the script's `$argv`.
 | `--server-name NAME`        | `localhost`                     | `$_SERVER['SERVER_NAME']` in classic mode                      |
 | `-d name=value`             |                                 | a PHP setting, as with `php -d`                                |
 | `-c FILE\|DIR`              |                                 | a `php.ini`, as with `php -c`                                  |
-| `--watch`                   |                                 | reload on changes, run the hooks of `tenma.dev.php`            |
+| `--watch`                   |                                 | reload on changes, run the hooks of `tenma.json`               |
 | `--inspect[=[HOST:]PORT]`   | `127.0.0.1:9229`                | the debugger; also `--inspect-wait` and `--inspect-brk`        |
 
 More in [Command line and deployment](docs/guides/deployment.md).

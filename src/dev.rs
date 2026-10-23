@@ -1,6 +1,6 @@
-//! The hooks of tenma.dev.php (`tenma --watch`, `tenma build`). The stdlib keeps the hook list,
-//! its order and the PHP closures (`Tenma\Internal\dev`); Rust watches the hooks' directories,
-//! delivers the changes and runs command hooks as processes of their own.
+//! The hooks of tenma.json (`tenma --watch`, `tenma build`). Rust checks the list, watches the
+//! hooks' directories, delivers the changes and runs command hooks as processes of their own; the
+//! stdlib orders the hooks, decides which run and calls the PHP ones (`Tenma\Internal\dev`).
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -12,30 +12,82 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use crate::ops;
 use crate::php::{OpResult, bytes};
 
-/// The name of the dev script, next to the app script.
-pub const FILE: &str = "tenma.dev.php";
+/// The file `tenma build` reads by default.
+pub const FILE: &str = "tenma.json";
+/// The key of the hooks in tenma.json.
+pub const KEY: &str = "hooks";
 
 /// Signals once the hooks' first run is over (or the dev script failed): the workers start after
 /// it, so the first request already finds the hooks' output.
 static SETTLED: OnceLock<mpsc::Sender<()>> = OnceLock::new();
 
-/// The tenma.dev.php next to the script, if there is one.
-pub fn find(script: &str) -> Option<PathBuf> {
-    let directory = Path::new(script).parent()?;
-    let directory = if directory.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        directory
-    };
-    directory.join(FILE).canonicalize().ok()
+/// Whether the tenma.json at `path` lists hooks.
+pub fn has_hooks(path: &Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|text| serde_json::from_slice::<serde_json::Value>(&text).ok())
+        .is_some_and(|config| config.get(KEY).is_some())
 }
 
-/// PHP code that runs the dev script: `watch` keeps it running and waiting for changes.
-pub fn code(path: &Path, watch: bool) -> String {
-    let quoted = String::from_utf8_lossy(path.as_os_str().as_bytes())
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'");
-    format!("\\Tenma\\Internal\\dev('{quoted}', {watch});")
+/// Checks the hooks of a tenma.json: a list of objects with `inputs`, either `run` (a command) or
+/// `php` (a file returning a callable), and optionally `outputs` and `name`.
+pub fn check(hooks: &serde_json::Value) -> Result<(), String> {
+    let list = hooks.as_array().ok_or("hooks: a list")?;
+    for (index, hook) in list.iter().enumerate() {
+        let at = format!("hooks[{index}]");
+        let hook = hook
+            .as_object()
+            .ok_or(format!("{at}: an object with inputs and run or php"))?;
+        for (key, value) in hook {
+            let (fine, wanted) = match key.as_str() {
+                "inputs" | "outputs" => (strings(value), "a list of strings"),
+                "run" => (
+                    strings(value) && value.as_array().is_some_and(|run| !run.is_empty()),
+                    "the program and its arguments, a non-empty list of strings",
+                ),
+                "php" | "name" => (value.is_string(), "a string"),
+                _ => return Err(format!("{at}: unknown key {key}")),
+            };
+            if !fine {
+                return Err(format!("{at}: {key}: {wanted}"));
+            }
+        }
+        if !hook.contains_key("inputs") {
+            return Err(format!("{at}: inputs is missing"));
+        }
+        if hook.contains_key("run") == hook.contains_key("php") {
+            return Err(format!("{at}: either run (a command) or php (a file)"));
+        }
+    }
+    Ok(())
+}
+
+fn strings(value: &serde_json::Value) -> bool {
+    value
+        .as_array()
+        .is_some_and(|items| items.iter().all(serde_json::Value::is_string))
+}
+
+/// PHP code that runs the hooks of the tenma.json at `path`: `watch` keeps it running and waiting
+/// for changes.
+pub fn code(path: &Path, watch: bool) -> Result<String, String> {
+    let shown = path.display();
+    let text = std::fs::read_to_string(path).map_err(|error| format!("{shown}: {error}"))?;
+    let config: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("{shown}: {error}"))?;
+    let hooks = config.get(KEY).cloned().unwrap_or(serde_json::json!([]));
+    check(&hooks).map_err(|message| format!("{shown}: {message}"))?;
+    let directory = path.parent().unwrap_or(Path::new("."));
+    Ok(format!(
+        "\\Tenma\\Internal\\dev({}, {}, {watch});",
+        quoted(&directory.to_string_lossy()),
+        quoted(&hooks.to_string())
+    ))
+}
+
+/// A single-quoted PHP string.
+fn quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 /// A receiver that hears once the first run of the hooks is over.
@@ -61,7 +113,7 @@ fn string(value: &serde_json::Value) -> String {
     value.as_str().unwrap_or_default().to_owned()
 }
 
-/// exit() in a hook with --watch: tenma ends with EXIT_STATUS. Apart from php::EXIT, which the
+/// exit() in a PHP hook with --watch: tenma ends with EXIT_STATUS. Apart from php::EXIT, which the
 /// workers wait on for exit() in the script.
 pub static EXIT: std::sync::LazyLock<tokio::sync::Notify> =
     std::sync::LazyLock::new(tokio::sync::Notify::new);
@@ -84,7 +136,7 @@ const OUTPUT_AFTER_EXIT: Duration = Duration::from_millis(100);
 
 #[unsafe(no_mangle)]
 extern "C" fn tenma_rs_dev(op: *const u8, op_len: usize, arg: *const u8, arg_len: usize) -> u64 {
-    // Hooks load classes as they run (autoloader): those files reload the hooks too
+    // PHP hooks load their file and classes as they run (autoloader): those files reload the hooks too
     crate::watch::report();
     let arg = bytes(arg, arg_len).to_vec();
     match bytes(op, op_len) {

@@ -31,7 +31,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -47,7 +47,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
-const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--durable postgres://URL] [--plugin FILE] [--config tenma.json] [--stop-timeout SECONDS] [--record DIR [--record-on error] [--record-max-size SIZE] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.dev.php]   (runs the hooks of tenma.dev.php once)\n       tenma check [script.php|tenma.json]   (checks the options and plugins of tenma.json without starting)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N | --request N] [--check]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma replay FILE --list   (the requests of a journal, numbered for --request)\n       tenma --version";
+const USAGE: &str = "Usage: tenma [--watch] [--inspect[-wait|-brk][=[HOST:]PORT]] [--workers N|auto] [--max-body SIZE] [--max-requests N] [--db-pool N] [-d name=value] [-c php.ini] [--server-name NAME] [--request-timeout SECONDS] [--max-connections N] [--pubsub redis://HOST] [--pdo-pgsql native] [--durable postgres://URL] [--plugin FILE] [--config tenma.json] [--stop-timeout SECONDS] [--record DIR [--record-on error] [--record-max-size SIZE] [--record-max-body SIZE] [--record-redact HEADER,...]] [--tls-cert FILE --tls-key FILE [--tls-port N]] <script.php> [arguments …]\n       tenma build [tenma.json]   (runs the hooks of tenma.json once)\n       tenma check [script.php|tenma.json]   (checks the options, hooks and plugins of tenma.json without starting)\n       tenma --stubs [DIR]   (the PHP API as stubs for IDEs and PHPStan; with DIR one file per class)\n       tenma lsp   (the language server for editors, on stdin and stdout)\n       tenma docs [<path>...] [--out <dir>]   (Markdown reference pages for PHP classes and functions; without paths for Tenma's API)\n       tenma replay FILE [--until N | --request N] [--check]   (plays a recorded journal into a fresh interpreter, without I/O)\n       tenma replay FILE --list   (the requests of a journal, numbered for --request)\n       tenma --version";
 /// How long running requests may take to finish on shutdown or restart.
 const DRAIN: Duration = Duration::from_secs(10);
 /// With --watch: an open SSE or WebSocket connection should not hold up every reload for 10 s.
@@ -559,9 +559,13 @@ fn check() -> ExitCode {
     }
 }
 
+/// The tenma.json the script got, if any: its hooks run with --watch.
+static CONFIG: OnceLock<std::path::PathBuf> = OnceLock::new();
+
 /// The options of tenma.json (next to the script, or `--config FILE`) put in front of the command line
 /// as arguments: the command line wins for single values, lists add up. Keys are the long option
 /// names; `plugins` and `d` take lists, `tls-port` too. Paths in the file count from its directory.
+/// `hooks` are no option: they are checked here and run with --watch (src/dev.rs).
 fn with_config(given: &[String]) -> Result<Vec<String>, String> {
     let mut file = None;
     let mut script = None;
@@ -600,6 +604,7 @@ fn with_config(given: &[String]) -> Result<Vec<String>, String> {
         }
         _ => return Ok(given.to_vec()),
     };
+    let _ = CONFIG.set(path.clone());
     let text =
         std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     let config: serde_json::Map<String, serde_json::Value> =
@@ -657,6 +662,9 @@ fn with_config(given: &[String]) -> Result<Vec<String>, String> {
             | "record-redact" | "stop-timeout" => {
                 front.push(option);
                 front.push(scalar(value)?);
+            }
+            dev::KEY => {
+                dev::check(value).map_err(|message| format!("{}: {message}", path.display()))?
             }
             "watch" => {
                 if value.as_bool() == Some(true) {
@@ -737,7 +745,11 @@ fn run(argv: &[String], options: Options) -> u8 {
         None
     };
     let script = std::path::PathBuf::from(&argv[0]);
-    let dev_file = changes.as_ref().and(dev::find(&argv[0]));
+    let dev_file = changes
+        .as_ref()
+        .and(CONFIG.get())
+        .and_then(|path| path.canonicalize().ok())
+        .filter(|path| dev::has_hooks(path));
     // What the last run published is stale: the script and the hooks publish again what is still wrong
     if changes.is_some() {
         watch::clear_diagnostics(&script, "app");
@@ -745,8 +757,9 @@ fn run(argv: &[String], options: Options) -> u8 {
     if let Some(path) = &dev_file {
         watch::clear_diagnostics(path, "dev");
     }
-    // tenma.dev.php first: the first request should find what its hooks write
+    // The hooks first: the first request should find what they write
     let dev_worker = dev_file.clone().map(|path| {
+        watch::hooks_file(&path);
         let settled = dev::settled_receiver();
         let (worker, ready) = spawn_worker(
             &[path.to_string_lossy().into_owned()],
@@ -891,7 +904,7 @@ fn replay_journal(args: &[String], mut options: Options) -> u8 {
     status
 }
 
-/// `tenma build`: runs the hooks of tenma.dev.php once, in order; 1 if one fails.
+/// `tenma build`: runs the hooks of a tenma.json once, in order; 1 if one fails.
 fn build(path: &str, options: Options) -> u8 {
     let Ok(path) = std::path::Path::new(path).canonicalize() else {
         eprintln!("tenma: {path} not found");
@@ -933,7 +946,7 @@ fn stop_workers(workers: Vec<Worker>) {
 
 /// Starts a worker thread and waits until its script has run.
 /// `ports`: those the main thread listens on, None for the first worker, which determines them.
-/// `dev`: the worker runs tenma.dev.php, `argv[0]`.
+/// `dev`: the worker runs the hooks of the tenma.json `argv[0]`.
 fn spawn_worker(
     argv: &[String],
     options: Options,
@@ -1091,7 +1104,7 @@ fn worker(
                             if options.watch {
                                 if dev {
                                     eprintln!(
-                                        "tenma: hooks stopped, waiting for a change to tenma.dev.php"
+                                        "tenma: hooks stopped, waiting for a change to tenma.json"
                                     );
                                 } else {
                                     eprintln!(
@@ -1119,7 +1132,7 @@ fn worker(
                     ports.get_or_insert_with(BTreeSet::new);
                     eprintln!(
                         "tenma: {} failed, waiting for changes",
-                        if dev { "tenma.dev.php" } else { "script" }
+                        if dev { "hooks" } else { "script" }
                     );
                     Stop::Wait
                 } else if first {
@@ -1312,17 +1325,15 @@ fn replay_run(options: Options) -> u8 {
     if options.replay.is_none() { 1 } else { status }
 }
 
-/// Loads the standard library and the script (or tenma.dev.php) into this thread's PHP interpreter.
+/// Loads the standard library and the script (or the hooks of tenma.json) into this thread's PHP interpreter.
 fn load(argv: &[String], dev: bool, options: Options) -> Result<Vec<php::Listener>, u8> {
     if let Err(message) = stdlib::load(None) {
         eprintln!("tenma: {message}");
         return Err(1);
     }
     if dev {
-        return match php::eval(
-            &dev::code(std::path::Path::new(&argv[0]), options.watch),
-            "tenma:dev",
-        ) {
+        let code = dev::code(std::path::Path::new(&argv[0]), options.watch);
+        return match code.and_then(|code| php::eval(&code, "tenma:dev")) {
             Ok(()) => Ok(Vec::new()),
             Err(message) => {
                 eprintln!("tenma: {message}");
