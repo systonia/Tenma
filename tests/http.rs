@@ -4600,6 +4600,27 @@ fn echo_plugin() -> std::path::PathBuf {
 }
 
 #[test]
+fn native_plugins_shut_down_after_a_script_without_servers() {
+    let plugin = echo_plugin();
+    let directory = scratch("plugin-script");
+    let log = directory.join("shutdown.log");
+    let script = directory.join("script.php");
+    std::fs::write(&script, "<?php echo \"no server\\n\";").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tenma"))
+        .args([
+            "--plugin",
+            plugin.to_str().unwrap(),
+            script.to_str().unwrap(),
+        ])
+        .env("ECHO_SHUTDOWN_FILE", &log)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "no server\n");
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "plugin shut down\n");
+}
+
+#[test]
 fn native_plugins_answer_calls_adopt_sockets_and_shut_down() {
     let port = 18_191;
     let plugin = echo_plugin();

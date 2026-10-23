@@ -212,6 +212,8 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let status = run(&argv, options);
+    // Here and not in run(): a script without servers and a failed start end there early
+    plugins::shutdown();
     php::stop();
     ExitCode::from(status)
 }
@@ -803,7 +805,6 @@ fn run(argv: &[String], options: Options) -> u8 {
     inspect::release();
     workers.extend(dev_worker);
     stop_workers(workers);
-    plugins::shutdown();
     dev::exit_status().or(php::exit_status()).unwrap_or(0)
 }
 

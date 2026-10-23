@@ -104,6 +104,9 @@ all workers together: after it tenma logs that some had not finished and goes on
 skips the rest and stops at once. The handlers are useful without plugins too: flush a queue, close a
 connection pool cleanly.
 
+A script that starts no server calls every plugin's `shutdown()` too, when it ends; so does a start
+that fails.
+
 ## Behaviour
 
 - Every plugin name is unique; the same library given twice loads once.
